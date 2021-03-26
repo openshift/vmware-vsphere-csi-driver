@@ -1,0 +1,12 @@
+FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.16-openshift-4.8 AS builder
+WORKDIR /go/src/github.com/kubernetes-sigs/vsphere-csi-driver
+COPY . .
+RUN make build # TODO: build only driver
+
+# Upstream recommends installing these packages: nfs-utils, util-linux and e2fsprogs
+FROM registry.ci.openshift.org/ocp/4.8:base
+RUN yum update -y && \
+    yum install --setopt=tsflags=nodocs -y xfsprogs e2fsprogs util-linux nfs-utils && \
+    yum clean all && rm -rf /var/cache/yum/*
+COPY --from=builder /go/src/github.com/kubernetes-sigs/vsphere-csi-driver/.build/bin/vsphere-csi.linux_amd64  /usr/bin/vmware-vsphere-csi-driver
+ENTRYPOINT ["/usr/bin/vmware-vsphere-csi-driver"]
