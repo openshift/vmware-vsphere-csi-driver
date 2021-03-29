@@ -3,7 +3,7 @@ all: build
 # Get the absolute path and name of the current directory.
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
-
+GOFLAGS := -mod=vendor
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
 
@@ -198,7 +198,6 @@ deploy: | $(DOCKER_SOCK)
 ################################################################################
 .PHONY: clean
 clean:
-	@rm -f Dockerfile*
 	rm -f $(CSI_BIN) vsphere-csi-*.tar.gz vsphere-csi-*.zip \
 		$(SYNCER_BIN) vsphere-syncer-*.tar.gz vsphere-syncer-*.zip \
 		image-*.tar image-*.d $(DIST_OUT)/* $(BIN_OUT)/*
