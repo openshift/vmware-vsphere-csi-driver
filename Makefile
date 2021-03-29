@@ -3,7 +3,7 @@ all: build
 # Get the absolute path and name of the current directory.
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
-GOFLAGS := -mod=vendor
+GOFLAGS_VENDOR := -mod=vendor
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
 
@@ -92,7 +92,7 @@ CSI_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./c
 export CSI_BIN_SRCS
 endif
 $(CSI_BIN): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(abspath $@) $<
 	@touch $@
 
 # The cnsctl binary.
@@ -105,7 +105,7 @@ CNSCTL_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' 
 export CNSCTL_BIN_SRCS
 endif
 $(CNSCTL_BIN): $(CNSCTL_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
 	@touch $@
 
 # The Syncer binary.
@@ -138,7 +138,7 @@ CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
 $(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
 # The default build target.
