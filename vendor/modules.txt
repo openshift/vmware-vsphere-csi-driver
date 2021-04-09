@@ -85,7 +85,7 @@ github.com/google/go-cmp/cmp/internal/function
 github.com/google/go-cmp/cmp/internal/value
 # github.com/google/gofuzz v1.1.0
 github.com/google/gofuzz
-# github.com/google/uuid v1.1.1
+# github.com/google/uuid v1.2.0
 ## explicit
 github.com/google/uuid
 # github.com/googleapis/gnostic v0.3.1 => github.com/googleapis/gnostic v0.4.0
@@ -141,7 +141,7 @@ github.com/nxadm/tail/ratelimiter
 github.com/nxadm/tail/util
 github.com/nxadm/tail/watch
 github.com/nxadm/tail/winfile
-# github.com/onsi/ginkgo v1.14.1
+# github.com/onsi/ginkgo v1.15.0
 ## explicit
 github.com/onsi/ginkgo
 github.com/onsi/ginkgo/config
@@ -162,7 +162,7 @@ github.com/onsi/ginkgo/reporters/stenographer
 github.com/onsi/ginkgo/reporters/stenographer/support/go-colorable
 github.com/onsi/ginkgo/reporters/stenographer/support/go-isatty
 github.com/onsi/ginkgo/types
-# github.com/onsi/gomega v1.10.1
+# github.com/onsi/gomega v1.10.5
 ## explicit
 github.com/onsi/gomega
 github.com/onsi/gomega/format
@@ -203,7 +203,7 @@ github.com/prometheus/common/model
 github.com/prometheus/procfs
 github.com/prometheus/procfs/internal/fs
 github.com/prometheus/procfs/internal/util
-# github.com/rexray/gocsi v1.2.1
+# github.com/rexray/gocsi v1.2.2
 ## explicit
 github.com/rexray/gocsi
 github.com/rexray/gocsi/context
@@ -221,14 +221,14 @@ github.com/spf13/afero
 github.com/spf13/afero/mem
 # github.com/spf13/cast v1.3.0
 github.com/spf13/cast
-# github.com/spf13/cobra v1.1.1
+# github.com/spf13/cobra v1.1.3
 ## explicit
 github.com/spf13/cobra
 # github.com/spf13/jwalterweatherman v1.1.0
 github.com/spf13/jwalterweatherman
 # github.com/spf13/pflag v1.0.5
 github.com/spf13/pflag
-# github.com/spf13/viper v1.7.0
+# github.com/spf13/viper v1.7.1
 ## explicit
 github.com/spf13/viper
 # github.com/stretchr/testify v1.6.1
@@ -242,7 +242,7 @@ github.com/subosito/gotenv
 # github.com/vmware-tanzu/vm-operator-api v0.1.3
 ## explicit
 github.com/vmware-tanzu/vm-operator-api/api/v1alpha1
-# github.com/vmware/govmomi v0.24.1-0.20210127152625-854ba4efe87e
+# github.com/vmware/govmomi v0.24.1
 ## explicit
 github.com/vmware/govmomi
 github.com/vmware/govmomi/cns
@@ -311,7 +311,7 @@ go.etcd.io/etcd/raft/tracker
 go.uber.org/atomic
 # go.uber.org/multierr v1.5.0
 go.uber.org/multierr
-# go.uber.org/zap v1.15.0
+# go.uber.org/zap v1.16.0
 ## explicit
 go.uber.org/zap
 go.uber.org/zap/buffer
@@ -334,7 +334,7 @@ golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
 golang.org/x/crypto/ssh/terminal
 # golang.org/x/lint v0.0.0-20201208152925-83fdc39ff7b5
 ## explicit
-# golang.org/x/net v0.0.0-20201021035429-f5854403a974
+# golang.org/x/net v0.0.0-20201202161906-c7110b5ffcbb
 ## explicit
 golang.org/x/net/context
 golang.org/x/net/context/ctxhttp
@@ -383,9 +383,6 @@ golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
 # golang.org/x/time v0.0.0-20191024005414-555d28b269f0
 golang.org/x/time/rate
-# golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1
-golang.org/x/xerrors
-golang.org/x/xerrors/internal
 # gomodules.xyz/jsonpatch/v2 v2.0.1
 gomodules.xyz/jsonpatch/v2
 # google.golang.org/appengine v1.6.6
@@ -495,12 +492,12 @@ gopkg.in/square/go-jose.v2/jwt
 gopkg.in/tomb.v1
 # gopkg.in/warnings.v0 v0.1.2
 gopkg.in/warnings.v0
-# gopkg.in/yaml.v2 v2.3.0
+# gopkg.in/yaml.v2 v2.4.0
 gopkg.in/yaml.v2
 # gopkg.in/yaml.v3 v3.0.0-20200605160147-a5ece683394c
 ## explicit
 gopkg.in/yaml.v3
-# honnef.co/go/tools v0.1.2
+# honnef.co/go/tools v0.1.3
 ## explicit
 # k8s.io/api v0.18.5 => k8s.io/api v0.18.5
 ## explicit
