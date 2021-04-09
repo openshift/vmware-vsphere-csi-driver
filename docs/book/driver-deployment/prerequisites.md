@@ -21,7 +21,7 @@ The following roles need to be created with sets of privileges.
 
 | Role                    | Privileges for the role                                                                                                                                                                                                                                                                                         | Required on                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 |-------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| CNS-DATASTORE           | ![ROLE-CNS-DATASTORE](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/ROLE-CNS-DATASTORE.png)<br><pre lang="bash">govc role.ls CNS-DATASTORE<br>Datastore.FileManagement<br>System.Anonymous<br>System.Read<br>System.View<br></pre>                                    | Shared datastores where persistent volumes need to be provisioned.                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| CNS-DATASTORE           | ![ROLE-CNS-DATASTORE](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/ROLE-CNS-DATASTORE.png)<br><pre lang="bash">govc role.ls CNS-DATASTORE<br>Datastore.FileManagement<br>System.Anonymous<br>System.Read<br>System.View<br></pre>                                    | Shared datastores where persistent volumes need to be provisioned.<br><br>Note: Before CSI v2.2.0, we require all shared datastores to have Datastore.FileManagement privilege. From CSI v2.2.0, this requirement has been relaxed. We do not require all shared datastores to have Datastore.FileManagement privilege. CSI will skip those shared datastores which do not have Datastore.FileManagement privilege during volume provisioning and not provisioning volume on those datastores.                                                                                                                                                                                                                                                                                                                                                                                  |
 | CNS-HOST-CONFIG-STORAGE | ![ROLE-CNS-HOST-CONFIG-STORAGE](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/ROLE-CNS-HOST-CONFIG-STORAGE.png)<br><pre lang="bash">% govc role.ls CNS-HOST-CONFIG-STORAGE<br>Host.Config.Storage<br>System.Anonymous<br>System.Read<br>System.View<br></pre>         | Required on vSAN file service enabled vSAN cluster. Required for file volume only.                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | CNS-VM                  | ![ROLE-CNS-VM](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/ROLE-CNS-VM.png)<br><pre lang="bash">% govc role.ls CNS-VM<br>System.Anonymous<br>System.Read<br>System.View<br>VirtualMachine.Config.AddExistingDisk<br>VirtualMachine.Config.AddRemoveDevice<br></pre> | All node VMs.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | CNS-SEARCH-AND-SPBM     | ![ROLE-CNS-SEARCH-AND-SPBM](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/ROLE-CNS-SEARCH-AND-SPBM.png)<br><pre lang="bash">% govc role.ls CNS-SEARCH-AND-SPBM<br>Cns.Searchable<br>StorageProfile.View<br>System.Anonymous<br>System.Read<br>System.View<br></pre>   | Root vCenter Server.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -120,7 +120,7 @@ The VMs can also be configured by using the `govc` command-line tool.
     ```bash
     govc vm.change -vm '/<datacenter-name>/vm/<vm-name1>' -e="disk.enableUUID=1"
     ```
-  
+
 - Upgrade VM hardware version of node VMs to 15 or higher.
 
   Run the below command for all Node VMs that are part of the Kubernetes cluster.
@@ -135,100 +135,73 @@ Follow the steps described under “Install the vSphere Cloud Provider Interface
 
 Installation steps for vSphere CPI is briefly described here
 
-1. Create a cloud-config configmap of vSphere configuration
+Step-1: Taint nodes.
 
-    Here is an example configuration file with dummy values:
+Before installing CPI, verify all nodes (including master nodes) are tainted with "node.cloudprovider.kubernetes.io/uninitialized=true:NoSchedule".
 
-    ```bash
-    tee /etc/kubernetes/vsphere.conf >/dev/null <<EOF
-    [Global]
-    insecure-flag = "true"
+To taint nodes use following command
 
-    [VirtualCenter "IP or FQDN"]
-    user = "username@vsphere.local"
-    password = "password"
-    port = "port"
-    datacenters = "<datacenter1-path>, <datacenter2-path>, ..."
+```bash
+kubectl taint node <node-name> node.cloudprovider.kubernetes.io/uninitialized=true:NoSchedule
+```
 
-    EOF
-    ```
+When the kubelet is started with an “external” cloud provider, this taint is set on a node to mark it as unusable. After a controller from the cloud-controller-manager initializes this node, the kubelet removes this taint.
 
-    ```bash
-    cd /etc/kubernetes
-    kubectl create configmap cloud-config --from-file=vsphere.conf --namespace=kube-system
-    ```
+Step-2: Create a cloud-config configmap of vSphere configuration. Note: This is used for CPI. There is separate secret required for vSphere CSI driver. Here is an example configuration file with dummy values:
 
-    ```bash
-    kubectl get configmap cloud-config --namespace=kube-system
-    NAME           DATA   AGE
-    cloud-config   1      82s
-    ```
+```bash
+tee /etc/kubernetes/vsphere.conf >/dev/null <<EOF
+[Global]
+insecure-flag = "true"
 
-   Remove vsphere.conf file created at /etc/kubernetes/
+[VirtualCenter "IP or FQDN"]
+user = "username@vsphere.local"
+password = "password"
+port = "port"
+datacenters = "<datacenter1-path>, <datacenter2-path>, ..."
 
-    ```bash
-    rm -rf /etc/kubernetes/vsphere.conf
-    ```
+EOF
+```
 
-2. Install CPI.
+Here in vsphere.conf file,
 
-   1. Taint nodes.
-  
-       Before installing CPI, verify all nodes (including master nodes) are tainted with "node.cloudprovider.kubernetes.io/uninitialized=true:NoSchedule".
+- `insecure-flag` - should be set to true to use self-signed certificate for login.
+- `VirtualCenter` - section defines vCenter IP address / FQDN.
+- `user` - vCenter username.
+- `password` - password for vCenter user specified with user.
+- `port` - vCenter Server Port.
+- `datacenters` - list of all comma separated datacenter paths where kubernetes node VMs are present. When datacenter is located at the root, the name of datacenter is enough but when datacenter is placed in the folder, path needs to be specified as folder/datacenter-name. Please note since comma is used as a delimiter, the datacenter name itself must not contain a comma.
 
-       To taint nodes use following command
+```bash
+cd /etc/kubernetes
+kubectl create configmap cloud-config --from-file=vsphere.conf --namespace=kube-system
+```
 
-        ```bash
-        kubectl taint node <node-name> node.cloudprovider.kubernetes.io/uninitialized=true:NoSchedule
-        ```
+```bash
+kubectl get configmap cloud-config --namespace=kube-system
+NAME           DATA   AGE
+cloud-config   1      82s
+```
 
-        When the kubelet is started with an “external” cloud provider, this taint is set on a node to mark it as unusable. After a controller from the cloud-controller-manager initializes this node, the kubelet removes this taint.
+Remove vsphere.conf file created at /etc/kubernetes/
 
-   2. Create a cloud-config configmap of vSphere configuration. Note: This is used for CPI. There is separate secret required for vSphere CSI driver.
+Step-3: Create Roles, Roles Bindings, Service Account, Service and cloud-controller-manager Pod.
 
-      - Here is an example configuration file with dummy values:
+```bash
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/cloud-provider-vsphere/master/manifests/controller-manager/cloud-controller-manager-roles.yaml
+kubectl apply -f https://raw.githubusercontent.com/kubernetes/cloud-provider-vsphere/master/manifests/controller-manager/cloud-controller-manager-role-bindings.yaml
+kubectl apply -f https://github.com/kubernetes/cloud-provider-vsphere/raw/master/manifests/controller-manager/vsphere-cloud-controller-manager-ds.yaml
+```
 
-          ```bash
-          tee /etc/kubernetes/vsphere.conf >/dev/null <<EOF
-          [Global]
-          insecure-flag = "true"
+Step-4: Verify `ProviderID` is set for all nodes.
 
-          [VirtualCenter "IP or FQDN"]
-          user = "username@vsphere.local"
-          password = "password"
-          port = "port"
-          datacenters = "<datacenter1-path>, <datacenter2-path>, ..."
+```bash
+kubectl describe nodes | grep "ProviderID"
+ProviderID: vsphere://<provider-id1>
+ProviderID: vsphere://<provider-id2>
+ProviderID: vsphere://<provider-id3>
+ProviderID: vsphere://<provider-id4>
+ProviderID: vsphere://<provider-id5>
+```
 
-          EOF
-          ```
-
-        Here in vsphere.conf file,
-
-          - `insecure-flag` - should be set to true to use self-signed certificate for login.
-          - `VirtualCenter` - section defines vCenter IP address / FQDN.
-          - `user` - vCenter username.
-          - `password` - password for vCenter user specified with user.
-          - `port` - vCenter Server Port.
-          - `datacenters` - list of all comma separated datacenter paths where kubernetes node VMs are present. When datacenter is located at the root, the name of datacenter is enough but when datacenter is placed in the folder, path needs to be specified as folder/datacenter-name. Please note since comma is used as a delimiter, the datacenter name itself must not contain a comma.
-
-   3. Create Roles, Roles Bindings, Service Account, Service and cloud-controller-manager Pod.
-
-      ```bash
-      kubectl apply -f https://raw.githubusercontent.com/kubernetes/cloud-provider-vsphere/master/manifests/controller-manager/cloud-controller-manager-roles.yaml
-      kubectl apply -f https://raw.githubusercontent.com/kubernetes/cloud-provider-vsphere/master/manifests/controller-manager/cloud-controller-manager-role-bindings.yaml
-      kubectl apply -f https://github.com/kubernetes/cloud-provider-vsphere/raw/master/manifests/controller-manager/vsphere-cloud-controller-manager-ds.yaml
-      ```
-
-   4. Verify `ProviderID` is set for all nodes.
-
-      ```bash
-      $ kubectl describe nodes | grep "ProviderID"
-      ProviderID: vsphere://<provider-id1>
-      ProviderID: vsphere://<provider-id2>
-      ProviderID: vsphere://<provider-id3>
-      ProviderID: vsphere://<provider-id4>
-      ProviderID: vsphere://<provider-id5>
-      ```
-
-      vSphere CSI driver needs the `ProviderID` field to be set for all nodes.
-  
+vSphere CSI driver needs the `ProviderID` field to be set for all nodes.

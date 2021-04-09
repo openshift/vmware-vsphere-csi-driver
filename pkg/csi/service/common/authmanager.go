@@ -46,6 +46,9 @@ type AuthorizationService interface {
 	// GetDatastoreMapForFileVolumes returns a map of datastore URL to datastore info for only those
 	// datastores the CSI VC user has Host.Config.Storage privilege on vSAN cluster with vSAN FS enabled.
 	GetDatastoreMapForFileVolumes(ctx context.Context) map[string]*cnsvsphere.DatastoreInfo
+
+	// ResetvCenterInstance sets new vCenter instance for AuthorizationService
+	ResetvCenterInstance(ctx context.Context, vCenter *cnsvsphere.VirtualCenter)
 }
 
 // AuthManager maintains an internal map to track the datastores that need to be used by create volume
@@ -106,6 +109,13 @@ func (authManager *AuthManager) GetDatastoreMapForFileVolumes(ctx context.Contex
 		datastoreMapForFileVolumes[dsURL] = dsInfo
 	}
 	return datastoreMapForFileVolumes
+}
+
+// ResetvCenterInstance sets new vCenter instance for AuthorizationService
+func (authManager *AuthManager) ResetvCenterInstance(ctx context.Context, vCenter *cnsvsphere.VirtualCenter) {
+	log := logger.GetLogger(ctx)
+	log.Info("Resetting vCenter Instance in the AuthManager")
+	authManager.vcenter = vCenter
 }
 
 // refreshDatastoreMapForBlockVolumes scans all datastores in vCenter to check privileges, and compute the
@@ -201,11 +211,17 @@ func GenerateDatastoreMapForBlockVolumes(ctx context.Context, vc *vsphere.Virtua
 // It will return datastores which has the privileges for creating file volume
 func GenerateDatastoreMapForFileVolumes(ctx context.Context, vc *vsphere.VirtualCenter) (map[string]*cnsvsphere.DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
+	dsURLToInfoMap := make(map[string]*cnsvsphere.DatastoreInfo)
 	// get all vSAN datastores from VC
 	vsanDsURLToInfoMap, err := vc.GetVsanDatastores(ctx)
 	if err != nil {
 		log.Errorf("failed to get vSAN datastores with error %+v", err)
 		return nil, err
+	}
+	// Return empty map if no vSAN datastores are found.
+	if len(vsanDsURLToInfoMap) == 0 {
+		log.Debug("No vSAN datastores found")
+		return dsURLToInfoMap, nil
 	}
 	var allvsanDatastoreUrls []string
 	for dsURL := range vsanDsURLToInfoMap {
@@ -217,7 +233,6 @@ func GenerateDatastoreMapForFileVolumes(ctx context.Context, vc *vsphere.Virtual
 		return nil, err
 	}
 
-	dsURLToInfoMap := make(map[string]*cnsvsphere.DatastoreInfo)
 	for dsURL, dsInfo := range vsanDsURLToInfoMap {
 		if val, ok := fsEnabledMap[dsURL]; ok {
 			if val {
@@ -383,6 +398,14 @@ func getDsToFileServiceEnabledMap(ctx context.Context, vc *vsphere.VirtualCenter
 		if err != nil {
 			log.Errorf("failed to get the vsan cluster config. error: %+v", err)
 			return nil, err
+		}
+		if !(*config.Enabled) {
+			log.Debugf("cluster: %+v is a non-vSAN cluster. Skipping this cluster", cluster)
+			continue
+		} else if config.FileServiceConfig == nil {
+			log.Debugf("VsanClusterGetConfig.FileServiceConfig is empty. Skipping this cluster: %+v with config: %+v",
+				cluster, config)
+			continue
 		}
 		log.Debugf("cluster: %+v has vSAN file services enabled: %t", cluster, config.FileServiceConfig.Enabled)
 		var dsList []vim25types.ManagedObjectReference

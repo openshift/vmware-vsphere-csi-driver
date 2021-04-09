@@ -26,14 +26,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/prometheus"
-
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/fsnotify/fsnotify"
-	"github.com/vmware/govmomi/cns"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/units"
+	"github.com/vmware/govmomi/vapi/tags"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -41,6 +39,7 @@ import (
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/common/prometheus"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
@@ -51,7 +50,7 @@ import (
 type NodeManagerInterface interface {
 	Initialize(ctx context.Context) error
 	GetSharedDatastoresInK8SCluster(ctx context.Context) ([]*cnsvsphere.DatastoreInfo, error)
-	GetSharedDatastoresInTopology(ctx context.Context, topologyRequirement *csi.TopologyRequirement, zoneKey string, regionKey string) ([]*cnsvsphere.DatastoreInfo, map[string][]map[string]string, error)
+	GetSharedDatastoresInTopology(ctx context.Context, topologyRequirement *csi.TopologyRequirement, tagManager *tags.Manager, zoneKey string, regionKey string) ([]*cnsvsphere.DatastoreInfo, map[string][]map[string]string, error)
 	GetNodeByName(ctx context.Context, nodeName string) (*cnsvsphere.VirtualMachine, error)
 	GetAllNodes(ctx context.Context) ([]*cnsvsphere.VirtualMachine, error)
 }
@@ -64,23 +63,6 @@ type controller struct {
 
 // volumeMigrationService holds the pointer to VolumeMigration instance
 var volumeMigrationService migration.VolumeMigrationService
-
-var (
-	// VSAN67u3ControllerServiceCapability represents the capability of controller service
-	// for VSAN67u3 release
-	VSAN67u3ControllerServiceCapability = []csi.ControllerServiceCapability_RPC_Type{
-		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
-		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
-	}
-
-	// VSAN7ControllerServiceCapability represents the capability of controller service
-	// for VSAN 7.0 release
-	VSAN7ControllerServiceCapability = []csi.ControllerServiceCapability_RPC_Type{
-		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
-		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
-		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
-	}
-)
 
 // New creates a CNS controller
 func New() csitypes.CnsController {
@@ -166,8 +148,15 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		c.authMgr = authMgr
 		go common.ComputeDatastoreMapForBlockVolumes(authMgr.(*common.AuthManager),
 			config.Global.CSIAuthCheckIntervalInMin)
-		go common.ComputeDatastoreMapForFileVolumes(authMgr.(*common.AuthManager),
-			config.Global.CSIAuthCheckIntervalInMin)
+		isvSANFileServicesSupported, err := c.manager.VcenterManager.IsvSANFileServicesSupported(ctx, c.manager.VcenterConfig.Host)
+		if err != nil {
+			log.Errorf("failed to verify if vSAN file services is supported or not. Error:%+v", err)
+			return err
+		}
+		if isvSANFileServicesSupported {
+			go common.ComputeDatastoreMapForFileVolumes(authMgr.(*common.AuthManager),
+				config.Global.CSIAuthCheckIntervalInMin)
+		}
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -185,9 +174,15 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 				}
 				log.Debugf("fsnotify event: %q", event.String())
 				if event.Op&fsnotify.Remove == fsnotify.Remove {
-					log.Infof("Reloading Configuration")
-					c.ReloadConfiguration(ctx)
-					log.Infof("Successfully reloaded configuration from: %q", cfgPath)
+					for {
+						reloadConfigErr := c.ReloadConfiguration()
+						if reloadConfigErr == nil {
+							log.Infof("Successfully reloaded configuration from: %q", cfgPath)
+							break
+						}
+						log.Errorf("failed to reload configuration. will retry again in 5 seconds. err: %+v", reloadConfigErr)
+						time.Sleep(5 * time.Second)
+					}
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -231,52 +226,74 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 
 // ReloadConfiguration reloads configuration from the secret, and update controller's config cache
 // and VolumeManager's VC Config cache.
-func (c *controller) ReloadConfiguration(ctx context.Context) {
-	log := logger.GetLogger(ctx)
+func (c *controller) ReloadConfiguration() error {
+	ctx, log := logger.GetNewContextWithLogger()
+	log.Info("Reloading Configuration")
 	cfg, err := common.GetConfig(ctx)
 	if err != nil {
-		log.Errorf("failed to read config. Error: %+v", err)
-		return
+		msg := fmt.Sprintf("failed to read config. Error: %+v", err)
+		log.Error(msg)
+		return errors.New(msg)
 	}
 	newVCConfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, cfg)
 	if err != nil {
 		log.Errorf("failed to get VirtualCenterConfig. err=%v", err)
-		return
+		return err
 	}
 	if newVCConfig != nil {
 		var vcenter *cnsvsphere.VirtualCenter
 		if c.manager.VcenterConfig.Host != newVCConfig.Host ||
 			c.manager.VcenterConfig.Username != newVCConfig.Username ||
 			c.manager.VcenterConfig.Password != newVCConfig.Password {
-			log.Debugf("Unregistering virtual center: %q from virtualCenterManager", c.manager.VcenterConfig.Host)
-			err = c.manager.VcenterManager.UnregisterAllVirtualCenters(ctx)
-			if err != nil {
-				log.Errorf("failed to unregister vcenter with virtualCenterManager.")
-				return
+
+			// Verify if new configuration has valid credentials by connecting to vCenter.
+			// Proceed only if the connection succeeds, else return error.
+			newVC := &cnsvsphere.VirtualCenter{Config: newVCConfig}
+			if err = newVC.Connect(ctx); err != nil {
+				msg := fmt.Sprintf("failed to connect to VirtualCenter host: %q, Err: %+v", newVCConfig.Host, err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
-			log.Debugf("Registering virtual center: %q with virtualCenterManager", newVCConfig.Host)
-			vcenter, err = c.manager.VcenterManager.RegisterVirtualCenter(ctx, newVCConfig)
+
+			// Reset virtual center singleton instance by passing reload flag as true
+			log.Info("Obtaining new vCenterInstance using new credentials")
+			vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, true)
 			if err != nil {
-				log.Errorf("failed to register VC with virtualCenterManager. err=%v", err)
-				return
+				msg := fmt.Sprintf("failed to get VirtualCenter. err=%v", err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
-			c.manager.VcenterManager = cnsvsphere.GetVirtualCenterManager(ctx)
 		} else {
-			vcenter, err = c.manager.VcenterManager.GetVirtualCenter(ctx, newVCConfig.Host)
+			// If it's not a VC host or VC credentials update, same singleton instance can be used
+			// and it's Config field can be updated
+			vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, false)
 			if err != nil {
-				log.Errorf("failed to get VirtualCenter. err=%v", err)
-				return
+				msg := fmt.Sprintf("failed to get VirtualCenter. err=%v", err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
 			vcenter.Config = newVCConfig
 		}
 		c.manager.VolumeManager.ResetManager(ctx, vcenter)
-		c.manager.VolumeManager = cnsvolume.GetManager(ctx, vcenter)
 		c.manager.VcenterConfig = newVCConfig
+		c.manager.VolumeManager = cnsvolume.GetManager(ctx, vcenter)
+		// Re-Initialize Node Manager to cache latest vCenter config
+		c.nodeMgr = &Nodes{}
+		err = c.nodeMgr.Initialize(ctx)
+		if err != nil {
+			log.Errorf("failed to re-initialize nodeMgr. err=%v", err)
+			return err
+		}
+		if c.authMgr != nil {
+			c.authMgr.ResetvCenterInstance(ctx, vcenter)
+			log.Debugf("Updated vCenter in auth manager")
+		}
 	}
 	if cfg != nil {
-		log.Debugf("Updating manager.CnsConfig")
 		c.manager.CnsConfig = cfg
+		log.Debugf("Updated manager.CnsConfig")
 	}
+	return nil
 }
 
 func (c *controller) filterDatastores(ctx context.Context, sharedDatastores []*cnsvsphere.DatastoreInfo) []*cnsvsphere.DatastoreInfo {
@@ -379,7 +396,25 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 			log.Errorf(errMsg)
 			return nil, status.Error(codes.NotFound, errMsg)
 		}
-		sharedDatastores, datastoreTopologyMap, err = c.nodeMgr.GetSharedDatastoresInTopology(ctx, topologyRequirement, c.manager.CnsConfig.Labels.Zone, c.manager.CnsConfig.Labels.Region)
+		vcenter, err := c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to get vCenter. Err: %v", err)
+			log.Errorf(errMsg)
+			return nil, status.Error(codes.NotFound, errMsg)
+		}
+		tagManager, err := cnsvsphere.GetTagManager(ctx, vcenter)
+		if err != nil {
+			errMsg := fmt.Sprintf("Failed to get tagManager. Err: %v", err)
+			log.Errorf(errMsg)
+			return nil, status.Error(codes.NotFound, errMsg)
+		}
+		defer func() {
+			err := tagManager.Logout(ctx)
+			if err != nil {
+				log.Errorf("failed to logout tagManager. err: %v", err)
+			}
+		}()
+		sharedDatastores, datastoreTopologyMap, err = c.nodeMgr.GetSharedDatastoresInTopology(ctx, topologyRequirement, tagManager, c.manager.CnsConfig.Labels.Zone, c.manager.CnsConfig.Labels.Region)
 		if err != nil || len(sharedDatastores) == 0 {
 			msg := fmt.Sprintf("failed to get shared datastores in topology: %+v. Error: %+v", topologyRequirement, err)
 			log.Error(msg)
@@ -453,7 +488,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	// If CNS CreateVolume API does not return datastoreURL, retrieve this by calling QueryVolume
 	// otherwise, retrieve this from PlacementResults from the response of CreateVolume API
 	var volumeAccessibleTopology = make(map[string]string)
-	var datastoreAccessibleTopology = make([]map[string]string, 0)
+	var datastoreAccessibleTopology []map[string]string
 	var datastoreURL string
 	if len(datastoreTopologyMap) > 0 {
 		if volumeInfo.DatastoreURL == "" {
@@ -468,9 +503,18 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 			}
 			if len(queryResult.Volumes) > 0 {
 				// Find datastore topology from the retrieved datastoreURL
+				if queryResult.Volumes[0].DatastoreUrl == "" {
+					msg := fmt.Sprintf("could not retrieve datastore of volume: %q", volumeInfo.VolumeID.Id)
+					log.Error(msg)
+					return nil, status.Error(codes.Internal, msg)
+				}
 				datastoreAccessibleTopology = datastoreTopologyMap[queryResult.Volumes[0].DatastoreUrl]
 				datastoreURL = queryResult.Volumes[0].DatastoreUrl
 				log.Debugf("Volume: %s is provisioned on the datastore: %s ", volumeInfo.VolumeID.Id, datastoreURL)
+			} else {
+				msg := fmt.Sprintf("QueryVolume could not retrieve volume information for volume: %q", volumeInfo.VolumeID.Id)
+				log.Error(msg)
+				return nil, status.Error(codes.Internal, msg)
 			}
 		} else {
 			// retrieve datastoreURL from placementResults
@@ -584,12 +628,12 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		}
 		if common.IsFileVolumeRequest(ctx, volumeCapabilities) {
 			volumeType = prometheus.PrometheusFileVolumeType
-			vsan67u3Release, err := isVsan67u3Release(ctx, c)
+			isvSANFileServicesSupported, err := c.manager.VcenterManager.IsvSANFileServicesSupported(ctx, c.manager.VcenterConfig.Host)
 			if err != nil {
-				log.Error("failed to get vcenter version to help identify if fileshare volume creation should be permitted or not. Error:%v", err)
+				log.Errorf("failed to verify if vSAN file services is supported or not. Error:%+v", err)
 				return nil, status.Error(codes.Internal, err.Error())
 			}
-			if vsan67u3Release {
+			if !isvSANFileServicesSupported {
 				msg := "fileshare volume creation is not supported on vSAN 67u3 release"
 				log.Error(msg)
 				return nil, status.Error(codes.FailedPrecondition, msg)
@@ -649,32 +693,8 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 				log.Error(msg)
 				return nil, status.Errorf(codes.Internal, msg)
 			}
-		} else {
-			// Query CNS to get the volume type.
-			queryFilter := cnstypes.CnsQueryFilter{
-				VolumeIds: []cnstypes.CnsVolumeId{{Id: req.VolumeId}},
-			}
-			queryResult, err := c.manager.VolumeManager.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{
-				Names: []string{
-					string(cnstypes.QuerySelectionNameTypeVolumeType),
-				},
-			})
-			if err != nil {
-				msg := fmt.Sprintf("QueryVolume failed for volumeID: %q. %+v", req.VolumeId, err.Error())
-				log.Error(msg)
-				return nil, status.Error(codes.Internal, msg)
-			}
-			if len(queryResult.Volumes) == 0 {
-				msg := fmt.Sprintf("volumeID %s not found in QueryVolume", req.VolumeId)
-				log.Error(msg)
-				return nil, status.Error(codes.Internal, msg)
-			}
-			if queryResult.Volumes[0].VolumeType == common.BlockVolumeType {
-				volumeType = prometheus.PrometheusBlockVolumeType
-			} else {
-				volumeType = prometheus.PrometheusFileVolumeType
-			}
 		}
+		// TODO: Add code to determine the volume type and set volumeType for Prometheus metric accordingly.
 		err = common.DeleteVolumeUtil(ctx, c.manager.VolumeManager, req.VolumeId, true)
 		if err != nil {
 			msg := fmt.Sprintf("failed to delete volume: %q. Error: %+v", req.VolumeId, err)
@@ -731,7 +751,13 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 			queryFilter := cnstypes.CnsQueryFilter{
 				VolumeIds: []cnstypes.CnsVolumeId{{Id: req.VolumeId}},
 			}
-			queryResult, err := c.manager.VolumeManager.QueryVolume(ctx, queryFilter)
+			querySelection := cnstypes.CnsQuerySelection{
+				Names: []string{
+					string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
+				},
+			}
+			// Select only the backing object details.
+			queryResult, err := c.manager.VolumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
 			if err != nil {
 				msg := fmt.Sprintf("QueryVolume failed for volumeID: %q. %+v", req.VolumeId, err.Error())
 				log.Error(msg)
@@ -840,7 +866,13 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 			queryFilter := cnstypes.CnsQueryFilter{
 				VolumeIds: []cnstypes.CnsVolumeId{{Id: req.VolumeId}},
 			}
-			queryResult, err := c.manager.VolumeManager.QueryVolume(ctx, queryFilter)
+			querySelection := cnstypes.CnsQuerySelection{
+				Names: []string{
+					string(cnstypes.QuerySelectionNameTypeVolumeType),
+				},
+			}
+			// Select only the volume type.
+			queryResult, err := c.manager.VolumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
 			if err != nil {
 				msg := fmt.Sprintf("QueryVolume failed for volumeID: %q. %+v", req.VolumeId, err.Error())
 				log.Error(msg)
@@ -926,8 +958,26 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		log.Error(msg)
 		return nil, status.Errorf(codes.Unimplemented, msg)
 	}
+
+	isExtendSupported, err := c.manager.VcenterManager.IsExtendVolumeSupported(ctx, c.manager.VcenterConfig.Host)
+	if err != nil {
+		log.Errorf("failed to verify if extend volume is supported or not. Error: %+v", err)
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if !isExtendSupported {
+		msg := "Volume Expansion is not supported in this vSphere release. Kindly upgrade to vSphere 7.0 for offline expansion and vSphere 7.0U2 for online expansion support."
+		log.Error(msg)
+		return nil, status.Error(codes.Internal, msg)
+	}
+
+	isOnlineExpansionSupported, err := c.manager.VcenterManager.IsOnlineExtendVolumeSupported(ctx, c.manager.VcenterConfig.Host)
+	if err != nil {
+		msg := fmt.Sprintf("failed to check if online expansion is supported due to error: %v", err)
+		log.Error(msg)
+		return nil, status.Errorf(codes.Internal, msg)
+	}
 	isOnlineExpansionEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.OnlineVolumeExtend)
-	err := validateVanillaControllerExpandVolumeRequest(ctx, req, isOnlineExpansionEnabled)
+	err = validateVanillaControllerExpandVolumeRequest(ctx, req, isOnlineExpansionEnabled, isOnlineExpansionSupported)
 	if err != nil {
 		msg := fmt.Sprintf("validation for ExpandVolume Request: %+v has failed. Error: %v", *req, err)
 		log.Error(msg)
@@ -994,22 +1044,6 @@ func (c *controller) GetCapacity(ctx context.Context, req *csi.GetCapacityReques
 	return nil, status.Error(codes.Unimplemented, "")
 }
 
-// isVsan67u3Release returns true if controller is dealing with vSAN 67u3 Release of vCenter.
-func isVsan67u3Release(ctx context.Context, c *controller) (bool, error) {
-	log := logger.GetLogger(ctx)
-	log.Debug("Checking if vCenter version is of vsan 67u3 release")
-	if c.manager == nil || c.manager.VolumeManager == nil {
-		return false, errors.New("cannot retrieve vcenter version. controller manager is not initialized")
-	}
-	vc, err := c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
-	if err != nil || vc == nil {
-		log.Errorf("failed to get vcenter version. Err: %v", err)
-		return false, err
-	}
-	log.Debugf("vCenter version is :%q", vc.Client.Version)
-	return vc.Client.Version == cns.ReleaseVSAN67u3, nil
-}
-
 // initVolumeMigrationService is a helper method to initialize volumeMigrationService in controller
 func initVolumeMigrationService(ctx context.Context, c *controller) error {
 	log := logger.GetLogger(ctx)
@@ -1034,17 +1068,10 @@ func (c *controller) ControllerGetCapabilities(ctx context.Context, req *csi.Con
 	log := logger.GetLogger(ctx)
 	log.Infof("ControllerGetCapabilities: called with args %+v", *req)
 
-	var controllerCaps []csi.ControllerServiceCapability_RPC_Type
-
-	vsan67u3Release, err := isVsan67u3Release(ctx, c)
-	if err != nil {
-		log.Error("failed to get vcenter version to help identify controller service capabilities")
-		return nil, status.Error(codes.FailedPrecondition, err.Error())
-	}
-	if vsan67u3Release {
-		controllerCaps = VSAN67u3ControllerServiceCapability
-	} else {
-		controllerCaps = VSAN7ControllerServiceCapability
+	controllerCaps := []csi.ControllerServiceCapability_RPC_Type{
+		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
+		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
+		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 	}
 
 	var caps []*csi.ControllerServiceCapability
