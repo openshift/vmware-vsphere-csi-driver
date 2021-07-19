@@ -35,6 +35,7 @@ const (
 	crdGroup                                   = "cns.vmware.com"
 	crdVersion                                 = "v1alpha1"
 	csiSystemNamespace                         = "vmware-system-csi"
+	csiVolAttrVolType                          = "vSphere CNS Block Volume"
 	defaultFullSyncIntervalInMin               = "30"
 	defaultFullSyncWaitTime                    = 1800
 	defaultPandoraSyncWaitTime                 = 90
@@ -46,6 +47,8 @@ const (
 	diskSizeInMinMb                            = int64(200)
 	e2eTestPassword                            = "E2E-test-password!23"
 	e2evSphereCSIDriverName                    = "csi.vsphere.vmware.com"
+	envCSINamespace                            = "CSI_NAMESPACE"
+	envEsxHostIP                               = "ESX_TEST_HOST_IP"
 	envFileServiceDisabledSharedDatastoreURL   = "FILE_SERVICE_DISABLED_SHARED_VSPHERE_DATASTORE_URL"
 	envFullSyncWaitTime                        = "FULL_SYNC_WAIT_TIME"
 	envInaccessibleZoneDatastoreURL            = "INACCESSIBLE_ZONE_VSPHERE_DATASTORE_URL"
@@ -79,7 +82,6 @@ const (
 	healthStatusAccessible                     = "accessible"
 	healthStatusInAccessible                   = "inaccessible"
 	healthStatusWaitTime                       = 2 * time.Minute
-	hostRecoveryTime                           = 5 * time.Minute
 	invalidFSType                              = "ext10"
 	k8sPodTerminationTimeOut                   = 7 * time.Minute
 	k8sPodTerminationTimeOutLong               = 10 * time.Minute
@@ -88,6 +90,7 @@ const (
 	kubeAPIfile                                = "kube-apiserver.yaml"
 	kubeAPIRecoveryTime                        = 1 * time.Minute
 	kubeSystemNamespace                        = "kube-system"
+	kubeletConfigYaml                          = "/var/lib/kubelet/config.yaml"
 	nfs4FSType                                 = "nfs4"
 	objOrItemNotFoundErr                       = "The object or item referred to could not be found"
 	passorwdFilePath                           = "/etc/vmware/wcp/.storageUser"
@@ -95,8 +98,11 @@ const (
 	poll                                       = 2 * time.Second
 	pollTimeout                                = 5 * time.Minute
 	pollTimeoutShort                           = 1 * time.Minute
+	healthStatusPollTimeout                    = 15 * time.Minute
+	healthStatusPollInterval                   = 15 * time.Second
 	psodTime                                   = "120"
 	pvcHealthAnnotation                        = "volumehealth.storage.kubernetes.io/health"
+	pvcHealthTimestampAnnotation               = "volumehealth.storage.kubernetes.io/health-timestamp"
 	quotaName                                  = "cns-test-quota"
 	regionKey                                  = "failure-domain.beta.kubernetes.io/region"
 	resizePollInterval                         = 2 * time.Second
@@ -113,9 +119,13 @@ const (
 	startOperation                             = "start"
 	stopOperation                              = "stop"
 	supervisorClusterOperationsTimeout         = 3 * time.Minute
+	svClusterDistribution                      = "SupervisorCluster"
 	svOperationTimeout                         = 240 * time.Second
 	svStorageClassName                         = "SVStorageClass"
 	totalResizeWaitPeriod                      = 10 * time.Minute
+	tkgClusterDistribution                     = "TKGService"
+	vanillaClusterDistribution                 = "CSI-Vanilla"
+	vanillaClusterDistributionWithSpecialChar  = "CSI-\tVanilla-#Test"
 	vSphereCSIControllerPodNamePrefix          = "vsphere-csi-controller"
 	vmUUIDLabel                                = "vmware-system-vm-uuid"
 	vsanDefaultStorageClassInSVC               = "vsan-default-storage-policy"
@@ -124,6 +134,7 @@ const (
 	vsanhealthServiceName                      = "vsan-health"
 	vsphereCloudProviderConfiguration          = "vsphere-cloud-provider.conf"
 	vsphereControllerManager                   = "vmware-system-tkg-controller-manager"
+	vSphereCSIConf                             = "csi-vsphere.conf"
 	vsphereTKGSystemNamespace                  = "vmware-system-tkg"
 	waitTimeForCNSNodeVMAttachmentReconciler   = 30 * time.Second
 	wcpServiceName                             = "wcp"
@@ -144,9 +155,12 @@ var (
 	vcpProvisionerName              = "kubernetes.io/vsphere-volume"
 	vcpScParamDatastoreName         = "datastore"
 	vcpScParamPolicyName            = "storagePolicyName"
+	vcpScParamFstype                = "fstype"
 	migratedToAnnotation            = "pv.kubernetes.io/migrated-to"
+	migratedPluginAnnotation        = "storage.alpha.kubernetes.io/migrated-plugins"
 	pvcAnnotationStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
 	pvAnnotationProvisionedBy       = "pv.kubernetes.io/provisioned-by"
+	scAnnotation4Statefulset        = "volume.beta.kubernetes.io/storage-class"
 	nodeMapper                      = &NodeMapper{}
 )
 

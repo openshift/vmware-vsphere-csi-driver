@@ -43,7 +43,7 @@ import (
 	4. Verify disk size specified is being honored
 */
 
-var _ = ginkgo.Describe("[csi-vanilla] [csi-supervisor] [csi-guest] Volume Disk Size ", func() {
+var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] [csi-supervisor] [csi-guest] Volume Disk Size ", func() {
 	f := framework.NewDefaultFramework("volume-disksize")
 	var (
 		client            clientset.Interface
@@ -147,7 +147,7 @@ var _ = ginkgo.Describe("[csi-vanilla] [csi-supervisor] [csi-guest] Volume Disk 
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By("Verifying disk size specified in PVC in honored")
 		if queryResult.Volumes[0].BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails).CapacityInMb != diskSizeInMb {
-			err = fmt.Errorf("Wrong disk size provisioned ")
+			err = fmt.Errorf("wrong disk size provisioned ")
 		}
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})

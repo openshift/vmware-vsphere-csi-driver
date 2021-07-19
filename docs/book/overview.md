@@ -10,17 +10,17 @@ The vSphere CSI driver includes the following components:
 - [Syncer](#syncer)
   - [Metadata Syncer](#metadata_syncer)
   - [Full Sync](#full_sync)
-  - [CnsOperator](#cns_operator)
 
 ### vSphere CSI Controller<a id="vsphere_csi_controller"></a>
 
 The vSphere Container Storage Interface (CSI) Controller provides a CSI interface used by Container Orchestrators to manage the lifecycle of vSphere volumes.
-
-The vSphere CSI Controller is responsible for volume provisioning, attaching and detaching the volume to VMs, mounting, formatting and unmounting volumes from the pod within the node VM, and so on.
+The vSphere CSI Controller is responsible for creating, expanding and deleting volumes, attaching and detaching the volumes to Node VMs.
 
 ### vSphere CSI Node<a id="vsphere_csi_node"></a>
 
-The vSphere CSI Node is responsible for formatting, mounting the volumes to nodes, and using bind mounts for the volumes inside the pod. The vSphere CSI Node runs as a deamonset inside the cluster.
+The vSphere CSI Node is responsible for formatting, mounting the volumes to nodes, and using bind mounts for the volumes inside the pod.
+Before volume needs to be detached, CSI Node is helping to unmount volume from the node.
+The vSphere CSI Node runs as a daemonset inside the cluster.
 
 ### Syncer<a id="syncer"></a>
 
@@ -37,26 +37,3 @@ Full sync is responsible for keeping CNS up to date with Kubernetes volume metad
 - API server goes down or Kubernetes core services goes down
 - vCenter Server is restored to a backup point
 - etcd is restored to a backup point
-
-#### CnsOperator<a id="cns_operator"></a>
-
-CnsOperator is used in the context of vSphere with Kubernetes, also known as Project Pacific. CnsOperator is responsible for the following operations:
-
-- Attach and detach volumes to Tanzu Kubernetes cluster VMs.
-- Deliver PV, PVC, and pod metadata from the Tanzu Kubernetes cluster to CNS.
-
-## Types of the vSphere CSI Driver
-
-The vSphere CSI driver supports the following:
-
-- [Vanilla Kubernetes](https://github.com/kubernetes/kubernetes)
-  - Support for block volumes.
-  - Support for file volumes.
-
-- [vSphere with Kubernetes](https://blogs.vmware.com/vsphere/2019/08/introducing-project-pacific.html)
-  - In vSphere with Kubernetes, the vSphere CSI driver is called CNS-CSI driver.
-  - Support for block volumes.
-
-- [Tanzu Kubernetes Cluster](https://blogs.vmware.com/vsphere/2020/03/vsphere-7-tanzu-kubernetes-clusters.html)
-  - In Tanzu Kubernetes clusters, the vSphere CSI driver is called Paravirtual CSI (pvCSI) driver.
-  - Support for block volumes.

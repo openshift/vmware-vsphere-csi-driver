@@ -30,9 +30,9 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 )
 
-// pvcsiFullSync reconciles PV/PVC/Pod metadata on the guest cluster
+// PvcsiFullSync reconciles PV/PVC/Pod metadata on the guest cluster
 // with cnsvolumemetadata objects on the supervisor cluster for the guest cluster
-func pvcsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) {
+func PvcsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) error {
 	log := logger.GetLogger(ctx)
 	log.Infof("FullSync: Start")
 
@@ -46,14 +46,14 @@ func pvcsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) {
 	supervisorNamespace, err := cnsconfig.GetSupervisorNamespace(ctx)
 	if err != nil {
 		log.Errorf("FullSync: could not get supervisor namespace in which guest cluster was deployed. Err: %v", err)
-		return
+		return err
 	}
 
 	// Populate guestCnsVolumeMetadataList with cnsvolumemetadata objects created from the guest cluster
 	err = createCnsVolumeMetadataList(ctx, metadataSyncer, supervisorNamespace, &guestCnsVolumeMetadataList)
 	if err != nil {
 		log.Errorf("FullSync: Failed to create CnsVolumeMetadataList from guest cluster. Err: %v", err)
-		return
+		return err
 	}
 
 	// Get list of cnsvolumemetadata objects that exist in the given supervisor cluster namespace
@@ -61,7 +61,7 @@ func pvcsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) {
 	err = metadataSyncer.cnsOperatorClient.List(ctx, supervisorNamespaceList, client.InNamespace(supervisorNamespace))
 	if err != nil {
 		log.Warnf("FullSync: Failed to get CnsVolumeMetadatas from supervisor cluster. Err: %v", err)
-		return
+		return err
 	}
 
 	supervisorCnsVolumeMetadataList := cnsvolumemetadatav1alpha1.CnsVolumeMetadataList{}
@@ -122,7 +122,7 @@ func pvcsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) {
 	}
 
 	log.Infof("FullSync: End")
-
+	return nil
 }
 
 // createCnsVolumeMetadataList creates cnsvolumemetadata objects from the API server
@@ -199,8 +199,9 @@ func createCnsVolumeMetadataList(ctx context.Context, metadataSyncer *metadataSy
 // compareCnsVolumeMetadatas compares input cnsvolumemetadata objects
 // and returns false if their labels are not deeply equal
 func compareCnsVolumeMetadatas(guestObject *cnsvolumemetadatav1alpha1.CnsVolumeMetadataSpec, supervisorObject *cnsvolumemetadatav1alpha1.CnsVolumeMetadataSpec) bool {
-	if !reflect.DeepEqual(guestObject.Labels, supervisorObject.Labels) {
+	if !reflect.DeepEqual(guestObject.Labels, supervisorObject.Labels) || !reflect.DeepEqual(guestObject.ClusterDistribution, supervisorObject.ClusterDistribution) {
 		supervisorObject.Labels = guestObject.Labels
+		supervisorObject.ClusterDistribution = guestObject.ClusterDistribution
 		return false
 	}
 	return true

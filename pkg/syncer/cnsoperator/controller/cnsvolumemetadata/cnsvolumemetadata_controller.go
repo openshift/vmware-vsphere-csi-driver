@@ -73,12 +73,15 @@ var (
 // Add creates a new CnsVolumeMetadata Controller and adds it to the Manager, ConfigurationInfo,
 // volumeManager and k8sclient. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
-func Add(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
+func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
+	configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
 	// Initializes kubernetes client
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
+	ctx, log := logger.GetNewContextWithLogger()
+	if clusterFlavor != cnstypes.CnsClusterFlavorWorkload {
+		log.Debug("Not initializing the CnsVolumeMetadata Controller as its a non-WCP CSI deployment")
+		return nil
+	}
+
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
 		log.Errorf("Creating Kubernetes client failed. Err: %v", err)
@@ -103,11 +106,7 @@ func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationIn
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-
+	ctx, log := logger.GetNewContextWithLogger()
 	maxWorkerThreads := getMaxWorkerThreadsToReconcileCnsVolumeMetadata(ctx)
 	// Create a new controller
 	c, err := controller.New("cnsvolumemetadata-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
@@ -173,10 +172,7 @@ type ReconcileCnsVolumeMetadata struct {
 // based on the state read in the CnsVolumeMetadata.Spec
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCnsVolumeMetadata) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
+func (r *ReconcileCnsVolumeMetadata) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	log := logger.GetLogger(ctx)
 
 	instance := &cnsv1alpha1.CnsVolumeMetadata{}

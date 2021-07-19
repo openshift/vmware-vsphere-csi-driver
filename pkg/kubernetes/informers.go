@@ -30,10 +30,14 @@ import (
 )
 
 const (
-	// resyncPeriodConfigMapInformer is the time interval between each resync operation for the configmap informer
-	// Note: Whenever there is a update on the configmap, we do get a callback to the handler immediately.
-	// However if for some reason update was missed, we need to set a resync interval for resync check operations that happens as part of NewFilteredConfigMapInformer()
-	// Since we do not anticipate frequent changes to the configmaps, the resync interval is set to 30 minutes.
+	// resyncPeriodConfigMapInformer is the time interval between each resync
+	// operation for the configmap informer.
+	//
+	// Whenever there is a update on the configmap, we do get a callback to the
+	// handler immediately. However, if for some reason update was missed, we
+	// need to set a resync interval for resync check operations that happens
+	// as part of NewFilteredConfigMapInformer(). Since we do not anticipate
+	// frequent changes to the configmaps, the resync interval is set to 30 min.
 	resyncPeriodConfigMapInformer = 30 * time.Minute
 )
 
@@ -46,7 +50,7 @@ func noResyncPeriodFunc() time.Duration {
 	return 0
 }
 
-// NewInformer creates a new K8S client based on a service account
+// NewInformer creates a new K8S client based on a service account.
 func NewInformer(client clientset.Interface) *InformerManager {
 	onceForInformerManager.Do(func() {
 		informerManagerInstance = &InformerManager{
@@ -58,8 +62,9 @@ func NewInformer(client clientset.Interface) *InformerManager {
 	return informerManagerInstance
 }
 
-// AddNodeListener hooks up add, update, delete callbacks
-func (im *InformerManager) AddNodeListener(add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+// AddNodeListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddNodeListener(
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
 	if im.nodeInformer == nil {
 		im.nodeInformer = im.informerFactory.Core().V1().Nodes().Informer()
 	}
@@ -71,8 +76,9 @@ func (im *InformerManager) AddNodeListener(add func(obj interface{}), update fun
 	})
 }
 
-// AddPVCListener hooks up add, update, delete callbacks
-func (im *InformerManager) AddPVCListener(add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+// AddPVCListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddPVCListener(
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
 	if im.pvcInformer == nil {
 		im.pvcInformer = im.informerFactory.Core().V1().PersistentVolumeClaims().Informer()
 	}
@@ -85,8 +91,9 @@ func (im *InformerManager) AddPVCListener(add func(obj interface{}), update func
 	})
 }
 
-// AddPVListener hooks up add, update, delete callbacks
-func (im *InformerManager) AddPVListener(add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+// AddPVListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddPVListener(
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
 	if im.pvInformer == nil {
 		im.pvInformer = im.informerFactory.Core().V1().PersistentVolumes().Informer()
 	}
@@ -99,10 +106,28 @@ func (im *InformerManager) AddPVListener(add func(obj interface{}), update func(
 	})
 }
 
-// AddConfigMapListener hooks up add, update, delete callbacks
-func (im *InformerManager) AddConfigMapListener(ctx context.Context, client clientset.Interface, namespace string, add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+// AddNamespaceListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddNamespaceListener(
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+	if im.namespaceInformer == nil {
+		im.namespaceInformer = im.informerFactory.Core().V1().Namespaces().Informer()
+	}
+	im.namespaceSynced = im.namespaceInformer.HasSynced
+
+	im.namespaceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    add,
+		UpdateFunc: update,
+		DeleteFunc: remove,
+	})
+}
+
+// AddConfigMapListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddConfigMapListener(
+	ctx context.Context, client clientset.Interface, namespace string,
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
 	if im.configMapInformer == nil {
-		im.configMapInformer = v1.NewFilteredConfigMapInformer(client, namespace, resyncPeriodConfigMapInformer, cache.Indexers{}, nil)
+		im.configMapInformer = v1.NewFilteredConfigMapInformer(client, namespace,
+			resyncPeriodConfigMapInformer, cache.Indexers{}, nil)
 	}
 	im.configMapSynced = im.configMapInformer.HasSynced
 
@@ -112,12 +137,14 @@ func (im *InformerManager) AddConfigMapListener(ctx context.Context, client clie
 		DeleteFunc: remove,
 	})
 	stopCh := make(chan struct{})
-	//Since NewFilteredConfigMapInformer is not part of the informer factory, we need to invoke the Run() explicitly to start the shared informer
+	// Since NewFilteredConfigMapInformer is not part of the informer factory,
+	// we need to invoke the Run() explicitly to start the shared informer.
 	go im.configMapInformer.Run(stopCh)
 }
 
-// AddPodListener hooks up add, update, delete callbacks
-func (im *InformerManager) AddPodListener(add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
+// AddPodListener hooks up add, update, delete callbacks.
+func (im *InformerManager) AddPodListener(
+	add func(obj interface{}), update func(oldObj, newObj interface{}), remove func(obj interface{})) {
 	if im.podInformer == nil {
 		im.podInformer = im.informerFactory.Core().V1().Pods().Informer()
 	}
@@ -130,27 +157,27 @@ func (im *InformerManager) AddPodListener(add func(obj interface{}), update func
 	})
 }
 
-// GetPVLister returns Persistent Volume Lister for the calling informer manager
+// GetPVLister returns PV Lister for the calling informer manager.
 func (im *InformerManager) GetPVLister() corelisters.PersistentVolumeLister {
 	return im.informerFactory.Core().V1().PersistentVolumes().Lister()
 }
 
-// GetPVCLister returns PVC Lister for the calling informer manager
+// GetPVCLister returns PVC Lister for the calling informer manager.
 func (im *InformerManager) GetPVCLister() corelisters.PersistentVolumeClaimLister {
 	return im.informerFactory.Core().V1().PersistentVolumeClaims().Lister()
 }
 
-// GetConfigMapLister returns ConfigMap Lister for the calling informer manager
+// GetConfigMapLister returns ConfigMap Lister for the calling informer manager.
 func (im *InformerManager) GetConfigMapLister() corelisters.ConfigMapLister {
 	return im.informerFactory.Core().V1().ConfigMaps().Lister()
 }
 
-// GetPodLister returns Pod Lister for the calling informer manager
+// GetPodLister returns Pod Lister for the calling informer manager.
 func (im *InformerManager) GetPodLister() corelisters.PodLister {
 	return im.informerFactory.Core().V1().Pods().Lister()
 }
 
-// Listen starts the Informers
+// Listen starts the Informers.
 func (im *InformerManager) Listen() (stopCh <-chan struct{}) {
 	go im.informerFactory.Start(im.stopCh)
 	if im.pvSynced != nil && im.pvcSynced != nil && im.podSynced != nil && im.configMapSynced != nil {

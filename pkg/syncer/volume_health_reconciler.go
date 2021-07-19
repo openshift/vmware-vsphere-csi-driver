@@ -354,6 +354,10 @@ func (rc *volumeHealthReconciler) syncPVC(key string) error {
 
 	for _, tkgPV := range tkgPVList {
 		// Update Tanzu Kubernetes Grid PVC volume health annotation
+		if tkgPV.Spec.ClaimRef == nil {
+			log.Debugf("skipping tkgPV: %v with nil ClaimRef", tkgPV.Name)
+			continue
+		}
 		err = rc.updateTKGPVC(ctx, svcPVC, tkgPV)
 		if err != nil {
 			log.Errorf("updating Tanzu Kubernetes Grid PVC for PV %s failed: %v", tkgPV.Name, err)
@@ -419,12 +423,13 @@ func (rc *volumeHealthReconciler) updateTKGPVC(ctx context.Context, svcPVC *v1.P
 		log.Infof("updateTKGPVC: Detected volume health annotation change. Need to update Tanzu Kubernetes Grid PVC %s/%s. Existing TKG PVC annotation: %s. New annotation: %s", tkgPVCObj.Namespace, tkgPVCObj.Name, tkgAnnValue, svcAnnValue)
 		tkgPVCClone := tkgPVCObj.DeepCopy()
 		metav1.SetMetaDataAnnotation(&tkgPVCClone.ObjectMeta, annVolumeHealth, svcAnnValue)
+		metav1.SetMetaDataAnnotation(&tkgPVCClone.ObjectMeta, annVolumeHealthTS, time.Now().Format(time.UnixDate))
 		_, err := rc.tkgKubeClient.CoreV1().PersistentVolumeClaims(tkgPVCClone.Namespace).Update(ctx, tkgPVCClone, metav1.UpdateOptions{})
 		if err != nil {
 			log.Errorf("cannot update claim [%s/%s]: [%v]", tkgPVCClone.Namespace, tkgPVCClone.Name, err)
 			return err
 		}
-		log.Infof("updateTKGPVC: Updated Tanzu Kubernetes Grid PVC %s/%s", tkgPVCObj.Namespace, tkgPVCObj.Name)
+		log.Infof("updateTKGPVC: Updated Tanzu Kubernetes Grid PVC %s/%s, set annotation %s at time %s", tkgPVCObj.Namespace, tkgPVCObj.Name, svcAnnValue, time.Now().Format(time.UnixDate))
 		return nil
 	}
 

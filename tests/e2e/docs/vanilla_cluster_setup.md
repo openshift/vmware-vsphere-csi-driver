@@ -22,6 +22,7 @@ The section outlines how to set the env variable for running e2e test.
 
     [Global]
     insecure-flag = "true"
+    cluster-id = "<cluster-id>"
     hostname = "<VC_IP>"
     user = "<USER>"
     password = "<PASSWORD>"
@@ -34,6 +35,8 @@ The section outlines how to set the env variable for running e2e test.
 * `targetvSANFileShareDatastoreURLs` is an optional parameter. It contains a comma separated
 list of datastore URLs where you want to deploy file share volumes. Retrieve this value from the
  secret named `vsphere-config-secret` in your testbed.
+* `cluster-id` field is optional for block vanilla tests but required for file vanilla static provisioning tests.
+`cluster-id` is name of the cluster as seen in VC.
 
 ### Copy contents of ~/.kube/config from master node to your e2e test environment
 
@@ -58,6 +61,7 @@ list of datastore URLs where you want to deploy file share volumes. Retrieve thi
     export FULL_SYNC_WAIT_TIME=350    # In seconds
     export USER=root
     export CLUSTER_FLAVOR="VANILLA"
+    export CSI_NAMESPACE="vmware-system-csi"
     # To run e2e test for block volume, need to set the following env variable
     export GINKGO_FOCUS="csi-block-vanilla"
     # To run e2e test for file volume, need to set the following env variable
@@ -65,6 +69,7 @@ list of datastore URLs where you want to deploy file share volumes. Retrieve thi
 
     # For VCP to CSI migration tests following are needed as well
     export SHARED_VSPHERE_DATASTORE_NAME="vsanDatastore"
+    export ESX_TEST_HOST_IP="<esx_host_ip>"  # for static provisioning tests
 
     # SHARED_VSPHERE_DATASTORE_NAME and SHARED_VSPHERE_DATASTORE_URL should correspond to same shared datastore
    
@@ -79,6 +84,12 @@ list of datastore URLs where you want to deploy file share volumes. Retrieve thi
     2.ssh root@<vc-ip-address> mkdir -p .ssh
     3.cat ~/.ssh/id_rsa.pub | ssh root@<vc-ip-address> 'cat >> .ssh/authorized_keys'
     4.ssh root@<vc-ip-address> "chmod 700 .ssh; chmod 640 .ssh/authorized_keys"
+
+#### Setting SSH keys for ESX with your local machine to run VCP to CSI migration static provisioning tests
+
+    1.ssh-keygen -t rsa (ignore if you already have public key in the local env)
+    2.cat ~/.ssh/id_rsa.pub | ssh root@<esx-ip-address> 'cat >> /etc/ssh/keys-root/authorized_keys'
+    3.ssh root@<esx-ip-address> "chmod 640 /etc/ssh/keys-root/authorized_keys"
 
 ## Requirements
 
