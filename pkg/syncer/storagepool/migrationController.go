@@ -32,7 +32,6 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/k8scloudoperator"
@@ -67,12 +66,12 @@ func (m *migrationController) relocateCNSVolume(ctx context.Context, volumeID st
 	if !found || err != nil {
 		return fmt.Errorf("failed to find datastoreUrl in StoragePool %s", targetSPName)
 	}
-	dsInfo, err := vsphere.GetDatastoreInfoByURL(ctx, m.vc, m.clusterID, datastoreURL)
+	dsInfo, err := cnsvsphere.GetDatastoreInfoByURL(ctx, m.vc, m.clusterID, datastoreURL)
 	if err != nil {
 		return fmt.Errorf("failed to get datastore corressponding to URL %v", datastoreURL)
 	}
 
-	volManager := volume.GetManager(ctx, m.vc)
+	volManager := volume.GetManager(ctx, m.vc, nil, false)
 	relocateSpec := cnstypes.NewCnsBlockVolumeRelocateSpec(volumeID, dsInfo.Reference())
 
 	task, err := volManager.RelocateVolume(ctx, relocateSpec)
@@ -148,7 +147,13 @@ func (m *migrationController) migrateVolume(ctx context.Context, pvc *unstructur
 	}
 	log.Debugf("Migrating volume %v to SP %v", volumeID, targetSP.GetName())
 
-	err = m.relocateCNSVolume(ctx, volumeID, targetSPName)
+	// retry the relocateCNSVolume() if we face connectivity issues with VC
+	relocateFn := func() error {
+		return m.relocateCNSVolume(ctx, volumeID, targetSPName)
+	}
+	initBackoff := time.Duration(100) * time.Millisecond
+	maxBackoff := time.Duration(60) * time.Second
+	err = RetryOnError(relocateFn, initBackoff, maxBackoff, 1.5, 16)
 	if err != nil {
 		log.Errorf("Could not migrate PVC %v to StoragePool %v. Error: %v", pvcName, targetSPName, err)
 		return false, err

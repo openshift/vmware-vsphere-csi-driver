@@ -1,5 +1,5 @@
 /*
-Copyright 2020 The Kubernetes Authors.
+Copyright 2021 The Kubernetes Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -38,10 +38,8 @@ import (
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
-	"github.com/vmware/govmomi/vim25/types"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/crypto/ssh"
-	apps "k8s.io/api/apps/v1"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -52,20 +50,22 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	pkgtypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/kubectl/pkg/drain"
 	"k8s.io/kubernetes/test/e2e/framework"
+	fdep "k8s.io/kubernetes/test/e2e/framework/deployment"
+	"k8s.io/kubernetes/test/e2e/framework/manifest"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
-	"k8s.io/kubernetes/test/e2e/manifest"
 
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator"
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
 	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
@@ -79,6 +79,7 @@ var (
 	clusterComputeResource []*object.ClusterComputeResource
 	hosts                  []*object.HostSystem
 	defaultDatastore       *object.Datastore
+	restConfig             *rest.Config
 )
 
 // getVSphereStorageClassSpec returns Storage Class Spec with supplied storage class parameters
@@ -177,7 +178,7 @@ func getVMUUIDFromNodeName(nodeName string) (string, error) {
 
 // verifyVolumeMetadataInCNS verifies container volume metadata is matching the one is CNS cache
 func verifyVolumeMetadataInCNS(vs *vSphere, volumeID string, PersistentVolumeClaimName string, PersistentVolumeName string,
-	PodName string, Labels ...types.KeyValue) error {
+	PodName string, Labels ...vim25types.KeyValue) error {
 	queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
 	if err != nil {
 		return err
@@ -335,6 +336,33 @@ func createStatefulSetWithOneReplica(client clientset.Interface, manifestPath st
 	return statefulSet, service
 }
 
+// updateDeploymentReplicawithWait helps to update the replica for a deployment with wait
+func updateDeploymentReplicawithWait(client clientset.Interface, count int32, name string, namespace string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var deployment *appsv1.Deployment
+	var err error
+	waitErr := wait.Poll(healthStatusPollInterval, healthStatusPollTimeout, func() (bool, error) {
+		deployment, err = client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		if err != nil {
+			return false, nil
+		}
+		*deployment.Spec.Replicas = count
+		ginkgo.By("Waiting for update operation on deployment to take effect")
+		deployment, err = client.AppsV1().Deployments(namespace).Update(ctx, deployment, metav1.UpdateOptions{})
+		if err != nil {
+			return false, err
+		}
+		err = fdep.WaitForDeploymentComplete(client, deployment)
+		if err != nil {
+			return false, err
+		}
+		return true, nil
+	})
+	return waitErr
+}
+
 // updateDeploymentReplica helps to update the replica for a deployment
 func updateDeploymentReplica(client clientset.Interface, count int32, name string, namespace string) *appsv1.Deployment {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -371,9 +399,11 @@ func bringDownTKGController(Client clientset.Interface) {
 // Default namespace used here is csiSystemNamespace
 func bringUpCsiController(Client clientset.Interface, namespace ...string) {
 	if len(namespace) == 0 {
-		updateDeploymentReplica(Client, 1, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
+		err := updateDeploymentReplicawithWait(Client, 1, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	} else {
-		updateDeploymentReplica(Client, 1, vSphereCSIControllerPodNamePrefix, namespace[0])
+		err := updateDeploymentReplicawithWait(Client, 1, vSphereCSIControllerPodNamePrefix, namespace[0])
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	ginkgo.By("Controller is up")
 }
@@ -381,7 +411,8 @@ func bringUpCsiController(Client clientset.Interface, namespace ...string) {
 // bringUpTKGController helps to bring the TKG control manager pod up
 // Its taks svc client as input
 func bringUpTKGController(Client clientset.Interface) {
-	updateDeploymentReplica(Client, 1, vsphereControllerManager, vsphereTKGSystemNamespace)
+	err := updateDeploymentReplicawithWait(Client, 1, vsphereControllerManager, vsphereTKGSystemNamespace)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.By("TKGControllManager is up")
 }
 
@@ -443,7 +474,7 @@ func getDatastoreByURL(ctx context.Context, datastoreURL string, dc *object.Data
 		framework.Logf("failed to get all the datastores. err: %+v", err)
 		return nil, err
 	}
-	var dsList []types.ManagedObjectReference
+	var dsList []vim25types.ManagedObjectReference
 	for _, ds := range datastores {
 		dsList = append(dsList, ds.Reference())
 	}
@@ -463,7 +494,7 @@ func getDatastoreByURL(ctx context.Context, datastoreURL string, dc *object.Data
 				dsMo.Reference()), nil
 		}
 	}
-	err = fmt.Errorf("Couldn't find Datastore given URL %q", datastoreURL)
+	err = fmt.Errorf("couldn't find Datastore given URL %q", datastoreURL)
 	return nil, err
 }
 
@@ -669,7 +700,7 @@ func invokeVCenterChangePassword(user, adminPassword, newPassword, host string) 
 // match the topology constraints specified in the storage class
 func verifyVolumeTopology(pv *v1.PersistentVolume, zoneValues []string, regionValues []string) (string, string, error) {
 	if pv.Spec.NodeAffinity == nil || len(pv.Spec.NodeAffinity.Required.NodeSelectorTerms) == 0 {
-		return "", "", fmt.Errorf("Node Affinity rules for PV should exist in topology aware provisioning")
+		return "", "", fmt.Errorf("node Affinity rules for PV should exist in topology aware provisioning")
 	}
 	var pvZone string
 	var pvRegion string
@@ -718,7 +749,7 @@ func getTopologyFromPod(pod *v1.Pod, nodeList *v1.NodeList) (string, string, err
 			return podRegion, podZone, nil
 		}
 	}
-	err := errors.New("Could not find the topology from pod")
+	err := errors.New("could not find the topology from pod")
 	return "", "", err
 }
 
@@ -1048,7 +1079,7 @@ func getCnsNodeVMAttachmentByName(ctx context.Context, f *framework.Framework, e
 	return nil
 }
 
-//verifyIsAttachedInSupervisor verifies the crd instance is attached in supervisior
+//verifyIsAttachedInSupervisor verifies the crd instance is attached in supervisor
 func verifyIsAttachedInSupervisor(ctx context.Context, f *framework.Framework, expectedInstanceName string, crdVersion string, crdGroup string) {
 	instance := getCnsNodeVMAttachmentByName(ctx, f, expectedInstanceName, crdVersion, crdGroup)
 	if instance != nil {
@@ -1058,7 +1089,7 @@ func verifyIsAttachedInSupervisor(ctx context.Context, f *framework.Framework, e
 	gomega.Expect(instance).NotTo(gomega.BeNil())
 }
 
-//verifyIsDetachedInSupervisor verifies the crd instance is detached from supervisior
+//verifyIsDetachedInSupervisor verifies the crd instance is detached from supervisor
 func verifyIsDetachedInSupervisor(ctx context.Context, f *framework.Framework, expectedInstanceName string, crdVersion string, crdGroup string) {
 	instance := getCnsNodeVMAttachmentByName(ctx, f, expectedInstanceName, crdVersion, crdGroup)
 	if instance != nil {
@@ -1284,6 +1315,7 @@ func trimQuotes(str string) string {
 		[Global]
 		insecure-flag = "true"
 		cluster-id = "domain-c1047"
+		cluster-distribution = "CSI-Vanilla"
 		[VirtualCenter "wdc-rdops-vm09-dhcp-238-224.eng.vmware.com"]
 		user = "workload_storage_management-792c9cce-3cd2-4618-8853-52f521400e05@vsphere.local"
 		password = "qd?\\/\"K=O_<ZQw~s4g(S"
@@ -1325,6 +1357,8 @@ func readConfigFromSecretString(cfg string) (e2eTestConfig, error) {
 			}
 		case "cluster-id":
 			config.Global.ClusterID = value
+		case "cluster-distribution":
+			config.Global.ClusterDistribution = value
 		case "user":
 			config.Global.User = value
 		case "password":
@@ -1452,11 +1486,11 @@ func verifyBidirectionalReferenceOfPVandPVC(ctx context.Context, client clientse
 }
 
 //Get CNS register volume
-func getCNSRegistervolume(ctx context.Context, restClientConfig *rest.Config, cnsRegisterVolume *v1alpha1.CnsRegisterVolume) *v1alpha1.CnsRegisterVolume {
+func getCNSRegistervolume(ctx context.Context, restClientConfig *rest.Config, cnsRegisterVolume *cnsregistervolumev1alpha1.CnsRegisterVolume) *cnsregistervolumev1alpha1.CnsRegisterVolume {
 	cnsOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, cnsoperatorv1alpha1.GroupName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	cns := &v1alpha1.CnsRegisterVolume{}
+	cns := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
 	err = cnsOperatorClient.Get(ctx, pkgtypes.NamespacedName{Name: cnsRegisterVolume.Name, Namespace: cnsRegisterVolume.Namespace}, cns)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1464,7 +1498,7 @@ func getCNSRegistervolume(ctx context.Context, restClientConfig *rest.Config, cn
 }
 
 // Update CNS register volume
-func updateCNSRegistervolume(ctx context.Context, restClientConfig *rest.Config, cnsRegisterVolume *v1alpha1.CnsRegisterVolume) *v1alpha1.CnsRegisterVolume {
+func updateCNSRegistervolume(ctx context.Context, restClientConfig *rest.Config, cnsRegisterVolume *cnsregistervolumev1alpha1.CnsRegisterVolume) *cnsregistervolumev1alpha1.CnsRegisterVolume {
 	cnsOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, cnsoperatorv1alpha1.GroupName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1644,7 +1678,7 @@ func getPersistentVolumeSpecFromVolume(volumeID string, persistentVolumeReclaimP
 }
 
 // DeleteStatefulPodAtIndex deletes pod given index in the desired statefulset
-func DeleteStatefulPodAtIndex(client clientset.Interface, index int, ss *apps.StatefulSet) {
+func DeleteStatefulPodAtIndex(client clientset.Interface, index int, ss *appsv1.StatefulSet) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	name := fmt.Sprintf("%v-%v", ss.Name, index)
@@ -1712,7 +1746,7 @@ func waitForAllHostsToBeUp(ctx context.Context, vs *vSphere) {
 }
 
 //psodHostWithPv methods finds the esx host where pv is residing and psods it.
-//It uses VsanObjIndentities and QueryVsanObjects apis to acheive it and returns the host ip
+//It uses VsanObjIndentities and QueryVsanObjects apis to achieve it and returns the host ip
 func psodHostWithPv(ctx context.Context, vs *vSphere, pvName string) string {
 	ginkgo.By("VsanObjIndentities")
 	framework.Logf("pvName %v", pvName)
@@ -1753,7 +1787,7 @@ func VsanObjIndentities(ctx context.Context, vs *vSphere, pvName string) string 
 		} else if supervisorCluster {
 			computeCluster = "wcp-app-platform-sanity-cluster"
 		}
-		framework.Logf("Default cluster is choosen for test")
+		framework.Logf("Default cluster is chosen for test")
 	}
 	clusterComputeResource, vsanHealthClient = getClusterComputeResource(ctx, vs)
 
@@ -1832,7 +1866,7 @@ func connectESX(username string, addr string, cmd string) (string, error) {
 }
 
 // getPersistentVolumeSpecWithStorageclass is to create PV volume spec with given FCD ID, Reclaim Policy and labels
-func getPersistentVolumeSpecWithStorageclass(volumeHandle string, persistentVolumeReclaimPolicy v1.PersistentVolumeReclaimPolicy, storageClass string, labels map[string]string) *v1.PersistentVolume {
+func getPersistentVolumeSpecWithStorageclass(volumeHandle string, persistentVolumeReclaimPolicy v1.PersistentVolumeReclaimPolicy, storageClass string, labels map[string]string, sizeOfDisk string) *v1.PersistentVolume {
 	var (
 		pvConfig fpv.PersistentVolumeConfig
 		pv       *v1.PersistentVolume
@@ -1859,7 +1893,7 @@ func getPersistentVolumeSpecWithStorageclass(volumeHandle string, persistentVolu
 		Spec: v1.PersistentVolumeSpec{
 			PersistentVolumeReclaimPolicy: persistentVolumeReclaimPolicy,
 			Capacity: v1.ResourceList{
-				v1.ResourceName(v1.ResourceStorage): resource.MustParse("2Gi"),
+				v1.ResourceName(v1.ResourceStorage): resource.MustParse(sizeOfDisk),
 			},
 			PersistentVolumeSource: pvConfig.PVSource,
 			AccessModes: []v1.PersistentVolumeAccessMode{
@@ -1881,7 +1915,7 @@ func getPersistentVolumeSpecWithStorageclass(volumeHandle string, persistentVolu
 }
 
 // getPVCSpecWithPVandStorageClass is to create PVC spec with given PV , storage class and label details
-func getPVCSpecWithPVandStorageClass(pvcName string, namespace string, labels map[string]string, pvName string, storageclass string) *v1.PersistentVolumeClaim {
+func getPVCSpecWithPVandStorageClass(pvcName string, namespace string, labels map[string]string, pvName string, storageclass string, sizeOfDisk string) *v1.PersistentVolumeClaim {
 	pvc := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: pvcName,
@@ -1893,7 +1927,7 @@ func getPVCSpecWithPVandStorageClass(pvcName string, namespace string, labels ma
 			},
 			Resources: v1.ResourceRequirements{
 				Requests: v1.ResourceList{
-					v1.ResourceName(v1.ResourceStorage): resource.MustParse("2Gi"),
+					v1.ResourceName(v1.ResourceStorage): resource.MustParse(sizeOfDisk),
 				},
 			},
 			VolumeName:       pvName,
@@ -1909,7 +1943,6 @@ func getPVCSpecWithPVandStorageClass(pvcName string, namespace string, labels ma
 
 //waitForEvent waits for and event with specified message substr for a given object name
 func waitForEvent(ctx context.Context, client clientset.Interface, namespace string, substr string, name string) error {
-	log := logger.GetLogger(ctx)
 	waitErr := wait.PollImmediate(poll, pollTimeoutShort, func() (bool, error) {
 		eventList, err := client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{FieldSelector: "involvedObject.name=" + name})
 		if err != nil {
@@ -1917,7 +1950,7 @@ func waitForEvent(ctx context.Context, client clientset.Interface, namespace str
 		}
 		for _, item := range eventList.Items {
 			if strings.Contains(item.Message, substr) {
-				log.Infof("Found event %v", item)
+				framework.Logf("Found event %v", item)
 				return true, nil
 			}
 		}
@@ -1969,7 +2002,7 @@ func bringSvcK8sAPIServerUp(ctx context.Context, client clientset.Interface, pvc
 		fssh.LogResult(result)
 		return fmt.Errorf("couldn't execute command: %s on vCenter host: %v", sshCmd, err)
 	}
-	ginkgo.By(fmt.Sprintf("polling for %v minutes...", pollTimeout))
+	ginkgo.By(fmt.Sprintf("polling for %v minutes...", healthStatusPollTimeout))
 	err = pvcHealthAnnotationWatcher(ctx, client, pvclaim, healthStatus)
 	if err != nil {
 		return err
@@ -1980,8 +2013,8 @@ func bringSvcK8sAPIServerUp(ctx context.Context, client clientset.Interface, pvc
 //pvcHealthAnnotationWatcher polls the health status of pvc and returns error if any
 func pvcHealthAnnotationWatcher(ctx context.Context, client clientset.Interface, pvclaim *v1.PersistentVolumeClaim, healthStatus string) error {
 	framework.Logf("Waiting for health annotation for pvclaim %v", pvclaim.Name)
-	waitErr := wait.Poll(pollTimeoutShort, pollTimeout, func() (bool, error) {
-		framework.Logf("wait for next poll %v", pollTimeoutShort)
+	waitErr := wait.Poll(healthStatusPollInterval, healthStatusPollTimeout, func() (bool, error) {
+		framework.Logf("wait for next poll %v", healthStatusPollInterval)
 		pvc, err := client.CoreV1().PersistentVolumeClaims(pvclaim.Namespace).Get(ctx, pvclaim.Name, metav1.GetOptions{})
 		if err != nil {
 			return false, nil
@@ -2001,8 +2034,8 @@ func waitForHostToBeUp(ip string) error {
 	framework.Logf("checking host status of %v", ip)
 	gomega.Expect(ip).NotTo(gomega.BeNil())
 	timeout := 1 * time.Second
-	waitErr := wait.Poll(pollTimeoutShort, pollTimeout, func() (bool, error) {
-		framework.Logf("wait until %v seconds", pollTimeoutShort)
+	waitErr := wait.Poll(timeout, healthStatusPollTimeout, func() (bool, error) {
+		framework.Logf("wait until %v seconds", vsanHealthServiceWaitTime)
 		_, err := net.DialTimeout("tcp", ip+":22", timeout)
 		if err != nil {
 			framework.Logf("host unreachable, error: ", err)
@@ -2029,7 +2062,7 @@ func waitForNamespaceToGetDeleted(ctx context.Context, c clientset.Interface, na
 		}
 		framework.Logf("Get namespace %s is failed, ignoring for %v: %v", namespaceToDelete, Poll, err)
 	}
-	return fmt.Errorf("Namespace %s still exists within %v", namespaceToDelete, timeout)
+	return fmt.Errorf("namespace %s still exists within %v", namespaceToDelete, timeout)
 }
 
 // waitForCNSRegisterVolumeToGetCreated waits for a cnsRegisterVolume to get created or until timeout occurs, whichever comes first.
@@ -2041,7 +2074,6 @@ func waitForCNSRegisterVolumeToGetCreated(ctx context.Context, restConfig *rest.
 		cnsRegisterVolume = getCNSRegistervolume(ctx, restConfig, cnsRegisterVolume)
 		flag := cnsRegisterVolume.Status.Registered
 		if !flag {
-			framework.Logf("cnsRegisterVolume %s found and Registered status is  =%s (%v)", cnsRegisterVolumeName, flag, time.Since(start))
 			continue
 		} else {
 			return nil
@@ -2075,15 +2107,17 @@ func getK8sMasterIP(ctx context.Context, client clientset.Interface) string {
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var k8sMasterIP string
 	for _, node := range nodes.Items {
-		if strings.Contains(node.Name, "master") {
+		if strings.Contains(node.Name, "master") || strings.Contains(node.Name, "control") {
 			addrs := node.Status.Addresses
 			for _, addr := range addrs {
-				if addr.Type == v1.NodeExternalIP {
+				if addr.Type == v1.NodeExternalIP && (net.ParseIP(addr.Address)).To4() != nil {
 					k8sMasterIP = addr.Address
+					break
 				}
 			}
 		}
 	}
+	gomega.Expect(k8sMasterIP).NotTo(gomega.BeNil(), "Unable to find k8s control plane IP")
 	return k8sMasterIP
 }
 
@@ -2101,7 +2135,7 @@ func toggleCSIMigrationFeatureGatesOnKubeControllerManager(ctx context.Context, 
 	}
 	grepCmd := "grep CSIMigration " + kcmManifest
 	k8sMasterIP := getK8sMasterIP(ctx, client)
-	framework.Logf("Invoking command %v on host %v", grepCmd, k8sMasterIP)
+	framework.Logf("Invoking command '%v' on host %v", grepCmd, k8sMasterIP)
 	sshClientConfig := &ssh.ClientConfig{
 		User: "root",
 		Auth: []ssh.AuthMethod{
@@ -2139,6 +2173,7 @@ func toggleCSIMigrationFeatureGatesOnKubeControllerManager(ctx context.Context, 
 	return err
 }
 
+//sshExec runs a command on the host via ssh
 func sshExec(sshClientConfig *ssh.ClientConfig, host string, cmd string) (fssh.Result, error) {
 	result := fssh.Result{Host: host, Cmd: cmd}
 	sshClient, err := ssh.Dial("tcp", host+":22", sshClientConfig)
@@ -2199,6 +2234,108 @@ func createPod(client clientset.Interface, namespace string, nodeSelector map[st
 	return pod, nil
 }
 
+// createDeployment create a deployment with 1 replica for given pvcs and node selector
+func createDeployment(ctx context.Context, client clientset.Interface, replicas int32, podLabels map[string]string, nodeSelector map[string]string, namespace string, pvclaims []*v1.PersistentVolumeClaim, command string, isPrivileged bool) (*appsv1.Deployment, error) {
+	if len(command) == 0 {
+		command = "trap exit TERM; while true; do sleep 1; done"
+	}
+	zero := int64(0)
+	deploymentName := "deployment-" + string(uuid.NewUUID())
+	deploymentSpec := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      deploymentName,
+			Namespace: namespace,
+		},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: &replicas,
+			Selector: &metav1.LabelSelector{
+				MatchLabels: podLabels,
+			},
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: podLabels,
+				},
+				Spec: v1.PodSpec{
+					TerminationGracePeriodSeconds: &zero,
+					Containers: []v1.Container{
+						{
+							Name:    "write-pod",
+							Image:   busyBoxImageOnGcr,
+							Command: []string{"/bin/sh"},
+							Args:    []string{"-c", command},
+							SecurityContext: &v1.SecurityContext{
+								Privileged: &isPrivileged,
+							},
+						},
+					},
+					RestartPolicy: v1.RestartPolicyAlways,
+				},
+			},
+		},
+	}
+	var volumeMounts = make([]v1.VolumeMount, len(pvclaims))
+	var volumes = make([]v1.Volume, len(pvclaims))
+	for index, pvclaim := range pvclaims {
+		volumename := fmt.Sprintf("volume%v", index+1)
+		volumeMounts[index] = v1.VolumeMount{Name: volumename, MountPath: "/mnt/" + volumename}
+		volumes[index] = v1.Volume{Name: volumename, VolumeSource: v1.VolumeSource{PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{ClaimName: pvclaim.Name, ReadOnly: false}}}
+	}
+	deploymentSpec.Spec.Template.Spec.Containers[0].VolumeMounts = volumeMounts
+	deploymentSpec.Spec.Template.Spec.Volumes = volumes
+	if nodeSelector != nil {
+		deploymentSpec.Spec.Template.Spec.NodeSelector = nodeSelector
+	}
+	deployment, err := client.AppsV1().Deployments(namespace).Create(ctx, deploymentSpec, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("deployment %q Create API error: %v", deploymentSpec.Name, err)
+	}
+	framework.Logf("Waiting deployment %q to complete", deploymentSpec.Name)
+	err = fdep.WaitForDeploymentComplete(client, deployment)
+	if err != nil {
+		return nil, fmt.Errorf("deployment %q failed to complete: %v", deploymentSpec.Name, err)
+	}
+	return deployment, nil
+}
+
+// createPodForFSGroup helps create pod with fsGroup
+func createPodForFSGroup(client clientset.Interface, namespace string, nodeSelector map[string]string, pvclaims []*v1.PersistentVolumeClaim, isPrivileged bool, command string, fsGroup *int64, runAsUser *int64) (*v1.Pod, error) {
+	if len(command) == 0 {
+		command = "trap exit TERM; while true; do sleep 1; done"
+	}
+	if fsGroup == nil {
+		fsGroup = func(i int64) *int64 {
+			return &i
+		}(1000)
+	}
+	if runAsUser == nil {
+		runAsUser = func(i int64) *int64 {
+			return &i
+		}(2000)
+	}
+
+	pod := fpod.MakePod(namespace, nodeSelector, pvclaims, isPrivileged, command)
+	pod.Spec.Containers[0].Image = busyBoxImageOnGcr
+	pod.Spec.SecurityContext = &v1.PodSecurityContext{
+		RunAsUser: runAsUser,
+		FSGroup:   fsGroup,
+	}
+	pod, err := client.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("pod Create API error: %v", err)
+	}
+	// Waiting for pod to be running
+	err = fpod.WaitForPodNameRunningInNamespace(client, pod.Name, namespace)
+	if err != nil {
+		return pod, fmt.Errorf("pod %q is not Running: %v", pod.Name, err)
+	}
+	// get fresh pod info
+	pod, err = client.CoreV1().Pods(namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return pod, fmt.Errorf("pod Get API error: %v", err)
+	}
+	return pod, nil
+}
+
 // getPersistentVolumeSpecForFileShare returns the PersistentVolume spec
 func getPersistentVolumeSpecForFileShare(fileshareID string, persistentVolumeReclaimPolicy v1.PersistentVolumeReclaimPolicy, labels map[string]string, accessMode v1.PersistentVolumeAccessMode) *v1.PersistentVolume {
 	pv := getPersistentVolumeSpec(fileshareID, persistentVolumeReclaimPolicy, labels)
@@ -2214,7 +2351,7 @@ func getPersistentVolumeClaimSpecForFileShare(namespace string, labels map[strin
 }
 
 //deleteFcdWithRetriesForSpecificErr method to retry fcd deletion when a specific error is encountered
-func deleteFcdWithRetriesForSpecificErr(ctx context.Context, fcdID string, dsRef types.ManagedObjectReference, errsToIgnore []string, errsToContinue []string) error {
+func deleteFcdWithRetriesForSpecificErr(ctx context.Context, fcdID string, dsRef vim25types.ManagedObjectReference, errsToIgnore []string, errsToContinue []string) error {
 	var err error
 	waitErr := wait.PollImmediate(poll*15, pollTimeout, func() (bool, error) {
 		framework.Logf("Trying to delete FCD: %s", fcdID)
@@ -2258,9 +2395,11 @@ func getDefaultDatastore(ctx context.Context) *object.Datastore {
 			defaultDatacenter, err := finder.Datacenter(ctx, dc)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			finder.SetDatacenter(defaultDatacenter)
+			framework.Logf("Looking for default datastore in DC: " + dc)
 			datastoreURL := GetAndExpectStringEnvVar(envSharedDatastoreURL)
 			defaultDatastore, err = getDatastoreByURL(ctx, datastoreURL, defaultDatacenter)
 			if err == nil {
+				framework.Logf("Datstore found for DS URL:" + datastoreURL)
 				break
 			}
 		}
@@ -2268,4 +2407,195 @@ func getDefaultDatastore(ctx context.Context) *object.Datastore {
 	}
 
 	return defaultDatastore
+}
+
+//setClusterDistribution sets the input cluster-distribution in vsphere-config-secret
+func setClusterDistribution(ctx context.Context, client clientset.Interface, clusterDistribution string) {
+	framework.Logf("Cluster distribution to set is = %s", clusterDistribution)
+
+	// Get the current cluster-distribution value from secret
+	currentSecret, err := client.CoreV1().Secrets(csiSystemNamespace).Get(ctx, configSecret, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	framework.Logf("Secret Name is %s", currentSecret.Name)
+
+	//Read and map the content of csi-vsphere.conf to a variable
+	originalConf := string(currentSecret.Data[vSphereCSIConf])
+	cfg, err := readConfigFromSecretString(originalConf)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	//Current value of cluster-distribution is
+	framework.Logf("Cluster-distribution value before modifying is = %s", cfg.Global.ClusterDistribution)
+
+	// Check if the cluster-distribution value is as required or reset
+	if cfg.Global.ClusterDistribution != clusterDistribution {
+		// Modify csi-vsphere.conf file
+		modifiedConf := fmt.Sprintf("[Global]\ninsecure-flag = \"%t\"\ncluster-id = \"%s\"\ncluster-distribution = \"%s\"\n\n[VirtualCenter \"%s\"]\nuser = \"%s\"\npassword = \"%s\"\ndatacenters = \"%s\"\nport = \"%s\"\n",
+			cfg.Global.InsecureFlag, cfg.Global.ClusterID, clusterDistribution, cfg.Global.VCenterHostname, cfg.Global.User, cfg.Global.Password, cfg.Global.Datacenters, cfg.Global.VCenterPort)
+
+		// Set modified csi-vsphere.conf file and update
+		currentSecret.Data[vSphereCSIConf] = []byte(modifiedConf)
+		_, err := client.CoreV1().Secrets(csiSystemNamespace).Update(ctx, currentSecret, metav1.UpdateOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		//Adding a explicit wait of one min for the Cluster-distribution to reflect latest value
+		time.Sleep(time.Duration(pollTimeoutShort))
+
+		framework.Logf("Cluster distribution value is now set to = %s", clusterDistribution)
+
+	} else {
+		framework.Logf("Cluster-distribution value is already as expected, no changes done. Value is %s", cfg.Global.ClusterDistribution)
+	}
+}
+
+//toggleCSIMigrationFeatureGatesOnK8snodes to toggle CSI migration feature gates on kublets for worker nodes
+func toggleCSIMigrationFeatureGatesOnK8snodes(ctx context.Context, client clientset.Interface, shouldEnable bool) {
+	var err error
+	nodes, err := client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, node := range nodes.Items {
+		if strings.Contains(node.Name, "master") || strings.Contains(node.Name, "control") {
+			continue
+		}
+		dh := drain.Helper{
+			Ctx:                 ctx,
+			Client:              client,
+			Force:               true,
+			IgnoreAllDaemonSets: true,
+			Out:                 ginkgo.GinkgoWriter,
+			ErrOut:              ginkgo.GinkgoWriter,
+		}
+		ginkgo.By("Cordoning of node: " + node.Name)
+		err = drain.RunCordonOrUncordon(&dh, &node, true)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.By("Draining of node: " + node.Name)
+		err = drain.RunNodeDrain(&dh, node.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.By("Modifying feature gates in kubelet config yaml of node: " + node.Name)
+		nodeIP := getK8sNodeIP(&node)
+		toggleCSIMigrationFeatureGatesOnkublet(ctx, client, nodeIP, shouldEnable)
+		ginkgo.By("Wait for feature gates update on the k8s CSI node: " + node.Name)
+		err = waitForCSIMigrationFeatureGatesToggleOnkublet(ctx, client, node.Name, shouldEnable)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.By("Uncordoning of node: " + node.Name)
+		err = drain.RunCordonOrUncordon(&dh, &node, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+}
+
+//waitForCSIMigrationFeatureGatesToggleOnkublet wait for CSIMigration Feature Gates toggle result on the csinode
+func waitForCSIMigrationFeatureGatesToggleOnkublet(ctx context.Context, client clientset.Interface, nodeName string, added bool) error {
+	var found bool
+	waitErr := wait.PollImmediate(poll*5, pollTimeout, func() (bool, error) {
+		csinode, err := client.StorageV1().CSINodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		found = false
+		for annotation, value := range csinode.Annotations {
+			if annotation == migratedPluginAnnotation && value == vcpProvisionerName {
+				found = true
+				break
+			}
+		}
+		if added && found {
+			return true, nil
+		}
+		if !added && !found {
+			return true, nil
+		}
+		return false, nil
+	})
+	return waitErr
+}
+
+//toggleCSIMigrationFeatureGatesOnkublet adds/remove CSI migration feature gates to kubelet config yaml in given k8s node
+func toggleCSIMigrationFeatureGatesOnkublet(ctx context.Context, client clientset.Interface, nodeIP string, shouldAdd bool) {
+	grepCmd := "grep CSIMigration " + kubeletConfigYaml
+	framework.Logf("Invoking command '%v' on host %v", grepCmd, nodeIP)
+	sshClientConfig := &ssh.ClientConfig{
+		User: "root",
+		Auth: []ssh.AuthMethod{
+			ssh.Password("ca$hc0w"),
+		},
+		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+	}
+
+	result, err := sshExec(sshClientConfig, nodeIP, grepCmd)
+	if err != nil {
+		fssh.LogResult(result)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("command failed/couldn't execute command: %s on host: %v", grepCmd, nodeIP))
+	}
+
+	var sshCmd string
+	if result.Code != 0 && shouldAdd {
+		// please don't change alignment in below assignment
+		sshCmd = `echo "featureGates:
+  {
+    "CSIMigration": true,
+	"CSIMigrationvSphere": true
+  }" >>` + kubeletConfigYaml
+	} else if result.Code == 0 && !shouldAdd {
+		sshCmd = fmt.Sprintf("head -n -5 %s > tmp.txt && mv tmp.txt %s", kubeletConfigYaml, kubeletConfigYaml)
+	} else {
+		return
+	}
+	framework.Logf("Invoking command '%v' on host %v", sshCmd, nodeIP)
+	result, err = sshExec(sshClientConfig, nodeIP, sshCmd)
+	if err != nil && result.Code != 0 {
+		fssh.LogResult(result)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("command failed/couldn't execute command: %s on host: %v", sshCmd, nodeIP))
+	}
+	restartKubeletCmd := "systemctl daemon-reload && systemctl restart kubelet"
+	framework.Logf("Invoking command '%v' on host %v", restartKubeletCmd, nodeIP)
+	result, err = sshExec(sshClientConfig, nodeIP, restartKubeletCmd)
+	if err != nil && result.Code != 0 {
+		fssh.LogResult(result)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("command failed/couldn't execute command: %s on host: %v", restartKubeletCmd, nodeIP))
+	}
+}
+
+// getK8sNodeIP returns the IP for the given k8s node
+func getK8sNodeIP(node *v1.Node) string {
+	var address string
+	addrs := node.Status.Addresses
+	for _, addr := range addrs {
+		if addr.Type == v1.NodeExternalIP && (net.ParseIP(addr.Address)).To4() != nil {
+			address = addr.Address
+			break
+		}
+	}
+	gomega.Expect(address).NotTo(gomega.BeNil(), "Unable to find IP for node: "+node.Name)
+	return address
+}
+
+//expectedAnnotation polls for the given annotation in pvc and returns error if its not present
+func expectedAnnotation(ctx context.Context, client clientset.Interface, pvclaim *v1.PersistentVolumeClaim, annotation string) error {
+	framework.Logf("Waiting for health annotation for pvclaim %v", pvclaim.Name)
+	waitErr := wait.Poll(healthStatusPollInterval, pollTimeout, func() (bool, error) {
+		framework.Logf("wait for next poll %v", healthStatusPollInterval)
+		pvc, err := client.CoreV1().PersistentVolumeClaims(pvclaim.Namespace).Get(ctx, pvclaim.Name, metav1.GetOptions{})
+		if err != nil {
+			return false, err
+		}
+		for pvcAnnotation := range pvc.Annotations {
+			if pvcAnnotation == annotation {
+				return true, nil
+			}
+		}
+		return false, nil
+	})
+	return waitErr
+}
+
+//getRestConfigClient returns  rest config client
+func getRestConfigClient() *rest.Config {
+	// Get restConfig
+	var err error
+	if restConfig == nil {
+		if k8senv := GetAndExpectStringEnvVar("SUPERVISOR_CLUSTER_KUBE_CONFIG"); k8senv != "" {
+			restConfig, err = clientcmd.BuildConfigFromFlags("", k8senv)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+	}
+	return restConfig
 }

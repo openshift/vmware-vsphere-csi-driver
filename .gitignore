@@ -24,6 +24,12 @@ coverage_report.out
 # Ignore marker files.
 **/*.d
 
+# Ignore any Dockerfiles at the root of the project.
+/Dockerfile*
+
+# Ignore vendor at the root of the project.
+/vendor
+
 # OSX trash
 .DS_Store
 
@@ -32,6 +38,7 @@ coverage_report.out
 
 # Test reports
 junit_check.xml
+/tests/e2e/junit.xml
 
 # binaries
 /vsphere-csi

@@ -17,23 +17,24 @@ limitations under the License.
 package wcp
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/prometheus"
-
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/fsnotify/fsnotify"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/units"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
+
+	"sigs.k8s.io/vsphere-csi-driver/pkg/common/prometheus"
 
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
@@ -42,6 +43,7 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
 const (
@@ -72,11 +74,7 @@ func New() csitypes.CnsController {
 
 // Init is initializing controller struct
 func (c *controller) Init(config *cnsconfig.Config, version string) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-
+	ctx, log := logger.GetNewContextWithLogger()
 	log.Infof("Initializing WCP CSI controller")
 	var err error
 	// Get VirtualCenterManager instance and validate version
@@ -91,10 +89,22 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		log.Errorf("failed to register VC with virtualCenterManager. err=%v", err)
 		return err
 	}
+	var operationStore cnsvolumeoperationrequest.VolumeOperationRequest
+	idempotencyHandlingEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		common.CSIVolumeManagerIdempotency)
+	if idempotencyHandlingEnabled {
+		log.Info("CSI Volume manager idempotency handling feature flag is enabled.")
+		operationStore, err = cnsvolumeoperationrequest.InitVolumeOperationRequestInterface(ctx,
+			c.manager.CnsConfig.Global.CnsVolumeOperationRequestCleanupIntervalInMin)
+		if err != nil {
+			log.Errorf("failed to initialize VolumeOperationRequestInterface with error: %v", err)
+			return err
+		}
+	}
 	c.manager = &common.Manager{
 		VcenterConfig:  vcenterconfig,
 		CnsConfig:      config,
-		VolumeManager:  cnsvolume.GetManager(ctx, vcenter),
+		VolumeManager:  cnsvolume.GetManager(ctx, vcenter, operationStore, idempotencyHandlingEnabled),
 		VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 	}
 
@@ -115,7 +125,6 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		log.Errorf("failed to create fsnotify watcher. err=%v", err)
 		return err
 	}
-
 	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIAuthCheck) {
 		log.Info("CSIAuthCheck feature is enabled, loading AuthorizationService")
 		authMgr, err := common.GetAuthorizationService(ctx, vc)
@@ -125,8 +134,9 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		}
 		c.authMgr = authMgr
 		// TODO: Invoke similar method for block volumes
-		go common.ComputeDatastoreMapForFileVolumes(authMgr.(*common.AuthManager), config.Global.CSIAuthCheckIntervalInMin)
+		go common.ComputeFSEnabledClustersToDsMap(authMgr.(*common.AuthManager), config.Global.CSIAuthCheckIntervalInMin)
 	}
+
 	go func() {
 		for {
 			log.Debugf("Waiting for event on fsnotify watcher")
@@ -137,7 +147,33 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 				}
 				log.Debugf("fsnotify event: %q", event.String())
 				if event.Op&fsnotify.Remove == fsnotify.Remove {
-					c.ReloadConfiguration()
+					for {
+						reloadConfigErr := c.ReloadConfiguration(false)
+						if reloadConfigErr == nil {
+							log.Infof("Successfully reloaded configuration from: %q", cfgPath)
+							break
+						}
+						log.Errorf("failed to reload configuration. will retry again in 5 seconds. err: %+v", reloadConfigErr)
+						time.Sleep(5 * time.Second)
+					}
+				}
+				// Handling create event for reconnecting to VC when ca file is rotated
+				// In Supervisor cluster, ca file gets rotated at the path /etc/vmware/wcp/tls/vmca.pem
+				// WCP is handling ca file rotation by creating a /etc/vmware/wcp/tls/vmca.pem.tmp file with new contents
+				// and then renaming the file back to /etc/vmware/wcp/tls/vmca.pem.
+				// For such operations, fsnotify handles the event as a CREATE event
+				// The condition below also ensures that the event is for the expected ca file path
+				if event.Op&fsnotify.Create == fsnotify.Create && event.Name == cnsconfig.SupervisorCAFilePath {
+					log.Infof("Observed ca file rotation at: %q", cnsconfig.SupervisorCAFilePath)
+					for {
+						reconnectVCErr := c.ReloadConfiguration(true)
+						if reconnectVCErr == nil {
+							log.Infof("Successfully re-established connection with VC from: %q", cnsconfig.SupervisorCAFilePath)
+							break
+						}
+						log.Errorf("failed to re-establish VC connection. Will retry again in 60 seconds. err: %+v", reconnectVCErr)
+						time.Sleep(60 * time.Second)
+					}
 				}
 			case err, ok := <-watcher.Errors:
 				if !ok {
@@ -153,6 +189,13 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 	err = watcher.Add(cfgDirPath)
 	if err != nil {
 		log.Errorf("failed to watch on path: %q. err=%v", cfgDirPath, err)
+		return err
+	}
+	caFileDirPath := filepath.Dir(cnsconfig.SupervisorCAFilePath)
+	log.Infof("Adding watch on path: %q", caFileDirPath)
+	err = watcher.Add(caFileDirPath)
+	if err != nil {
+		log.Errorf("failed to watch on path: %q. err=%v", caFileDirPath, err)
 		return err
 	}
 	// Go module to keep the metrics http server running all the time.
@@ -173,54 +216,83 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 
 // ReloadConfiguration reloads configuration from the secret, and update controller's config cache
 // and VolumeManager's VC Config cache.
-func (c *controller) ReloadConfiguration() {
+// The function takes a boolean reconnectToVCFromNewConfig as ainputs.
+// If reconnectToVCFromNewConfig is set to true, the function re-establishes connection with VC,
+// else based on the configuration data changed during reload, the function resets config, reloads VC connection
+// when credentials are changed and returns appropriate error
+func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error {
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Info("Reloading Configuration")
 	cfg, err := common.GetConfig(ctx)
 	if err != nil {
 		log.Errorf("failed to read config. Error: %+v", err)
-		return
+		return err
 	}
 	newVCConfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, cfg)
 	if err != nil {
 		log.Errorf("failed to get VirtualCenterConfig. err=%v", err)
-		return
+		return err
 	}
 	if newVCConfig != nil {
 		var vcenter *cnsvsphere.VirtualCenter
 		if c.manager.VcenterConfig.Host != newVCConfig.Host ||
 			c.manager.VcenterConfig.Username != newVCConfig.Username ||
-			c.manager.VcenterConfig.Password != newVCConfig.Password {
-			log.Debugf("Unregistering virtual center: %q from virtualCenterManager", c.manager.VcenterConfig.Host)
-			err = c.manager.VcenterManager.UnregisterAllVirtualCenters(ctx)
-			if err != nil {
-				log.Errorf("failed to unregister vcenter with virtualCenterManager.")
-				return
+			c.manager.VcenterConfig.Password != newVCConfig.Password || reconnectToVCFromNewConfig {
+
+			// Verify if new configuration has valid credentials by connecting to vCenter.
+			// Proceed only if the connection succeeds, else return error.
+			newVC := &cnsvsphere.VirtualCenter{Config: newVCConfig}
+			if err = newVC.Connect(ctx); err != nil {
+				msg := fmt.Sprintf("failed to connect to VirtualCenter host: %q, Err: %+v", newVCConfig.Host, err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
-			log.Debugf("Registering virtual center: %q with virtualCenterManager", newVCConfig.Host)
-			vcenter, err = c.manager.VcenterManager.RegisterVirtualCenter(ctx, newVCConfig)
+
+			// Reset virtual center singleton instance by passing reload flag as true
+			log.Info("Obtaining new vCenterInstance")
+			vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, true)
 			if err != nil {
-				log.Errorf("failed to register VC with virtualCenterManager. err=%v", err)
-				return
+				msg := fmt.Sprintf("failed to get VirtualCenter. err=%v", err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
-			c.manager.VcenterManager = cnsvsphere.GetVirtualCenterManager(ctx)
 		} else {
-			vcenter, err = c.manager.VcenterManager.GetVirtualCenter(ctx, newVCConfig.Host)
+			// If it's not a VC host or VC credentials update, same singleton instance can be used
+			// and it's Config field can be updated
+			vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, false)
 			if err != nil {
-				log.Errorf("failed to get VirtualCenter. err=%v", err)
-				return
+				msg := fmt.Sprintf("failed to get VirtualCenter. err=%v", err)
+				log.Error(msg)
+				return errors.New(msg)
 			}
 			vcenter.Config = newVCConfig
 		}
+		var operationStore cnsvolumeoperationrequest.VolumeOperationRequest
+		idempotencyHandlingEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+			common.CSIVolumeManagerIdempotency)
+		if idempotencyHandlingEnabled {
+			log.Info("CSI Volume manager idempotency handling feature flag is enabled.")
+			operationStore, err = cnsvolumeoperationrequest.InitVolumeOperationRequestInterface(ctx,
+				c.manager.CnsConfig.Global.CnsVolumeOperationRequestCleanupIntervalInMin)
+			if err != nil {
+				log.Errorf("failed to initialize VolumeOperationRequestInterface with error: %v", err)
+				return err
+			}
+		}
 		c.manager.VolumeManager.ResetManager(ctx, vcenter)
-		c.manager.VolumeManager = cnsvolume.GetManager(ctx, vcenter)
 		c.manager.VcenterConfig = newVCConfig
+		c.manager.VolumeManager = cnsvolume.GetManager(ctx, vcenter, operationStore, commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIVolumeManagerIdempotency))
+		if c.authMgr != nil {
+			c.authMgr.ResetvCenterInstance(ctx, vcenter)
+			log.Debugf("Updated vCenter in auth manager")
+		}
 	}
 	if cfg != nil {
-		log.Debugf("updating manager.CnsConfig")
 		c.manager.CnsConfig = cfg
+		log.Debugf("Updated manager.CnsConfig")
 	}
 	log.Info("Successfully reloaded configuration")
+	return nil
 }
 
 // createBlockVolume creates a block volume based on the CreateVolumeRequest.
@@ -384,12 +456,21 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 	var volumeID string
 	var err error
 
-	dsURLToInfoMap := c.authMgr.GetDatastoreMapForFileVolumes(ctx)
-	log.Debugf("Filtered Datastores: %+v", dsURLToInfoMap)
+	fsEnabledClusterToDsMap := c.authMgr.GetFsEnabledClusterToDsMap(ctx)
 	var filteredDatastores []*cnsvsphere.DatastoreInfo
-	for _, datastore := range dsURLToInfoMap {
-		filteredDatastores = append(filteredDatastores, datastore)
+
+	// targetvSANFileShareClusters is set in CSI secret when file volume feature is enabled
+	// on WCP. So we get datastores with privileges to create file volumes for each specified
+	// vSAN cluster, and use those datastores to create file volumes.
+	for _, targetvSANcluster := range c.manager.VcenterConfig.TargetvSANFileShareClusters {
+		if datastores, ok := fsEnabledClusterToDsMap[targetvSANcluster]; ok {
+			for _, dsInfo := range datastores {
+				log.Debugf("Adding datastore %q to filtered datastores", dsInfo.Info.Url)
+				filteredDatastores = append(filteredDatastores, dsInfo)
+			}
+		}
 	}
+
 	if len(filteredDatastores) == 0 {
 		msg := "no datastores found to create file volume"
 		log.Error(msg)
@@ -507,135 +588,164 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 // volume id and node name is retrieved from ControllerPublishVolumeRequest
 func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (
 	*csi.ControllerPublishVolumeResponse, error) {
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-	log.Infof("ControllerPublishVolume: called with args %+v", *req)
-	err := validateWCPControllerPublishVolumeRequest(ctx, req)
-	if err != nil {
-		msg := fmt.Sprintf("Validation for PublishVolume Request: %+v has failed. Error: %v", *req, err)
-		log.Errorf(msg)
-		return nil, err
-	}
+	start := time.Now()
+	volumeType := prometheus.PrometheusUnknownVolumeType
 
-	vmuuid, err := getVMUUIDFromK8sCloudOperatorService(ctx, req.VolumeId, req.NodeId)
-	if err != nil {
-		msg := fmt.Sprintf("Failed to get the pod vmuuid annotation from the k8sCloudOperator service when processing attach for volumeID: %s on node: %s. Error: %+v", req.VolumeId, req.NodeId, err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
+	controllerPublishVolumeInternal := func() (
+		*csi.ControllerPublishVolumeResponse, error) {
+		ctx = logger.NewContextWithLogger(ctx)
+		log := logger.GetLogger(ctx)
+		log.Infof("ControllerPublishVolume: called with args %+v", *req)
+		err := validateWCPControllerPublishVolumeRequest(ctx, req)
+		if err != nil {
+			msg := fmt.Sprintf("Validation for PublishVolume Request: %+v has failed. Error: %v", *req, err)
+			log.Errorf(msg)
+			return nil, err
+		}
+		volumeType = prometheus.PrometheusBlockVolumeType
 
-	vcdcMap, err := getDatacenterFromConfig(c.manager.CnsConfig)
-	if err != nil {
-		msg := fmt.Sprintf("failed to get datacenter from config with error: %+v", err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
-	var vCenterHost, dcMorefValue string
-	for key, value := range vcdcMap {
-		vCenterHost = key
-		dcMorefValue = value
-	}
-	vc, err := c.manager.VcenterManager.GetVirtualCenter(ctx, vCenterHost)
-	if err != nil {
-		msg := fmt.Sprintf("Cannot get virtual center %s from virtualcentermanager while attaching disk with error %+v",
-			vc.Config.Host, err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
+		vmuuid, err := getVMUUIDFromK8sCloudOperatorService(ctx, req.VolumeId, req.NodeId)
+		if err != nil {
+			msg := fmt.Sprintf("Failed to get the pod vmuuid annotation from the k8sCloudOperator service when processing attach for volumeID: %s on node: %s. Error: %+v", req.VolumeId, req.NodeId, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 
-	// Connect to VC
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	err = vc.Connect(ctx)
-	if err != nil {
-		msg := fmt.Sprintf("failed to connect to Virtual Center: %s", vc.Config.Host)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
+		vcdcMap, err := getDatacenterFromConfig(c.manager.CnsConfig)
+		if err != nil {
+			msg := fmt.Sprintf("failed to get datacenter from config with error: %+v", err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
+		var vCenterHost, dcMorefValue string
+		for key, value := range vcdcMap {
+			vCenterHost = key
+			dcMorefValue = value
+		}
+		vc, err := c.manager.VcenterManager.GetVirtualCenter(ctx, vCenterHost)
+		if err != nil {
+			msg := fmt.Sprintf("Cannot get virtual center %s from virtualcentermanager while attaching disk with error %+v",
+				vc.Config.Host, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 
-	podVM, err := getVMByInstanceUUIDInDatacenter(ctx, vc, dcMorefValue, vmuuid)
-	if err != nil {
-		msg := fmt.Sprintf("failed to the PodVM Moref from the PodVM UUID: %s in datacenter: %s with err: %+v", vmuuid, dcMorefValue, err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
+		// Connect to VC
+		err = vc.Connect(ctx)
+		if err != nil {
+			msg := fmt.Sprintf("failed to connect to Virtual Center: %s", vc.Config.Host)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 
-	// Attach the volume to the node
-	diskUUID, err := common.AttachVolumeUtil(ctx, c.manager, podVM, req.VolumeId)
-	if err != nil {
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FakeAttach) {
-			log.Infof("Volume attachment failed. Checking if it can be fake attached")
-			var capabilities []*csi.VolumeCapability
-			capabilities = append(capabilities, req.VolumeCapability)
-			if !common.IsFileVolumeRequest(ctx, capabilities) { //Block volume
-				allowed, err := commonco.ContainerOrchestratorUtility.IsFakeAttachAllowed(ctx, req.VolumeId, c.manager.VolumeManager)
-				if err != nil {
-					msg := fmt.Sprintf("failed to determine if volume: %s can be fake attached. Error: %+v", req.VolumeId, err)
-					log.Error(msg)
-					return nil, status.Errorf(codes.Internal, msg)
-				}
+		podVM, err := getVMByInstanceUUIDInDatacenter(ctx, vc, dcMorefValue, vmuuid)
+		if err != nil {
+			msg := fmt.Sprintf("failed to the PodVM Moref from the PodVM UUID: %s in datacenter: %s with err: %+v", vmuuid, dcMorefValue, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
 
-				if allowed {
-					// Mark the volume as fake attached before returning response
-					err := commonco.ContainerOrchestratorUtility.MarkFakeAttached(ctx, req.VolumeId)
+		// Attach the volume to the node
+		diskUUID, err := common.AttachVolumeUtil(ctx, c.manager, podVM, req.VolumeId, true)
+		if err != nil {
+			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FakeAttach) {
+				log.Infof("Volume attachment failed. Checking if it can be fake attached")
+				var capabilities []*csi.VolumeCapability
+				capabilities = append(capabilities, req.VolumeCapability)
+				if !common.IsFileVolumeRequest(ctx, capabilities) { //Block volume
+					allowed, err := commonco.ContainerOrchestratorUtility.IsFakeAttachAllowed(ctx, req.VolumeId, c.manager.VolumeManager)
 					if err != nil {
-						msg := fmt.Sprintf("failed to mark volume: %s as fake attached. Error: %+v", req.VolumeId, err)
+						msg := fmt.Sprintf("failed to determine if volume: %s can be fake attached. Error: %+v", req.VolumeId, err)
 						log.Error(msg)
 						return nil, status.Errorf(codes.Internal, msg)
 					}
 
-					publishInfo := make(map[string]string)
-					publishInfo[common.AttributeDiskType] = common.DiskTypeBlockVolume
-					publishInfo[common.AttributeFakeAttached] = "true"
+					if allowed {
+						// Mark the volume as fake attached before returning response
+						err := commonco.ContainerOrchestratorUtility.MarkFakeAttached(ctx, req.VolumeId)
+						if err != nil {
+							msg := fmt.Sprintf("failed to mark volume: %s as fake attached. Error: %+v", req.VolumeId, err)
+							log.Error(msg)
+							return nil, status.Errorf(codes.Internal, msg)
+						}
 
-					resp := &csi.ControllerPublishVolumeResponse{
-						PublishContext: publishInfo,
+						publishInfo := make(map[string]string)
+						publishInfo[common.AttributeDiskType] = common.DiskTypeBlockVolume
+						publishInfo[common.AttributeFakeAttached] = "true"
+
+						resp := &csi.ControllerPublishVolumeResponse{
+							PublishContext: publishInfo,
+						}
+						log.Infof("Volume %s has been fake attached", req.VolumeId)
+						return resp, nil
 					}
-					log.Infof("Volume %s has been fake attached", req.VolumeId)
-					return resp, nil
 				}
+
+				log.Infof("Volume %s is not eligible to be fake attached", req.VolumeId)
 			}
-
-			log.Infof("Volume %s is not eligible to be fake attached", req.VolumeId)
+			msg := fmt.Sprintf("failed to attach volume with volumeID: %s. Error: %+v", req.VolumeId, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
 		}
-		msg := fmt.Sprintf("failed to attach volume with volumeID: %s. Error: %+v", req.VolumeId, err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
 
-	publishInfo := make(map[string]string)
-	publishInfo[common.AttributeDiskType] = common.DiskTypeBlockVolume
-	publishInfo[common.AttributeFirstClassDiskUUID] = common.FormatDiskUUID(diskUUID)
-	resp := &csi.ControllerPublishVolumeResponse{
-		PublishContext: publishInfo,
-	}
+		publishInfo := make(map[string]string)
+		publishInfo[common.AttributeDiskType] = common.DiskTypeBlockVolume
+		publishInfo[common.AttributeFirstClassDiskUUID] = common.FormatDiskUUID(diskUUID)
+		resp := &csi.ControllerPublishVolumeResponse{
+			PublishContext: publishInfo,
+		}
 
-	return resp, nil
+		return resp, nil
+	}
+	resp, err := controllerPublishVolumeInternal()
+	if err != nil {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusAttachVolumeOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusAttachVolumeOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return resp, err
 }
 
 // ControllerUnpublishVolume detaches a volume from the Node VM.
 // volume id and node name is retrieved from ControllerUnpublishVolumeRequest
 func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (
 	*csi.ControllerUnpublishVolumeResponse, error) {
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-	log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
-	err := validateWCPControllerUnpublishVolumeRequest(ctx, req)
-	if err != nil {
-		msg := fmt.Sprintf("Validation for UnpublishVolume Request: %+v has failed. Error: %v", *req, err)
-		log.Error(msg)
-		return nil, err
-	}
-
-	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FakeAttach) {
-		// Check if the volume was fake attached and unmark it as not fake attached
-		if err := commonco.ContainerOrchestratorUtility.ClearFakeAttached(ctx, req.VolumeId); err != nil {
-			msg := fmt.Sprintf("Failed to unmark volume as not fake attached. Error: %v", err)
+	start := time.Now()
+	volumeType := prometheus.PrometheusUnknownVolumeType
+	controllerUnpublishVolumeInternal := func() (
+		*csi.ControllerUnpublishVolumeResponse, error) {
+		ctx = logger.NewContextWithLogger(ctx)
+		log := logger.GetLogger(ctx)
+		log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
+		err := validateWCPControllerUnpublishVolumeRequest(ctx, req)
+		if err != nil {
+			msg := fmt.Sprintf("Validation for UnpublishVolume Request: %+v has failed. Error: %v", *req, err)
 			log.Error(msg)
 			return nil, err
 		}
+		volumeType = prometheus.PrometheusBlockVolumeType
+
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FakeAttach) {
+			// Check if the volume was fake attached and unmark it as not fake attached
+			if err := commonco.ContainerOrchestratorUtility.ClearFakeAttached(ctx, req.VolumeId); err != nil {
+				msg := fmt.Sprintf("Failed to unmark volume as not fake attached. Error: %v", err)
+				log.Error(msg)
+				return nil, err
+			}
+		}
+		return &csi.ControllerUnpublishVolumeResponse{}, nil
 	}
-	return &csi.ControllerUnpublishVolumeResponse{}, nil
+	resp, err := controllerUnpublishVolumeInternal()
+	if err != nil {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDetachVolumeOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDetachVolumeOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return resp, err
 }
 
 // ValidateVolumeCapabilities returns the capabilities of the volume.
@@ -720,45 +830,65 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 // ControllerExpandVolume expands a volume.
 func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (
 	*csi.ControllerExpandVolumeResponse, error) {
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.VolumeExtend) {
-		msg := "ExpandVolume feature is disabled on the cluster"
-		log.Warn(msg)
-		return nil, status.Errorf(codes.Unimplemented, msg)
-	}
-	log.Infof("ControllerExpandVolume: called with args %+v", *req)
+	start := time.Now()
+	volumeType := prometheus.PrometheusUnknownVolumeType
+	controllerExpandVolumeInternal := func() (
+		*csi.ControllerExpandVolumeResponse, error) {
+		ctx = logger.NewContextWithLogger(ctx)
+		log := logger.GetLogger(ctx)
+		if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.VolumeExtend) {
+			msg := "ExpandVolume feature is disabled on the cluster"
+			log.Warn(msg)
+			return nil, status.Errorf(codes.Unimplemented, msg)
+		}
+		log.Infof("ControllerExpandVolume: called with args %+v", *req)
 
-	isOnlineExpansionEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.OnlineVolumeExtend)
-	err := validateWCPControllerExpandVolumeRequest(ctx, req, c.manager, isOnlineExpansionEnabled)
+		isOnlineExpansionEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.OnlineVolumeExtend)
+		err := validateWCPControllerExpandVolumeRequest(ctx, req, c.manager, isOnlineExpansionEnabled)
+		if err != nil {
+			log.Errorf("validation for ExpandVolume Request: %+v has failed. Error: %v", *req, err)
+			return nil, err
+		}
+		volumeType = prometheus.PrometheusBlockVolumeType
+		volumeID := req.GetVolumeId()
+		volSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
+		volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
+
+		err = common.ExpandVolumeUtil(ctx, c.manager, volumeID, volSizeMB, commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AsyncQueryVolume), commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIVolumeManagerIdempotency))
+		if err != nil {
+			msg := fmt.Sprintf("failed to expand volume: %+q to size: %d err %+v", volumeID, volSizeMB, err)
+			log.Error(msg)
+			return nil, status.Errorf(codes.Internal, msg)
+		}
+
+		// Always set nodeExpansionRequired to true, even if requested size is equal to current size.
+		// Volume expansion may succeed on CNS but external-resizer may fail to update API server.
+		// Requests are requeued in this case. Setting nodeExpandsionRequired to false marks PVC
+		// resize as finished which prevents kubelet from expanding the filesystem.
+		// Ref: https://github.com/kubernetes-csi/external-resizer/blob/master/pkg/controller/controller.go#L335
+		nodeExpansionRequired := true
+		// Set NodeExpansionRequired to false for raw block volumes
+		if _, ok := req.GetVolumeCapability().GetAccessType().(*csi.VolumeCapability_Block); ok {
+			nodeExpansionRequired = false
+		}
+		resp := &csi.ControllerExpandVolumeResponse{
+			CapacityBytes:         int64(units.FileSize(volSizeMB * common.MbInBytes)),
+			NodeExpansionRequired: nodeExpansionRequired,
+		}
+		return resp, nil
+	}
+	resp, err := controllerExpandVolumeInternal()
 	if err != nil {
-		log.Errorf("validation for ExpandVolume Request: %+v has failed. Error: %v", *req, err)
-		return nil, err
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusExpandVolumeOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusExpandVolumeOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	volumeID := req.GetVolumeId()
-	volSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
-	volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
+	return resp, err
+}
 
-	err = common.ExpandVolumeUtil(ctx, c.manager, volumeID, volSizeMB)
-	if err != nil {
-		msg := fmt.Sprintf("failed to expand volume: %+q to size: %d err %+v", volumeID, volSizeMB, err)
-		log.Error(msg)
-		return nil, status.Errorf(codes.Internal, msg)
-	}
-
-	// Always set nodeExpansionRequired to true, even if requested size is equal to current size.
-	// Volume expansion may succeed on CNS but external-resizer may fail to update API server.
-	// Requests are requeued in this case. Setting nodeExpandsionRequired to false marks PVC
-	// resize as finished which prevents kubelet from expanding the filesystem.
-	// Ref: https://github.com/kubernetes-csi/external-resizer/blob/master/pkg/controller/controller.go#L335
-	nodeExpansionRequired := true
-	// Set NodeExpansionRequired to false for raw block volumes
-	if _, ok := req.GetVolumeCapability().GetAccessType().(*csi.VolumeCapability_Block); ok {
-		nodeExpansionRequired = false
-	}
-	resp := &csi.ControllerExpandVolumeResponse{
-		CapacityBytes:         int64(units.FileSize(volSizeMB * common.MbInBytes)),
-		NodeExpansionRequired: nodeExpansionRequired,
-	}
-	return resp, nil
+func (c *controller) ControllerGetVolume(ctx context.Context, req *csi.ControllerGetVolumeRequest) (
+	*csi.ControllerGetVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
 }

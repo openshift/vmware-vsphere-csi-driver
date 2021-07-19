@@ -49,7 +49,7 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/internal/cnsoperator/cnsfilevolumeclient"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsoperator/cnsfilevolumeclient"
 	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer"
 	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/pkg/syncer/cnsoperator/types"
@@ -72,11 +72,13 @@ var (
 
 // Add creates a new CnsFileAccessConfig Controller and adds it to the Manager. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
-func Add(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
+func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
+	configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
+	ctx, log := logger.GetNewContextWithLogger()
+	if clusterFlavor != cnstypes.CnsClusterFlavorWorkload {
+		log.Debug("Not initializing the CnsFileAccessConfig Controller as its a non-WCP CSI deployment")
+		return nil
+	}
 	// Initialize the k8s orchestrator interface
 	coCommonInterface, err := commonco.GetContainerOrchestratorInterface(ctx, common.Kubernetes, cnstypes.CnsClusterFlavorWorkload, &syncer.COInitParams)
 	if err != nil {
@@ -183,8 +185,8 @@ type ReconcileCnsFileAccessConfig struct {
 // Note:
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCnsFileAccessConfig) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	ctx, log := logger.GetNewContextWithLogger()
+func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	log := logger.GetLogger(ctx)
 	// Fetch the CnsFileAccessConfig instance
 	instance := &cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{}
 	err := r.client.Get(ctx, request.NamespacedName, instance)
@@ -469,7 +471,7 @@ func (r *ReconcileCnsFileAccessConfig) getVMExternalIP(ctx context.Context, vm *
 	}
 	var nsxConfiguration bool
 	if networkProvider == "" {
-		return "", errors.New("Unable to find network provider information")
+		return "", errors.New("unable to find network provider information")
 	}
 	if networkProvider == cnsoperatorutil.NSXTNetworkProvider {
 		nsxConfiguration = true

@@ -28,20 +28,18 @@ import (
 
 	"github.com/akutz/gofsutil"
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	csictx "github.com/rexray/gocsi/context"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/units"
+	"go.uber.org/zap"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/kubernetes/pkg/util/resizefs"
 	k8svol "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/fs"
+	mount "k8s.io/mount-utils"
 	utilexec "k8s.io/utils/exec"
-	"k8s.io/utils/mount"
 
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
@@ -52,9 +50,10 @@ import (
 )
 
 const (
-	devDiskID   = "/dev/disk/by-id"
-	blockPrefix = "wwn-0x"
-	dmiDir      = "/sys/class/dmi"
+	devDiskID                     = "/dev/disk/by-id"
+	blockPrefix                   = "wwn-0x"
+	dmiDir                        = "/sys/class/dmi"
+	maxAllowedBlockVolumesPerNode = 59
 )
 
 type nodeStageParams struct {
@@ -87,7 +86,7 @@ type nodePublishParams struct {
 	ro bool
 }
 
-func (s *service) NodeStageVolume(
+func (driver *vsphereCSIDriver) NodeStageVolume(
 	ctx context.Context,
 	req *csi.NodeStageVolumeRequest) (
 	*csi.NodeStageVolumeResponse, error) {
@@ -103,6 +102,16 @@ func (s *service) NodeStageVolume(
 		return &csi.NodeStageVolumeResponse{}, nil
 	}
 
+	if volCap == nil {
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument,
+			"Volume capability not provided")
+	}
+	caps := []*csi.VolumeCapability{volCap}
+	if err := common.IsValidVolumeCapabilities(ctx, caps); err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+			"Volume capability not supported. Err: %+v", err)
+	}
+
 	var err error
 	params := nodeStageParams{
 		volID: volumeID,
@@ -116,7 +125,7 @@ func (s *service) NodeStageVolume(
 		// Mount Volume
 		// Extract mount volume details
 		log.Debug("NodeStageVolume: Volume detected as a mount volume")
-		params.fsType, params.mntFlags, err = ensureMountVol(ctx, volCap)
+		params.fsType, params.mntFlags, err = ensureMountVol(ctx, log, volCap)
 		if err != nil {
 			return nil, err
 		}
@@ -138,7 +147,7 @@ func nodeStageBlockVolume(
 	log := logger.GetLogger(ctx)
 	// Block Volume
 	pubCtx := req.GetPublishContext()
-	diskID, err := getDiskID(pubCtx)
+	diskID, err := getDiskID(pubCtx, log)
 	if err != nil {
 		return nil, err
 	}
@@ -156,10 +165,9 @@ func nodeStageBlockVolume(
 	// Check that block device looks good
 	dev, err := getDevice(volPath)
 	if err != nil {
-		msg := fmt.Sprintf("error getting block device for volume: %q. Parameters: %v err: %v",
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"error getting block device for volume: %q. Parameters: %v err: %v",
 			params.volID, params, err)
-		log.Error(msg)
-		return nil, status.Error(codes.Internal, msg)
 
 	}
 	log.Debugf("nodeStageBlockVolume: getDevice %+v", *dev)
@@ -176,9 +184,8 @@ func nodeStageBlockVolume(
 	log.Debugf("nodeStageBlockVolume: Fetching device mounts")
 	mnts, err := gofsutil.GetDevMounts(ctx, dev.RealDev)
 	if err != nil {
-		msg := fmt.Sprintf("could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
-		log.Error(msg)
-		return nil, status.Error(codes.Internal, msg)
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
 	}
 
 	if len(mnts) == 0 {
@@ -189,9 +196,8 @@ func nodeStageBlockVolume(
 				dev.FullPath, params.stagingTarget, params.mntFlags)
 			params.mntFlags = append(params.mntFlags, "ro")
 			if err := gofsutil.Mount(ctx, dev.FullPath, params.stagingTarget, params.fsType, params.mntFlags...); err != nil {
-				msg := fmt.Sprintf("error mounting volume. Parameters: %v err: %v", params, err)
-				log.Error(msg)
-				return nil, status.Errorf(codes.Internal, msg)
+				return nil, logger.LogNewErrorCodef(log, codes.Internal,
+					"error mounting volume. Parameters: %v err: %v", params, err)
 			}
 			log.Infof("nodeStageBlockVolume: Device mounted successfully at %q", params.stagingTarget)
 			return &csi.NodeStageVolumeResponse{}, nil
@@ -200,9 +206,8 @@ func nodeStageBlockVolume(
 		log.Debugf("nodeStageBlockVolume: Format and mount the device %q at %q with mount flags %v",
 			dev.FullPath, params.stagingTarget, params.mntFlags)
 		if err := gofsutil.FormatAndMount(ctx, dev.FullPath, params.stagingTarget, params.fsType, params.mntFlags...); err != nil {
-			msg := fmt.Sprintf("error in formating and mounting volume. Parameters: %v err: %v", params, err)
-			log.Error(msg)
-			return nil, status.Errorf(codes.Internal, msg)
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"error in formating and mounting volume. Parameters: %v err: %v", params, err)
 		}
 	} else {
 		// If Device is already mounted. Need to ensure that it is already
@@ -222,18 +227,18 @@ func nodeStageBlockVolume(
 						params.stagingTarget, rwo)
 					return &csi.NodeStageVolumeResponse{}, nil
 				}
-				return nil, status.Errorf(codes.AlreadyExists,
+				return nil, logger.LogNewErrorCodef(log, codes.AlreadyExists,
 					"access mode conflicts with existing mount at %q", params.stagingTarget)
 			}
 		}
-		return nil, status.Error(codes.Internal,
+		return nil, logger.LogNewErrorCode(log, codes.Internal,
 			"device already in use and mounted elsewhere")
 	}
 	log.Infof("nodeStageBlockVolume: Device mounted successfully at %q", params.stagingTarget)
 	return &csi.NodeStageVolumeResponse{}, nil
 }
 
-func (s *service) NodeUnstageVolume(
+func (driver *vsphereCSIDriver) NodeUnstageVolume(
 	ctx context.Context,
 	req *csi.NodeUnstageVolumeRequest) (
 	*csi.NodeUnstageVolumeResponse, error) {
@@ -245,7 +250,7 @@ func (s *service) NodeUnstageVolume(
 	// Fetch all the mount points
 	mnts, err := gofsutil.GetMounts(ctx)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"could not retrieve existing mount points: %v", err)
 	}
 	log.Debugf("NodeUnstageVolume: node mounts %+v", mnts)
@@ -277,7 +282,7 @@ func (s *service) NodeUnstageVolume(
 	if isMounted {
 		log.Infof("Attempting to unmount target %q for volume %q", stagingTarget, volID)
 		if err := gofsutil.Unmount(ctx, stagingTarget); err != nil {
-			return nil, status.Errorf(codes.Internal,
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"Error unmounting stagingTarget: %v", err)
 		}
 	}
@@ -301,7 +306,7 @@ func isBlockVolumeMounted(
 	// mounted still indicates that unstaging is done.
 	dev, err := getDevFromMount(stagingTargetPath)
 	if err != nil {
-		return false, status.Errorf(codes.Internal,
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
 			"isBlockVolumeMounted: error getting block device for volume: %s, err: %s",
 			volID, err.Error())
 	}
@@ -319,14 +324,14 @@ func isBlockVolumeMounted(
 	// Get mounts for device
 	mnts, err := gofsutil.GetDevMounts(ctx, dev.RealDev)
 	if err != nil {
-		return false, status.Errorf(codes.Internal,
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
 			"isBlockVolumeMounted: could not reliably determine existing mount status: %s",
 			err.Error())
 	}
 
 	// device is mounted more than once. Should only be mounted to target
 	if len(mnts) > 1 {
-		return false, status.Errorf(codes.Internal,
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
 			"isBlockVolumeMounted: volume: %s appears mounted in multiple places", volID)
 	}
 
@@ -337,7 +342,7 @@ func isBlockVolumeMounted(
 	return true, nil
 }
 
-func (s *service) NodePublishVolume(
+func (driver *vsphereCSIDriver) NodePublishVolume(
 	ctx context.Context,
 	req *csi.NodePublishVolumeRequest) (
 	*csi.NodePublishVolumeResponse, error) {
@@ -354,13 +359,28 @@ func (s *service) NodePublishVolume(
 
 	params.stagingTarget = req.GetStagingTargetPath()
 	if params.stagingTarget == "" {
-		return nil, status.Errorf(codes.FailedPrecondition, "staging target path %q not set", params.stagingTarget)
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"staging target path %q not set", params.stagingTarget)
+	}
+	if params.target == "" {
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"target path %q not set", params.target)
+	}
+
+	volCap := req.GetVolumeCapability()
+	if volCap == nil {
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument,
+			"Volume capability not provided")
+	}
+	caps := []*csi.VolumeCapability{volCap}
+	if err := common.IsValidVolumeCapabilities(ctx, caps); err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+			"Volume capability not supported. Err: %+v", err)
 	}
 
 	// Check if this is a MountVolume or BlockVolume
-	volCap := req.GetVolumeCapability()
-	if !common.IsFileVolumeRequest(ctx, []*csi.VolumeCapability{volCap}) {
-		params.diskID, err = getDiskID(req.GetPublishContext())
+	if !common.IsFileVolumeRequest(ctx, caps) {
+		params.diskID, err = getDiskID(req.GetPublishContext(), log)
 		if err != nil {
 			log.Errorf("error fetching DiskID. Parameters: %v", params)
 			return nil, err
@@ -376,9 +396,8 @@ func (s *service) NodePublishVolume(
 		// Get underlying block device
 		dev, err := getDevice(volPath)
 		if err != nil {
-			msg := fmt.Sprintf("error getting block device for volume: %q. Parameters: %v err: %v", params.volID, params, err)
-			log.Error(msg)
-			return nil, status.Errorf(codes.Internal, msg)
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"error getting block device for volume: %q. Parameters: %v err: %v", params.volID, params, err)
 		}
 		params.volumePath = dev.FullPath
 		params.device = dev.RealDev
@@ -395,7 +414,7 @@ func (s *service) NodePublishVolume(
 	return publishFileVol(ctx, req, params)
 }
 
-func (s *service) NodeUnpublishVolume(
+func (driver *vsphereCSIDriver) NodeUnpublishVolume(
 	ctx context.Context,
 	req *csi.NodeUnpublishVolumeRequest) (
 	*csi.NodeUnpublishVolumeResponse, error) {
@@ -406,6 +425,11 @@ func (s *service) NodeUnpublishVolume(
 	volID := req.GetVolumeId()
 	target := req.GetTargetPath()
 
+	if target == "" {
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"target path %q not set", target)
+	}
+
 	// Verify if the path exists
 	// NOTE: For raw block volumes, this path is a file. In all other cases, it is a directory
 	_, err := os.Stat(target)
@@ -415,16 +439,15 @@ func (s *service) NodeUnpublishVolume(
 			log.Infof("NodeUnpublishVolume: Target path %q does not exist. Assuming NodeUnpublish is complete", target)
 			return &csi.NodeUnpublishVolumeResponse{}, nil
 		}
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to stat target %q, err: %v", target, err)
 	}
 
 	// Fetch all the mount points
 	mnts, err := gofsutil.GetMounts(ctx)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
-			"could not retrieve existing mount points: %q",
-			err.Error())
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"could not retrieve existing mount points: %q", err.Error())
 	}
 	log.Debugf("NodeUnpublishVolume: node mounts %+v", mnts)
 
@@ -449,9 +472,8 @@ func (s *service) NodeUnpublishVolume(
 	if isPublished {
 		log.Infof("NodeUnpublishVolume: Attempting to unmount target %q for volume %q", target, volID)
 		if err := gofsutil.Unmount(ctx, target); err != nil {
-			msg := fmt.Sprintf("Error unmounting target %q for volume %q. %q", target, volID, err.Error())
-			log.Debug(msg)
-			return nil, status.Error(codes.Internal, msg)
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"Error unmounting target %q for volume %q. %q", target, volID, err.Error())
 		}
 		log.Debugf("Unmount successful for target %q for volume %q", target, volID)
 		// TODO Use a go routine here. The deletion of target path might not be a good reason to error out
@@ -474,9 +496,8 @@ func isBlockVolumePublished(ctx context.Context, volID string, target string) (b
 	// Look up block device mounted to target
 	dev, err := getDevFromMount(target)
 	if err != nil {
-		return false, status.Errorf(codes.Internal,
-			"error getting block device for volume: %s, err: %v",
-			volID, err)
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
+			"error getting block device for volume: %s, err: %v", volID, err)
 	}
 
 	if dev == nil {
@@ -485,9 +506,8 @@ func isBlockVolumePublished(ctx context.Context, volID string, target string) (b
 		log.Debugf("isBlockVolumePublished: No device found. Assuming Unpublish is "+
 			"already complete for volume %q and target path %q", volID, target)
 		if err := rmpath(ctx, target); err != nil {
-			msg := fmt.Sprintf("Failed to delete the target path %q. Error: %v", target, err)
-			log.Debug(msg)
-			return false, status.Errorf(codes.Internal, msg)
+			return false, logger.LogNewErrorCodef(log, codes.Internal,
+				"Failed to delete the target path %q. Error: %v", target, err)
 		}
 		log.Debugf("isBlockVolumePublished: Target path %q successfully deleted", target)
 		return false, nil
@@ -495,7 +515,7 @@ func isBlockVolumePublished(ctx context.Context, volID string, target string) (b
 	return true, nil
 }
 
-func (s *service) NodeGetVolumeStats(
+func (driver *vsphereCSIDriver) NodeGetVolumeStats(
 	ctx context.Context,
 	req *csi.NodeGetVolumeStatsRequest) (
 	*csi.NodeGetVolumeStatsResponse, error) {
@@ -506,12 +526,13 @@ func (s *service) NodeGetVolumeStats(
 	var err error
 	targetPath := req.GetVolumePath()
 	if targetPath == "" {
-		return nil, status.Errorf(codes.InvalidArgument, "received empty targetpath %q", targetPath)
+		return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+			"received empty targetpath %q", targetPath)
 	}
 
 	volMetrics, err := getMetrics(targetPath)
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, logger.LogNewErrorCode(log, codes.Internal, err.Error())
 	}
 
 	available, ok := (*(volMetrics.Available)).AsInt64()
@@ -520,8 +541,7 @@ func (s *service) NodeGetVolumeStats(
 	}
 	capacity, ok := (*(volMetrics.Capacity)).AsInt64()
 	if !ok {
-		log.Errorf("failed to fetch capacity bytes")
-		return nil, status.Error(codes.Unknown, "failed to fetch capacity bytes")
+		return nil, logger.LogNewErrorCode(log, codes.Unknown, "failed to fetch capacity bytes")
 	}
 	used, ok := (*(volMetrics.Used)).AsInt64()
 	if !ok {
@@ -529,8 +549,7 @@ func (s *service) NodeGetVolumeStats(
 	}
 	inodes, ok := (*(volMetrics.Inodes)).AsInt64()
 	if !ok {
-		log.Errorf("failed to fetch total number of inodes")
-		return nil, status.Error(codes.Unknown, "failed to fetch total number of inodes")
+		return nil, logger.LogNewErrorCode(log, codes.Unknown, "failed to fetch total number of inodes")
 	}
 	inodesFree, ok := (*(volMetrics.InodesFree)).AsInt64()
 	if !ok {
@@ -564,7 +583,7 @@ func getMetrics(path string) (*k8svol.Metrics, error) {
 		return nil, fmt.Errorf("no path given")
 	}
 
-	available, capacity, usage, inodes, inodesFree, inodesUsed, err := fs.FsInfo(path)
+	available, capacity, usage, inodes, inodesFree, inodesUsed, err := fs.Info(path)
 	if err != nil {
 		return nil, err
 	}
@@ -578,7 +597,7 @@ func getMetrics(path string) (*k8svol.Metrics, error) {
 	return metrics, nil
 }
 
-func (s *service) NodeGetCapabilities(
+func (driver *vsphereCSIDriver) NodeGetCapabilities(
 	ctx context.Context,
 	req *csi.NodeGetCapabilitiesRequest) (
 	*csi.NodeGetCapabilitiesResponse, error) {
@@ -617,25 +636,51 @@ func (s *service) NodeGetCapabilities(
 	by inspecting SCSI controllers of the VM, but for file volume, this is not deterministic.
 	We can not set this limit on MaxVolumesPerNode, since single driver is used for both block and file volumes.
 */
-func (s *service) NodeGetInfo(
+func (driver *vsphereCSIDriver) NodeGetInfo(
 	ctx context.Context,
 	req *csi.NodeGetInfoRequest) (
 	*csi.NodeGetInfoResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
+	log.Infof("NodeGetInfo: called with args %+v", *req)
+
+	var nodeInfoResponse *csi.NodeGetInfoResponse
 
 	nodeID := os.Getenv("NODE_NAME")
 	if nodeID == "" {
-		return nil, status.Error(codes.Internal, "ENV NODE_NAME is not set")
+		return nil, logger.LogNewErrorCode(log, codes.Internal, "ENV NODE_NAME is not set")
 	}
+	var maxVolumesPerNode int64
+	if v := os.Getenv("MAX_VOLUMES_PER_NODE"); v != "" {
+		if value, err := strconv.ParseInt(v, 10, 64); err == nil {
+			if value < 0 {
+				return nil, logger.LogNewErrorCodef(log, codes.Internal,
+					"NodeGetInfo: MAX_VOLUMES_PER_NODE set in env variable %v is less than 0", v)
+			} else if value > maxAllowedBlockVolumesPerNode {
+				return nil, logger.LogNewErrorCodef(log, codes.Internal,
+					"NodeGetInfo: MAX_VOLUMES_PER_NODE set in env variable %v is more than %v",
+					v, maxAllowedBlockVolumesPerNode)
+			} else {
+				maxVolumesPerNode = value
+				log.Infof("NodeGetInfo: MAX_VOLUMES_PER_NODE is set to %v", maxVolumesPerNode)
+			}
+		} else {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"NodeGetInfo: MAX_VOLUMES_PER_NODE set in env variable %v is invalid", v)
+		}
+	}
+
 	if cnstypes.CnsClusterFlavor(os.Getenv(csitypes.EnvClusterFlavor)) == cnstypes.CnsClusterFlavorGuest {
-		return &csi.NodeGetInfoResponse{
+		nodeInfoResponse = &csi.NodeGetInfoResponse{
 			NodeId:             nodeID,
+			MaxVolumesPerNode:  maxVolumesPerNode,
 			AccessibleTopology: &csi.Topology{},
-		}, nil
+		}
+		log.Infof("NodeGetInfo response: %v", nodeInfoResponse)
+		return nodeInfoResponse, nil
 	}
 	var cfg *cnsconfig.Config
-	cfgPath = csictx.Getenv(ctx, cnsconfig.EnvVSphereCSIConfig)
+	cfgPath = os.Getenv(cnsconfig.EnvVSphereCSIConfig)
 	if cfgPath == "" {
 		cfgPath = cnsconfig.DefaultCloudConfigPath
 	}
@@ -643,12 +688,15 @@ func (s *service) NodeGetInfo(
 	if err != nil {
 		if os.IsNotExist(err) {
 			log.Infof("Config file not provided to node daemonset. Assuming non-topology aware cluster.")
-			return &csi.NodeGetInfoResponse{
-				NodeId: nodeID,
-			}, nil
+			nodeInfoResponse = &csi.NodeGetInfoResponse{
+				NodeId:            nodeID,
+				MaxVolumesPerNode: maxVolumesPerNode,
+			}
+			log.Infof("NodeGetInfo response: %v", nodeInfoResponse)
+			return nodeInfoResponse, nil
 		}
-		log.Errorf("failed to read cnsconfig. Error: %v", err)
-		return nil, status.Errorf(codes.Internal, err.Error())
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to read cnsconfig. err: %v", err)
 	}
 	var accessibleTopology map[string]string
 	topology := &csi.Topology{}
@@ -657,14 +705,14 @@ func (s *service) NodeGetInfo(
 		log.Infof("Config file provided to node daemonset with zones and regions. Assuming topology aware cluster.")
 		vcenterconfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, cfg)
 		if err != nil {
-			log.Errorf("failed to get VirtualCenterConfig from cns config. err=%v", err)
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get VirtualCenterConfig from cns config. err: %v", err)
 		}
 		vcManager := cnsvsphere.GetVirtualCenterManager(ctx)
 		vcenter, err := vcManager.RegisterVirtualCenter(ctx, vcenterconfig)
 		if err != nil {
-			log.Errorf("failed to register vcenter with virtualCenterManager.")
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to register vcenter with virtualCenterManager. err: %v", err)
 		}
 		defer func() {
 			if vcManager != nil {
@@ -677,14 +725,14 @@ func (s *service) NodeGetInfo(
 		//Connect to vCenter
 		err = vcenter.Connect(ctx)
 		if err != nil {
-			log.Errorf("failed to connect to vcenter host: %s. err=%v", vcenter.Config.Host, err)
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to connect to vcenter host: %s. err: %v", vcenter.Config.Host, err)
 		}
 		// Get VM UUID
 		uuid, err := getSystemUUID(ctx)
 		if err != nil {
-			log.Errorf("failed to get system uuid for node VM")
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get system uuid for node VM. err: %v", err)
 		}
 		log.Debugf("Successfully retrieved uuid:%s  from the node: %s", uuid, nodeID)
 		nodeVM, err := cnsvsphere.GetVirtualMachineByUUID(ctx, uuid, false)
@@ -692,19 +740,19 @@ func (s *service) NodeGetInfo(
 			log.Errorf("failed to get nodeVM for uuid: %s. err: %+v", uuid, err)
 			uuid, err = convertUUID(uuid)
 			if err != nil {
-				log.Errorf("convertUUID failed with error: %v", err)
-				return nil, status.Errorf(codes.Internal, err.Error())
+				return nil, logger.LogNewErrorCodef(log, codes.Internal,
+					"convertUUID failed with error: %v", err)
 			}
 			nodeVM, err = cnsvsphere.GetVirtualMachineByUUID(ctx, uuid, false)
 			if err != nil || nodeVM == nil {
-				log.Errorf("failed to get nodeVM for uuid: %s. err: %+v", uuid, err)
-				return nil, status.Errorf(codes.Internal, err.Error())
+				return nil, logger.LogNewErrorCodef(log, codes.Internal,
+					"failed to get nodeVM for uuid: %s. err: %+v", uuid, err)
 			}
 		}
 		tagManager, err := cnsvsphere.GetTagManager(ctx, vcenter)
 		if err != nil {
-			log.Errorf("failed to create tagManager. Err: %v", err)
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to create tagManager. err: %v", err)
 		}
 		defer func() {
 			err := tagManager.Logout(ctx)
@@ -714,8 +762,8 @@ func (s *service) NodeGetInfo(
 		}()
 		zone, region, err := nodeVM.GetZoneRegion(ctx, cfg.Labels.Zone, cfg.Labels.Region, tagManager)
 		if err != nil {
-			log.Errorf("failed to get accessibleTopology for vm: %v, err: %v", nodeVM.Reference(), err)
-			return nil, status.Errorf(codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get accessibleTopology for vm: %v, err: %v", nodeVM.Reference(), err)
 		}
 		log.Debugf("zone: [%s], region: [%s], Node VM: [%s]", zone, region, nodeID)
 		if zone != "" && region != "" {
@@ -727,14 +775,16 @@ func (s *service) NodeGetInfo(
 	if len(accessibleTopology) > 0 {
 		topology.Segments = accessibleTopology
 	}
-
-	return &csi.NodeGetInfoResponse{
+	nodeInfoResponse = &csi.NodeGetInfoResponse{
 		NodeId:             nodeID,
+		MaxVolumesPerNode:  maxVolumesPerNode,
 		AccessibleTopology: topology,
-	}, nil
+	}
+	log.Infof("NodeGetInfo response: %v", nodeInfoResponse)
+	return nodeInfoResponse, nil
 }
 
-func (s *service) NodeExpandVolume(
+func (driver *vsphereCSIDriver) NodeExpandVolume(
 	ctx context.Context,
 	req *csi.NodeExpandVolumeRequest) (
 	*csi.NodeExpandVolumeResponse, error) {
@@ -744,11 +794,11 @@ func (s *service) NodeExpandVolume(
 
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "volume id must be provided")
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument, "volume id must be provided")
 	} else if req.GetCapacityRange() == nil {
-		return nil, status.Error(codes.InvalidArgument, "capacity range must be provided")
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument, "capacity range must be provided")
 	} else if req.GetCapacityRange().GetRequiredBytes() < 0 || req.GetCapacityRange().GetLimitBytes() < 0 {
-		return nil, status.Error(codes.InvalidArgument, "capacity ranges values cannot be negative")
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument, "capacity ranges values cannot be negative")
 	}
 
 	reqVolSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
@@ -761,17 +811,18 @@ func (s *service) NodeExpandVolume(
 
 	volumePath := req.GetVolumePath()
 	if len(volumePath) == 0 {
-		return nil, status.Error(codes.InvalidArgument, "volume path must be provided to expand volume on node")
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument,
+			"volume path must be provided to expand volume on node")
 	}
 
 	// Look up block device mounted to staging target path
 	dev, err := getDevFromMount(volumePath)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"error getting block device for volume: %q, err: %v",
 			volumeID, err)
 	} else if dev == nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"volume %q is not mounted at the path %s",
 			volumeID, volumePath)
 	}
@@ -788,7 +839,8 @@ func (s *service) NodeExpandVolume(
 		// Fetch the current block size
 		currentBlockSizeBytes, err := getBlockSizeBytes(mounter, dev.RealDev)
 		if err != nil {
-			return nil, status.Error(codes.Internal, fmt.Sprintf("error when getting size of block volume at path %s: %v", dev.RealDev, err))
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"error when getting size of block volume at path %s: %v", dev.RealDev, err)
 		}
 		// Check if a rescan is required
 		if currentBlockSizeBytes < reqVolSizeBytes {
@@ -797,29 +849,32 @@ func (s *service) NodeExpandVolume(
 			// Refer to https://kb.vmware.com/s/article/1006371
 			err = rescanDevice(ctx, dev)
 			if err != nil {
-				return nil, status.Error(codes.Internal, err.Error())
+				return nil, logger.LogNewErrorCode(log, codes.Internal, err.Error())
 			}
 		}
 	}
 
 	// Resize file system
-	resizer := resizefs.NewResizeFs(mounter)
+	resizer := mount.NewResizeFs(realExec)
 	_, err = resizer.Resize(dev.RealDev, volumePath)
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("error when resizing filesystem on volume %q on node: %v", volumeID, err))
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"error when resizing filesystem on volume %q on node: %v", volumeID, err)
 	}
 	log.Debugf("NodeExpandVolume: Resized filesystem with devicePath %s volumePath %s", dev.RealDev, volumePath)
 
 	// Check the block size
 	currentBlockSizeBytes, err := getBlockSizeBytes(mounter, dev.RealDev)
 	if err != nil {
-		return nil, status.Error(codes.Internal, fmt.Sprintf("error when getting size of block volume at path %s: %v", dev.RealDev, err))
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"error when getting size of block volume at path %s: %v", dev.RealDev, err)
 	}
 	// NOTE(xyang): Make sure new size is greater than or equal to the
 	// requested size. It is possible for volume size to be rounded up
 	// and therefore bigger than the requested size.
 	if currentBlockSizeBytes < reqVolSizeBytes {
-		return nil, status.Errorf(codes.Internal, "requested volume size was %d, but got volume with size %d", reqVolSizeBytes, currentBlockSizeBytes)
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"requested volume size was %d, but got volume with size %d", reqVolSizeBytes, currentBlockSizeBytes)
 	}
 
 	log.Infof("NodeExpandVolume: expanded volume successfully. devicePath %s volumePath %s size %d", dev.RealDev, volumePath, int64(units.FileSize(reqVolSizeMB*common.MbInBytes)))
@@ -853,7 +908,7 @@ func publishMountVol(
 	log.Infof("PublishMountVolume called with args: %+v", params)
 
 	// Extract fs details
-	_, mntFlags, err := ensureMountVol(ctx, req.GetVolumeCapability())
+	_, mntFlags, err := ensureMountVol(ctx, log, req.GetVolumeCapability())
 	if err != nil {
 		return nil, err
 	}
@@ -861,7 +916,7 @@ func publishMountVol(
 	// We are responsible for creating target dir, per spec, if not already present
 	_, err = mkdir(ctx, params.target)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"Unable to create target dir: %q, err: %v", params.target, err)
 	}
 	log.Debugf("PublishMountVolume: Created target path %q", params.target)
@@ -875,9 +930,8 @@ func publishMountVol(
 	// Check if device is already mounted
 	devMnts, err := getDevMounts(ctx, dev)
 	if err != nil {
-		msg := fmt.Sprintf("could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
-		log.Error(msg)
-		return nil, status.Error(codes.Internal, msg)
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
 	}
 	log.Debugf("publishMountVol: device %+v, device mounts %q", *dev, devMnts)
 
@@ -895,7 +949,7 @@ func publishMountVol(
 				}
 				if !contains(m.Opts, rwo) {
 					//TODO make sure that all the mount options match
-					return nil, status.Error(codes.AlreadyExists,
+					return nil, logger.LogNewErrorCode(log, codes.AlreadyExists,
 						"volume previously published with different options")
 				}
 
@@ -905,7 +959,7 @@ func publishMountVol(
 			}
 		}
 	} else if len(devMnts) == 0 {
-		return nil, status.Errorf(codes.FailedPrecondition,
+		return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
 			"Volume ID: %q does not appear staged to %q", req.GetVolumeId(), params.stagingTarget)
 	}
 
@@ -916,9 +970,8 @@ func publishMountVol(
 	log.Debugf("PublishMountVolume: Attempting to bind mount %q to %q with mount flags %v",
 		params.stagingTarget, params.target, mntFlags)
 	if err := gofsutil.BindMount(ctx, params.stagingTarget, params.target, mntFlags...); err != nil {
-		msg := fmt.Sprintf("error mounting volume. Parameters: %v err: %v", params, err)
-		log.Error(msg)
-		return nil, status.Error(codes.Internal, msg)
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"error mounting volume. Parameters: %v err: %v", params, err)
 	}
 	log.Infof("NodePublishVolume for %q successful to path %q", req.GetVolumeId(), params.target)
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -937,7 +990,7 @@ func publishBlockVol(
 	// We are responsible for creating target file, per spec, if not already present
 	_, err := mkfile(ctx, params.target)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"Unable to create target file: %q, err: %v", params.target, err)
 	}
 	log.Debugf("publishBlockVol: Target %q created", params.target)
@@ -947,16 +1000,15 @@ func publishBlockVol(
 	// the underlying block device from being modified, so don't
 	// advertise a false sense of security
 	if params.ro {
-		return nil, status.Error(codes.InvalidArgument,
+		return nil, logger.LogNewErrorCode(log, codes.InvalidArgument,
 			"read only not supported for Block Volume")
 	}
 
 	// get block device mounts
 	devMnts, err := getDevMounts(ctx, dev)
 	if err != nil {
-		msg := fmt.Sprintf("could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
-		log.Error(msg)
-		return nil, status.Error(codes.Internal, msg)
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"could not reliably determine existing mount status. Parameters: %v err: %v", params, err)
 	}
 	log.Debugf("publishBlockVol: device %+v, device mounts %q", *dev, devMnts)
 
@@ -967,20 +1019,19 @@ func publishBlockVol(
 		log.Debugf("PublishBlockVolume: Attempting to bind mount %q to %q with mount flags %v",
 			dev.FullPath, params.target, mntFlags)
 		if err := gofsutil.BindMount(ctx, dev.FullPath, params.target, mntFlags...); err != nil {
-			msg := fmt.Sprintf("error mounting volume. Parameters: %v err: %v", params, err)
-			log.Error(msg)
-			return nil, status.Error(codes.Internal, msg)
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"error mounting volume. Parameters: %v err: %v", params, err)
 		}
 		log.Debugf("PublishBlockVolume: Bind mount successful to path %q", params.target)
 	} else if len(devMnts) == 1 {
 		// already mounted, make sure it's what we want
 		if devMnts[0].Path != params.target {
-			return nil, status.Error(codes.Internal,
+			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				"device already in use and mounted elsewhere")
 		}
 		log.Debugf("Volume already published to target. Parameters: [%+v]", params)
 	} else {
-		return nil, status.Error(codes.AlreadyExists,
+		return nil, logger.LogNewErrorCode(log, codes.AlreadyExists,
 			"block volume already mounted in more than one place")
 	}
 	log.Infof("NodePublishVolume successful to path %q", params.target)
@@ -997,7 +1048,7 @@ func publishFileVol(
 	log.Infof("PublishFileVolume called with args: %+v", params)
 
 	// Extract mount details
-	fsType, mntFlags, err := ensureMountVol(ctx, req.GetVolumeCapability())
+	fsType, mntFlags, err := ensureMountVol(ctx, log, req.GetVolumeCapability())
 	if err != nil {
 		return nil, err
 	}
@@ -1005,7 +1056,7 @@ func publishFileVol(
 	// We are responsible for creating target dir, per spec, if not already present
 	_, err = mkdir(ctx, params.target)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"Unable to create target dir: %q, err: %v", params.target, err)
 	}
 	log.Debugf("PublishFileVolume: Created target path %q", params.target)
@@ -1013,9 +1064,8 @@ func publishFileVol(
 	// Check if target already mounted
 	mnts, err := gofsutil.GetMounts(ctx)
 	if err != nil {
-		return nil, status.Errorf(codes.Internal,
-			"could not retrieve existing mount points: %q",
-			err.Error())
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"could not retrieve existing mount points: %v", err)
 	}
 	log.Debugf("PublishFileVolume: Mounts - %+v", mnts)
 	for _, m := range mnts {
@@ -1028,7 +1078,7 @@ func publishFileVol(
 			}
 			if !contains(m.Opts, rwo) {
 				//TODO make sure that all the mount options match
-				return nil, status.Error(codes.AlreadyExists,
+				return nil, logger.LogNewErrorCode(log, codes.AlreadyExists,
 					"volume previously published with different options")
 			}
 
@@ -1048,15 +1098,15 @@ func publishFileVol(
 	// Retrieve the file share access point from publish context
 	mntSrc, ok := req.GetPublishContext()[common.Nfsv4AccessPoint]
 	if !ok {
-		return nil, status.Error(codes.Internal, "NFSv4 accesspoint not set in publish context")
+		return nil, logger.LogNewErrorCode(log, codes.Internal,
+			"NFSv4 accesspoint not set in publish context")
 	}
 	// Directly mount the file share volume to the pod. No bind mount required.
 	log.Debugf("PublishFileVolume: Attempting to mount %q to %q with fstype %q and mountflags %v",
 		mntSrc, params.target, fsType, mntFlags)
 	if err := gofsutil.Mount(ctx, mntSrc, params.target, fsType, mntFlags...); err != nil {
-		return nil, status.Errorf(codes.Internal,
-			"error publish volume to target path: %q",
-			err.Error())
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"error publish volume to target path: %v", err)
 	}
 	log.Infof("NodePublishVolume successful to path %q", params.target)
 	return &csi.NodePublishVolumeResponse{}, nil
@@ -1170,11 +1220,11 @@ func verifyVolumeAttached(ctx context.Context, diskID string) (string, error) {
 	// Check that volume is attached
 	volPath, err := getDiskPath(diskID, nil)
 	if err != nil {
-		return "", status.Errorf(codes.Internal,
+		return "", logger.LogNewErrorCodef(log, codes.Internal,
 			"Error trying to read attached disks: %v", err)
 	}
 	if volPath == "" {
-		return "", status.Errorf(codes.NotFound,
+		return "", logger.LogNewErrorCodef(log, codes.NotFound,
 			"disk: %s not attached to node", diskID)
 	}
 
@@ -1188,7 +1238,7 @@ func verifyVolumeAttached(ctx context.Context, diskID string) (string, error) {
 func verifyTargetDir(ctx context.Context, target string, targetShouldExist bool) (bool, error) {
 	log := logger.GetLogger(ctx)
 	if target == "" {
-		return false, status.Error(codes.InvalidArgument,
+		return false, logger.LogNewErrorCode(log, codes.InvalidArgument,
 			"target path required")
 	}
 
@@ -1197,21 +1247,21 @@ func verifyTargetDir(ctx context.Context, target string, targetShouldExist bool)
 		if os.IsNotExist(err) {
 			if targetShouldExist {
 				// target path does not exist but targetShouldExist is set to true
-				return false, status.Errorf(codes.FailedPrecondition,
+				return false, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
 					"target: %s not pre-created", target)
 			}
 			// target path does not exist but targetShouldExist is set to false, so no error
 			return false, nil
 		}
-		return false, status.Errorf(codes.Internal,
-			"failed to stat target, err: %s", err.Error())
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to stat target, err: %v", err)
 	}
 
 	// This check is mandated by the spec, but this would/should fail if the
 	// volume has a block accessType as we get a file for raw block volumes
 	// during NodePublish/Unpublish. Do not use this function for Publish/Unpublish
 	if !tgtStat.IsDir() {
-		return false, status.Errorf(codes.FailedPrecondition,
+		return false, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
 			"existing path: %s is not a directory", target)
 	}
 
@@ -1271,17 +1321,17 @@ func rmpath(ctx context.Context, target string) error {
 	// target should be empty
 	log.Debugf("removing target path: %q", target)
 	if err := os.Remove(target); err != nil {
-		return status.Errorf(codes.Internal,
+		return logger.LogNewErrorCodef(log, codes.Internal,
 			"Unable to remove target path: %s, err: %v", target, err)
 	}
 	return nil
 }
 
-func ensureMountVol(ctx context.Context, volCap *csi.VolumeCapability) (string, []string, error) {
+func ensureMountVol(ctx context.Context, log *zap.SugaredLogger,
+	volCap *csi.VolumeCapability) (string, []string, error) {
 	mountVol := volCap.GetMount()
 	if mountVol == nil {
-		return "", nil, status.Error(codes.InvalidArgument,
-			"access type missing")
+		return "", nil, logger.LogNewErrorCode(log, codes.InvalidArgument, "access type missing")
 	}
 	fs := common.GetVolumeCapabilityFsType(ctx, volCap)
 	mntFlags := mountVol.GetMountFlags()
@@ -1335,11 +1385,11 @@ func convertUUID(uuid string) (string, error) {
 	return strings.ToLower(convertedUUID), nil
 }
 
-func getDiskID(pubCtx map[string]string) (string, error) {
+func getDiskID(pubCtx map[string]string, log *zap.SugaredLogger) (string, error) {
 	var diskID string
 	var ok bool
 	if diskID, ok = pubCtx[common.AttributeFirstClassDiskUUID]; !ok {
-		return "", status.Errorf(codes.InvalidArgument,
+		return "", logger.LogNewErrorCodef(log, codes.InvalidArgument,
 			"Attribute: %s required in publish context",
 			common.AttributeFirstClassDiskUUID)
 	}

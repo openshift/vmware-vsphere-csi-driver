@@ -67,8 +67,14 @@ var (
 // Add creates a new CnsRegisterVolume Controller and adds it to the Manager, ConfigurationInfo
 // and VirtualCenterTypes. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
-func Add(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
+func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
+	configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
 	ctx, log := logger.GetNewContextWithLogger()
+	if clusterFlavor != cnstypes.CnsClusterFlavorWorkload {
+		log.Debug("Not initializing the CnsRegisterVolume Controller as its a non-WCP CSI deployment")
+		return nil
+	}
+
 	// Initializes kubernetes client
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -134,8 +140,8 @@ type ReconcileCnsRegisterVolume struct {
 // Note:
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCnsRegisterVolume) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	ctx, log := logger.GetNewContextWithLogger()
+func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+	log := logger.GetLogger(ctx)
 	// Fetch the CnsRegisterVolume instance
 	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
 	err := r.client.Get(ctx, request.NamespacedName, instance)
@@ -271,7 +277,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(request reconcile.Request) (recon
 	}
 	log.Infof("Volume with storagepolicyId: %s is mapping to K8S storage class: %s and assigned to namespace: %s", volume.StoragePolicyId, storageClassName, request.Namespace)
 
-	capacityInMb := volume.BackingObjectDetails.(cnstypes.BaseCnsBackingObjectDetails).GetCnsBackingObjectDetails().CapacityInMb
+	capacityInMb := volume.BackingObjectDetails.GetCnsBackingObjectDetails().CapacityInMb
 	accessMode := instance.Spec.AccessMode
 	// Set accessMode to ReadWriteOnce if DiskURLPath is used for import
 	if accessMode == "" && instance.Spec.DiskURLPath != "" {

@@ -113,6 +113,17 @@ const (
 	// on which CNS is supported.
 	MinSupportedVCenterPatch int = 3
 
+	// VSphere67u3Version is the minimum vSphere version to use Vslm APIs
+	// to support volume migration feature
+	VSphere67u3Version string = "6.7.3"
+
+	// VSphere7Version is the maximum vSphere version to use Vslm APIs
+	// to support volume migration feature
+	VSphere7Version string = "7.0.0"
+
+	// VSphere67u3lBuildInfo is the build number for vCenter in 6.7 Update 3l GA bits
+	VSphere67u3lBuildInfo int = 17137327
+
 	// VsanAffinityKey is the profile param key to indicate which node the FCD should be affinitized to.
 	VsanAffinityKey string = "VSAN/affinity/affinity"
 
@@ -198,6 +209,10 @@ const (
 	// AnnIgnoreInaccessiblePV is annotation key on volume claim to indicate
 	// if inaccessible PV can be fake attached
 	AnnIgnoreInaccessiblePV = "pv.attach.kubernetes.io/ignore-if-inaccessible"
+
+	// TriggerCsiFullSyncCRName is the instance name of TriggerCsiFullSync
+	// All other names will be rejected by TriggerCsiFullSync controller
+	TriggerCsiFullSyncCRName = "csifullsync"
 )
 
 // Supported container orchestrators
@@ -219,10 +234,22 @@ const (
 	CSIMigration = "csi-migration"
 	// CSIAuthCheck is feature flag for auth check
 	CSIAuthCheck = "csi-auth-check"
+	// AsyncQueryVolume is feature flag for using async query volume API
+	AsyncQueryVolume = "async-query-volume"
+	// CSISVFeatureStateReplication is feature flag for SV feature state replication feature
+	CSISVFeatureStateReplication = "csi-sv-feature-states-replication"
 	// VSANDirectDiskDecommission is feature flag for vsanD disk decommission
 	VSANDirectDiskDecommission = "vsan-direct-disk-decommission"
 	// FileVolume is feature flag name for file volume support in WCP
 	FileVolume = "file-volume"
 	// FakeAttach is the feature flag for fake attach support in WCP
 	FakeAttach = "fake-attach"
+	// TriggerCSIFullSyync is feature flag to trigger full sync
+	TriggerCsiFullSync = "trigger-csi-fullsync"
+	// CSIVolumeManagerIdempotency is the feature flag for idempotency handling in CSI volume manager
+	CSIVolumeManagerIdempotency = "improved-csi-idempotency"
+	// ImprovedVolumeTopology is the feature flag used to make the following improvements
+	// to topology feature:
+	// 1. Avoid taking in VC credentials in node daemonset.
+	ImprovedVolumeTopology = "improved-volume-topology"
 )

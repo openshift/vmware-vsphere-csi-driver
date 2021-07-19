@@ -29,7 +29,7 @@ import (
 
 // SetInitParams initializes the parameters required to create a container agnostic orchestrator instance
 func SetInitParams(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, initParams *interface{},
-	supervisorFSSName, supervisorFSSNamespace, internalFSSName, internalFSSNamespace string) {
+	supervisorFSSName, supervisorFSSNamespace, internalFSSName, internalFSSNamespace, serviceMode string) {
 	log := logger.GetLogger(ctx)
 	// Set default values for FSS, if not given and initiate CO-agnostic init params
 	switch clusterFlavor {
@@ -47,6 +47,7 @@ func SetInitParams(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 				Name:      supervisorFSSName,
 				Namespace: supervisorFSSNamespace,
 			},
+			ServiceMode: serviceMode,
 		}
 	case cnstypes.CnsClusterFlavorVanilla:
 		if strings.TrimSpace(internalFSSName) == "" {
@@ -54,14 +55,15 @@ func SetInitParams(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 			internalFSSName = csiconfig.DefaultInternalFSSConfigMapName
 		}
 		if strings.TrimSpace(internalFSSNamespace) == "" {
-			log.Infof("Defaulting feature states configmap namespace to %q", csiconfig.DefaultCSINamespaceVanillaK8s)
-			internalFSSNamespace = csiconfig.DefaultCSINamespaceVanillaK8s
+			log.Infof("Defaulting feature states configmap namespace to %q", csiconfig.DefaultCSINamespace)
+			internalFSSNamespace = csiconfig.DefaultCSINamespace
 		}
 		*initParams = k8sorchestrator.K8sVanillaInitParams{
 			InternalFeatureStatesConfigInfo: csiconfig.FeatureStatesConfigInfo{
 				Name:      internalFSSName,
 				Namespace: internalFSSNamespace,
 			},
+			ServiceMode: serviceMode,
 		}
 	case cnstypes.CnsClusterFlavorGuest:
 		if strings.TrimSpace(supervisorFSSName) == "" {
@@ -89,6 +91,7 @@ func SetInitParams(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 				Name:      supervisorFSSName,
 				Namespace: supervisorFSSNamespace,
 			},
+			ServiceMode: serviceMode,
 		}
 	default:
 		log.Fatalf("Unrecognised cluster flavor %q. Container orchestrator init params not initialized.", clusterFlavor)

@@ -240,14 +240,14 @@ func (f *FakeAuthManager) GetDatastoreMapForBlockVolumes(ctx context.Context) ma
 	return datastoreMapForBlockVolumes
 }
 
-func (f *FakeAuthManager) GetDatastoreMapForFileVolumes(ctx context.Context) map[string]*cnsvsphere.DatastoreInfo {
-	datastoreMapForFileVolumes := make(map[string]*cnsvsphere.DatastoreInfo)
-	fmt.Print("FakeAuthManager: GetDatastoreMapForFileVolumes")
+func (f *FakeAuthManager) GetFsEnabledClusterToDsMap(ctx context.Context) map[string][]*cnsvsphere.DatastoreInfo {
+	fsEnabledClusterToDsMap := make(map[string][]*cnsvsphere.DatastoreInfo)
+	fmt.Print("FakeAuthManager: GetClusterToFsEnabledDsMap")
 	if v := os.Getenv("VSPHERE_DATACENTER"); v != "" {
-		datastoreMapForFileVolumes, _ := common.GenerateDatastoreMapForFileVolumes(ctx, f.vcenter)
-		return datastoreMapForFileVolumes
+		fsEnabledClusterToDsMap, _ := common.GenerateFSEnabledClustersToDsMap(ctx, f.vcenter)
+		return fsEnabledClusterToDsMap
 	}
-	return datastoreMapForFileVolumes
+	return fsEnabledClusterToDsMap
 }
 
 func (f *FakeAuthManager) ResetvCenterInstance(ctx context.Context, vCenter *cnsvsphere.VirtualCenter) {
@@ -277,11 +277,15 @@ func getControllerTest(t *testing.T) *controllerTest {
 		if err != nil {
 			t.Fatal(err)
 		}
+		fakeOpStore, err := unittestcommon.InitFakeVolumeOperationRequestInterface()
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		manager := &common.Manager{
 			VcenterConfig:  vcenterconfig,
 			CnsConfig:      config,
-			VolumeManager:  cnsvolume.GetManager(ctx, vcenter),
+			VolumeManager:  cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true),
 			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 		}
 

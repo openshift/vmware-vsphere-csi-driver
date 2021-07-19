@@ -28,6 +28,7 @@ import (
 	"golang.org/x/net/context"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 )
 
@@ -97,7 +98,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 		// Datacenters are returned.
 		datacenters, err := vc.GetDatacenters(ctx)
 		if err != nil {
-			log.Errorf("failed to find datacenters from VC: %+v, Error: %+v", vc.Config.Host, err)
+			log.Errorf("failed to find datacenters from VC: %q, Error: %+v", vc.Config.Host, err)
 			return nil, err
 		}
 		isSharedDatastoreURL := false
@@ -284,8 +285,13 @@ func CreateFileVolumeUtilOld(ctx context.Context, clusterFlavor cnstypes.CnsClus
 	var datastores []vim25types.ManagedObjectReference
 	if spec.ScParams.DatastoreURL == "" {
 		if len(manager.VcenterConfig.TargetvSANFileShareDatastoreURLs) == 0 {
+			datacenters, err := vc.ListDatacenters(ctx)
+			if err != nil {
+				log.Errorf("failed to find datacenters from VC: %q, Error: %+v", vc.Config.Host, err)
+				return "", err
+			}
 			// get all vSAN datastores from VC
-			vsanDsURLToInfoMap, err := vc.GetVsanDatastores(ctx)
+			vsanDsURLToInfoMap, err := vc.GetVsanDatastores(ctx, datacenters)
 			if err != nil {
 				log.Errorf("failed to get vSAN datastores with error %+v", err)
 				return "", err
@@ -294,7 +300,7 @@ func CreateFileVolumeUtilOld(ctx context.Context, clusterFlavor cnstypes.CnsClus
 			for dsURL := range vsanDsURLToInfoMap {
 				allvsanDatastoreUrls = append(allvsanDatastoreUrls, dsURL)
 			}
-			fsEnabledMap, err := IsFileServiceEnabled(ctx, allvsanDatastoreUrls, vc)
+			fsEnabledMap, err := IsFileServiceEnabled(ctx, allvsanDatastoreUrls, vc, datacenters)
 			if err != nil {
 				log.Errorf("failed to get if file service is enabled on vsan datastores with error %+v", err)
 				return "", err
@@ -307,7 +313,7 @@ func CreateFileVolumeUtilOld(ctx context.Context, clusterFlavor cnstypes.CnsClus
 				}
 			}
 			if len(datastores) == 0 {
-				msg := "No file service enabled vsan datastore is present in the environment."
+				msg := "no file service enabled vsan datastore is present in the environment"
 				log.Error(msg)
 				return "", errors.New(msg)
 			}
@@ -429,10 +435,10 @@ func getHostVsanUUID(ctx context.Context, hostMoID string, vc *vsphere.VirtualCe
 // AttachVolumeUtil is the helper function to attach CNS volume to specified vm
 func AttachVolumeUtil(ctx context.Context, manager *Manager,
 	vm *vsphere.VirtualMachine,
-	volumeID string) (string, error) {
+	volumeID string, checkNVMeController bool) (string, error) {
 	log := logger.GetLogger(ctx)
 	log.Debugf("vSphere CSI driver is attaching volume: %q to vm: %q", volumeID, vm.String())
-	diskUUID, err := manager.VolumeManager.AttachVolume(ctx, vm, volumeID)
+	diskUUID, err := manager.VolumeManager.AttachVolume(ctx, vm, volumeID, checkNVMeController)
 	if err != nil {
 		log.Errorf("failed to attach disk %q with VM: %q. err: %+v", volumeID, vm.String(), err)
 		return "", err
@@ -471,28 +477,42 @@ func DeleteVolumeUtil(ctx context.Context, volManager cnsvolume.Manager, volumeI
 }
 
 // ExpandVolumeUtil is the helper function to extend CNS volume for given volumeId
-func ExpandVolumeUtil(ctx context.Context, manager *Manager, volumeID string, capacityInMb int64) error {
+func ExpandVolumeUtil(ctx context.Context, manager *Manager, volumeID string, capacityInMb int64, useAsyncQueryVolume,
+	isIdempotencyHandlingEnabled bool) error {
 	var err error
 	log := logger.GetLogger(ctx)
 	log.Debugf("vSphere CSI driver expanding volume %q to new size %d Mb.", volumeID, capacityInMb)
 
-	expansionRequired, err := isExpansionRequired(ctx, volumeID, capacityInMb, manager)
-	if err != nil {
-		return err
-	}
-	if expansionRequired {
-		log.Infof("Requested size %d Mb is greater than current size for volumeID: %q. Need volume expansion.", capacityInMb, volumeID)
+	if isIdempotencyHandlingEnabled {
+		// Avoid querying volume when idempotency handling is enabled.
 		err = manager.VolumeManager.ExpandVolume(ctx, volumeID, capacityInMb)
 		if err != nil {
 			log.Errorf("failed to expand volume %q with error %+v", volumeID, err)
 			return err
 		}
 		log.Infof("Successfully expanded volume for volumeid %q to new size %d Mb.", volumeID, capacityInMb)
-
+		return nil
 	} else {
-		log.Infof("Requested volume size is equal to current size %d Mb. Expansion not required.", capacityInMb)
+		expansionRequired, err := isExpansionRequired(ctx, volumeID, capacityInMb, manager, useAsyncQueryVolume)
+		if err != nil {
+			return err
+		}
+		if expansionRequired {
+			log.Infof("Requested size %d Mb is greater than current size for volumeID: %q. Need volume expansion.",
+				capacityInMb, volumeID)
+			err = manager.VolumeManager.ExpandVolume(ctx, volumeID, capacityInMb)
+			if err != nil {
+				log.Errorf("failed to expand volume %q with error %+v", volumeID, err)
+				return err
+			}
+			log.Infof("Successfully expanded volume for volumeid %q to new size %d Mb.", volumeID, capacityInMb)
+
+		} else {
+			log.Infof("Requested volume size is equal to current size %d Mb. Expansion not required.", capacityInMb)
+		}
+		return err
+
 	}
-	return err
 }
 
 // QueryVolumeByID is the helper function to query volume by volumeID
@@ -547,26 +567,28 @@ func getDatastore(ctx context.Context, vc *vsphere.VirtualCenter, datastoreURL s
 }
 
 // isExpansionRequired verifies if the requested size to expand a volume is greater than the current size
-func isExpansionRequired(ctx context.Context, volumeID string, requestedSize int64, manager *Manager) (bool, error) {
+func isExpansionRequired(ctx context.Context, volumeID string, requestedSize int64, manager *Manager, useAsyncQueryVolume bool) (bool, error) {
 	log := logger.GetLogger(ctx)
 	volumeIds := []cnstypes.CnsVolumeId{{Id: volumeID}}
 	queryFilter := cnstypes.CnsQueryFilter{
 		VolumeIds: volumeIds,
 	}
+	// Select only the backing object details.
 	querySelection := cnstypes.CnsQuerySelection{
 		Names: []string{
 			string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
 		},
 	}
 	// Query only the backing object details.
-	queryResult, err := manager.VolumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
+	queryResult, err := utils.QueryAllVolumeUtil(ctx, manager.VolumeManager, queryFilter, querySelection, useAsyncQueryVolume)
 	if err != nil {
-		log.Errorf("failed to call QueryVolume for volumeID: %q: %v", volumeID, err)
+		log.Errorf("QueryVolume failed with err=%+v", err.Error())
 		return false, err
 	}
+
 	var currentSize int64
 	if len(queryResult.Volumes) > 0 {
-		currentSize = queryResult.Volumes[0].BackingObjectDetails.(cnstypes.BaseCnsBackingObjectDetails).GetCnsBackingObjectDetails().CapacityInMb
+		currentSize = queryResult.Volumes[0].BackingObjectDetails.GetCnsBackingObjectDetails().CapacityInMb
 	} else {
 		msg := fmt.Sprintf("failed to find volume by querying volumeID: %q", volumeID)
 		log.Error(msg)

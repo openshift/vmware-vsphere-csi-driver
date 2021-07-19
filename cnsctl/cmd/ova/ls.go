@@ -13,32 +13,37 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package ova
 
 import (
 	"fmt"
-	"github.com/spf13/viper"
 	"os"
+
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 )
 
 var cfgFile string
 var all bool
 
-// lsCmd represents the ls command
+// lsCmd represents the ls command.
 var lsCmd = &cobra.Command{
 	Use:   "ls",
 	Short: "List orphan VolumeAttachment CRs in Kubernetes",
 	Long:  "List orphan VolumeAttachment CRs in Kubernetes",
 	Run: func(cmd *cobra.Command, args []string) {
 		validateLsFlags()
-		// TODO: Add implementation
+		// TODO: Add implementation.
 	},
 }
 
+// InitLs helps initialize lsCmd.
 func InitLs() {
-	lsCmd.PersistentFlags().StringVarP(&cfgFile, "kubeconfig", "k", viper.GetString("kubeconfig"), "kubeconfig file (alternatively use CNSCTL_KUBECONFIG env variable)")
-	lsCmd.PersistentFlags().BoolVarP(&all, "all", "a", false, "Show orphan and used volume attachment CRs in the Kubernetes cluster")
+	lsCmd.PersistentFlags().StringVarP(&cfgFile, "kubeconfig", "k", viper.GetString("kubeconfig"),
+		"kubeconfig file (alternatively use CNSCTL_KUBECONFIG env variable)")
+	lsCmd.PersistentFlags().BoolVarP(&all, "all", "a", false,
+		"Show orphan and used volume attachment CRs in the Kubernetes cluster")
 	ovaCmd.AddCommand(lsCmd)
 }
 
