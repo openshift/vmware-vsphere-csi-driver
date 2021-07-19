@@ -3,6 +3,7 @@ all: build
 # Get the absolute path and name of the current directory.
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
+GOFLAGS_VENDOR := -mod=vendor
 
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
@@ -87,7 +88,7 @@ CSI_BIN_NAME := vsphere-csi
 CSI_BIN := $(BIN_OUT)/$(CSI_BIN_NAME).$(GOOS)_$(GOARCH)
 CSI_BIN_LINUX := $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)
 CSI_BIN_WINDOWS := $(BIN_OUT)/$(CSI_BIN_NAME).windows_$(GOARCH)
-build-csi: $(CSI_BIN) 
+build-csi: $(CSI_BIN)
 build-csi-windows: $(CSI_BIN_WINDOWS)
 ifndef CSI_BIN_SRCS
 CSI_BIN_SRCS := cmd/$(CSI_BIN_NAME)/main.go go.mod go.sum
@@ -95,11 +96,11 @@ CSI_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./c
 export CSI_BIN_SRCS
 endif
 $(CSI_BIN): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
 	@touch $@
 
 $(CSI_BIN_WINDOWS): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
+	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
 	@touch $@
 
 # The cnsctl binary.
@@ -112,7 +113,7 @@ CNSCTL_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' 
 export CNSCTL_BIN_SRCS
 endif
 $(CNSCTL_BIN): $(CNSCTL_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
 	@touch $@
 
 # The Syncer binary.
@@ -144,8 +145,8 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-$(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
+$(SYNCER_BIN): $(SYNCER_BIN_SRCS)
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
 # The default build target.
@@ -404,7 +405,7 @@ images: | $(DOCKER_SOCK)
 push-images: | $(DOCKER_SOCK)
 ifndef CSI_REGISTRY
 	hack/release.sh -p
-else 
+else
 	hack/release.sh -p -r ${CSI_REGISTRY}
 endif
 
