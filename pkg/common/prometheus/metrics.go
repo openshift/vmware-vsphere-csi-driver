@@ -66,8 +66,6 @@ const (
 	PrometheusCnsRelocateVolumeOpType = "relocate-volume"
 	// PrometheusCnsConfigureVolumeACLOpType represents the ConfigureVolumeAcl operation.
 	PrometheusCnsConfigureVolumeACLOpType = "configure-volume-acl"
-	// PrometheusQuerySnapshotsOpType represents QuerySnapshots operation.
-	PrometheusQuerySnapshotsOpType = "query-snapshots"
 
 	// PrometheusPassStatus represents a successful API run.
 	PrometheusPassStatus = "pass"

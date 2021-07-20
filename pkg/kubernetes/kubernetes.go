@@ -27,7 +27,6 @@ import (
 	"time"
 
 	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
-	v1 "k8s.io/api/core/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -55,7 +54,6 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
 	internalapis "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis"
 	cnsvolumeoperationrequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
-	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/csinodetopology/v1alpha1"
 )
 
 const (
@@ -181,11 +179,6 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
 		}
-		err = csinodetopologyv1alpha1.AddToScheme(scheme)
-		if err != nil {
-			log.Errorf("failed to add CSINodeTopology to scheme with error: %+v", err)
-			return nil, err
-		}
 	}
 	client, err := client.New(config, client.Options{
 		Scheme: scheme,
@@ -199,8 +192,7 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 
 // NewCnsFileAccessConfigWatcher creates a new ListWatch for VirtualMachines
 // given rest client config.
-func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Config,
-	namespace string) (*cache.ListWatch, error) {
+func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Config, namespace string) (*cache.ListWatch, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 
@@ -225,8 +217,7 @@ func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Confi
 
 // NewVirtualMachineWatcher creates a new ListWatch for VirtualMachines given
 // rest client config.
-func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
-	namespace string) (*cache.ListWatch, error) {
+func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config, namespace string) (*cache.ListWatch, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 
@@ -249,34 +240,7 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 	return cache.NewListWatchFromClient(client, virtualMachineKind, namespace, fields.Everything()), nil
 }
 
-// NewCSINodeTopologyWatcher creates a new ListWatch for CSINodeTopology objects
-// given rest client config.
-func NewCSINodeTopologyWatcher(ctx context.Context, config *restclient.Config) (*cache.ListWatch, error) {
-	var err error
-	log := logger.GetLogger(ctx)
-
-	scheme := runtime.NewScheme()
-	err = csinodetopologyv1alpha1.AddToScheme(scheme)
-	if err != nil {
-		log.Errorf("failed to add to scheme with err: %+v", err)
-		return nil, err
-	}
-	gvk := schema.GroupVersionKind{
-		Group:   csinodetopologyv1alpha1.GroupName,
-		Version: csinodetopologyv1alpha1.Version,
-		Kind:    csiNodeTopologyKind,
-	}
-
-	client, err := apiutils.RESTClientForGVK(gvk, false, config, serializer.NewCodecFactory(scheme))
-	if err != nil {
-		log.Errorf("failed to create RESTClient for %s CR with err: %+v", csiNodeTopologyKind, err)
-		return nil, err
-	}
-	return cache.NewListWatchFromClient(client, csiNodeTopologyKind, v1.NamespaceAll, fields.Everything()), nil
-}
-
-// CreateKubernetesClientFromConfig creaates a newk8s client from given
-// kubeConfig file.
+// CreateKubernetesClientFromConfig creaates a newk8s client from given kubeConfig file.
 func CreateKubernetesClientFromConfig(kubeConfigPath string) (clientset.Interface, error) {
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
@@ -324,8 +288,7 @@ func getClientThroughput(ctx context.Context, isSupervisorClient bool) (float32,
 	}
 
 	if v := os.Getenv(envClientQPS); v != "" {
-		value, err := strconv.ParseFloat(v, 32)
-		if err != nil || float32(value) < minClientQPS || float32(value) > maxClientQPS {
+		if value, err := strconv.ParseFloat(v, 32); err != nil || float32(value) < minClientQPS || float32(value) > maxClientQPS {
 			log.Warnf("Invalid value set for env variable %s: %v. Using default value.", envClientQPS, v)
 		} else {
 			qps = float32(value)
@@ -399,11 +362,9 @@ func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1
 	}
 
 	crdName := newCrd.ObjectMeta.Name
-	crd, err := apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Get(ctx,
-		crdName, metav1.GetOptions{})
+	crd, err := apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Create(ctx,
-			newCrd, metav1.CreateOptions{})
+		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Create(ctx, newCrd, metav1.CreateOptions{})
 		if err != nil {
 			log.Errorf("Failed to create %q CRD with err: %+v", crdName, err)
 			return err
@@ -413,8 +374,7 @@ func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1
 		// Update the existing CRD with new CRD.
 		crd.Spec = newCrd.Spec
 		crd.Status = newCrd.Status
-		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Update(ctx,
-			crd, metav1.UpdateOptions{})
+		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Update(ctx, crd, metav1.UpdateOptions{})
 		if err != nil {
 			log.Errorf("Failed to update %q CRD with err: %+v", crdName, err)
 			return err
@@ -458,8 +418,7 @@ func waitForCustomResourceToBeEstablished(ctx context.Context,
 	// If there is an error, delete the object to keep it clean.
 	if err != nil {
 		log.Infof("Cleanup %q CRD because the CRD created was not successfully established. Err: %+v", crdName, err)
-		deleteErr := clientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(ctx,
-			crdName, *metav1.NewDeleteOptions(0))
+		deleteErr := clientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(ctx, crdName, *metav1.NewDeleteOptions(0))
 		if deleteErr != nil {
 			log.Errorf("Failed to delete %q CRD with err: %+v", crdName, deleteErr)
 		}

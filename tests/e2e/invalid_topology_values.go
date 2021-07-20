@@ -81,8 +81,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		defer cancel()
 		topologyWithNoNodes := NonExistingRegion + ":" + NonExistingZone
 		_, _, allowedTopologies = topologyParameterForStorageClass(topologyWithNoNodes)
-		storageclass, pvclaim, err = createPVCAndStorageClass(client,
-			namespace, nil, nil, "", allowedTopologies, "", false, "")
+		storageclass, pvclaim, err = createPVCAndStorageClass(client, namespace, nil, nil, "", allowedTopologies, "", false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
@@ -91,8 +90,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 		ginkgo.By("Expect claim to fail provisioning volume within the topology")
-		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
-			client, pvclaim.Namespace, pvclaim.Name, framework.PollShortTimeout, pollTimeoutShort))
+		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client, pvclaim.Namespace, pvclaim.Name, framework.PollShortTimeout, pollTimeoutShort))
 		// Get the event list and verify if it contains expected error message
 		eventList, _ := client.CoreV1().Events(pvclaim.Namespace).List(ctx, metav1.ListOptions{})
 		gomega.Expect(eventList.Items).NotTo(gomega.BeEmpty())
@@ -100,8 +98,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		framework.Logf(fmt.Sprintf("Actual failure message: %+q", actualErrMsg))
 		expectedErrMsg := "failed to get shared datastores in topology"
 		framework.Logf(fmt.Sprintf("Expected failure message: %+q", expectedErrMsg))
-		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(),
-			fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
+		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(), fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
 
 	})
 
@@ -125,8 +122,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		inputZone := regionZone[1]
 		topologyNonExistingRegion := NonExistingRegion + ":" + inputZone
 		_, _, allowedTopologies = topologyParameterForStorageClass(topologyNonExistingRegion)
-		storageclass, pvclaim, err = createPVCAndStorageClass(client,
-			namespace, nil, nil, "", allowedTopologies, "", false, "")
+		storageclass, pvclaim, err = createPVCAndStorageClass(client, namespace, nil, nil, "", allowedTopologies, "", false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
@@ -136,8 +132,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		}()
 
 		ginkgo.By("Expect claim to fail provisioning volume within the topology")
-		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
-			client, pvclaim.Namespace, pvclaim.Name, pollTimeoutShort, framework.PollShortTimeout))
+		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client, pvclaim.Namespace, pvclaim.Name, pollTimeoutShort, framework.PollShortTimeout))
 		// Get the event list and verify if it contains expected error message
 		eventList, _ := client.CoreV1().Events(pvclaim.Namespace).List(ctx, metav1.ListOptions{})
 		gomega.Expect(eventList.Items).NotTo(gomega.BeEmpty())
@@ -145,8 +140,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		framework.Logf(fmt.Sprintf("Actual failure message: %+q", actualErrMsg))
 		expectedErrMsg := "failed to get shared datastores in topology"
 		framework.Logf(fmt.Sprintf("Expected failure message: %+q", expectedErrMsg))
-		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(),
-			fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
+		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(), fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
 	})
 
 	/*
@@ -169,8 +163,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		inputRegion := regionZone[0]
 		topologyNonExistingZone := inputRegion + ":" + NonExistingZone
 		_, _, allowedTopologies = topologyParameterForStorageClass(topologyNonExistingZone)
-		storageclass, pvclaim, err = createPVCAndStorageClass(client,
-			namespace, nil, nil, "", allowedTopologies, "", false, "")
+		storageclass, pvclaim, err = createPVCAndStorageClass(client, namespace, nil, nil, "", allowedTopologies, "", false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
@@ -179,8 +172,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 		ginkgo.By("Expect claim to fail provisioning volume within the topology")
-		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client,
-			pvclaim.Namespace, pvclaim.Name, pollTimeoutShort, framework.PollShortTimeout))
+		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client, pvclaim.Namespace, pvclaim.Name, pollTimeoutShort, framework.PollShortTimeout))
 		// Get the event list and verify if it contains expected error message
 
 		eventList, _ := client.CoreV1().Events(pvclaim.Namespace).List(ctx, metav1.ListOptions{})
@@ -189,7 +181,6 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		framework.Logf(fmt.Sprintf("Actual failure message: %+q", actualErrMsg))
 		expectedErrMsg := "failed to get shared datastores in topology"
 		framework.Logf(fmt.Sprintf("Expected failure message: %+q", expectedErrMsg))
-		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(),
-			fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
+		gomega.Expect(strings.Contains(actualErrMsg, expectedErrMsg)).To(gomega.BeTrue(), fmt.Sprintf("actualErrMsg: %q does not contain expectedErrMsg: %q", actualErrMsg, expectedErrMsg))
 	})
 })

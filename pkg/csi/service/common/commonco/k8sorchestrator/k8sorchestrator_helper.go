@@ -18,6 +18,8 @@ package k8sorchestrator
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 
 	v1 "k8s.io/api/core/v1"
@@ -27,8 +29,8 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
 )
 
-// getPVCAnnotations fetches annotations from PVC bound to passed volumeID and
-// returns annotation key-value pairs as a map.
+// getPVCAnnotations fetches annotations from PVC bound to passed volumeID and returns
+// annotation key-value pairs as a map
 func (c *K8sOrchestrator) getPVCAnnotations(ctx context.Context, volumeID string) (map[string]string, error) {
 	log := logger.GetLogger(ctx)
 	log.Debugf("Getting annotations on pvc corresponding to volume: %s", volumeID)
@@ -40,7 +42,7 @@ func (c *K8sOrchestrator) getPVCAnnotations(ctx context.Context, volumeID string
 		pvcObj, err := c.informerManager.GetPVCLister().PersistentVolumeClaims(pvcNamespace).Get(pvcName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// PVC may have been deleted.
+				//PVC may have been deleted.
 				log.Debugf("PVC %s is not found in namespace %s using informer manager", pvcName, pvcNamespace)
 				return nil, common.ErrNotFound
 			}
@@ -56,9 +58,8 @@ func (c *K8sOrchestrator) getPVCAnnotations(ctx context.Context, volumeID string
 }
 
 // updatePVCAnnotations updates annotations passed as key-value pairs
-// on PVC bound to passed volumeID.
-func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
-	volumeID string, annotations map[string]string) error {
+// on PVC bound to passed volumeID
+func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context, volumeID string, annotations map[string]string) error {
 	log := logger.GetLogger(ctx)
 	if pvc := c.volumeIDToPvcMap.get(volumeID); pvc != "" {
 		parts := strings.Split(pvc, "/")
@@ -68,7 +69,7 @@ func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
 		pvcObj, err := c.informerManager.GetPVCLister().PersistentVolumeClaims(pvcNamespace).Get(pvcName)
 		if err != nil {
 			if apierrors.IsNotFound(err) {
-				// PVC may have been deleted. Return.
+				//PVC may have been deleted. Return.
 				log.Debugf("PVC %s is not found in namespace %s using informer manager", pvcName, pvcNamespace)
 				return common.ErrNotFound
 			}
@@ -77,7 +78,7 @@ func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
 		}
 
 		for key, val := range annotations {
-			// If value is not set, remove the annotation.
+			// If value is not set, remove the annotation
 			if val == "" {
 				delete(pvcObj.ObjectMeta.Annotations, key)
 				log.Debugf("Removing annotation %s on pvc %s/%s", key, pvcNamespace, pvcName)
@@ -94,11 +95,12 @@ func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
 		return nil
 	}
 
-	return logger.LogNewErrorf(log, "could not find pvc for volumeID: %s", volumeID)
+	errMsg := fmt.Sprintf("could not find pvc for volumeID: %s", volumeID)
+	log.Debugf(errMsg)
+	return errors.New(errMsg)
 }
 
-// isFileVolume checks if the Persistent Volume has ReadWriteMany or
-// ReadOnlyMany support.
+// isFileVolume checks if the Persistent Volume has ReadWriteMany or ReadOnlyMany support
 func isFileVolume(pv *v1.PersistentVolume) bool {
 	if len(pv.Spec.AccessModes) == 0 {
 		return false

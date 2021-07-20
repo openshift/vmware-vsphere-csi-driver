@@ -54,19 +54,19 @@ const (
 	staticPvNamePrefix                       = "static-pv-"
 )
 
-// backOffDuration is a map of cnsregistervolume name's to the time after which
-// a request for this instance will be requeued.
-// Initialized to 1 second for new instances and for instances whose latest
-// reconcile operation succeeded.
+// backOffDuration is a map of cnsregistervolume name's to the time after which a request
+// for this instance will be requeued.
+// Initialized to 1 second for new instances and for instances whose latest reconcile
+// operation succeeded.
 // If the reconcile fails, backoff is incremented exponentially.
 var (
 	backOffDuration         map[string]time.Duration
 	backOffDurationMapMutex = sync.Mutex{}
 )
 
-// Add creates a new CnsRegisterVolume Controller and adds it to the Manager,
-// ConfigurationInfo and VirtualCenterTypes. The Manager will set fields on
-// the Controller and Start it when the Manager is Started.
+// Add creates a new CnsRegisterVolume Controller and adds it to the Manager, ConfigurationInfo
+// and VirtualCenterTypes. The Manager will set fields on the Controller
+// and Start it when the Manager is Started.
 func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
 	ctx, log := logger.GetNewContextWithLogger()
@@ -75,15 +75,14 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		return nil
 	}
 
-	// Initializes kubernetes client.
+	// Initializes kubernetes client
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
 		log.Errorf("Creating Kubernetes client failed. Err: %v", err)
 		return err
 	}
 
-	// eventBroadcaster broadcasts events on cnsregistervolume instances to the
-	// event sink.
+	// eventBroadcaster broadcasts events on cnsregistervolume instances to the event sink
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartRecordingToSink(
 		&typedcorev1.EventSinkImpl{
@@ -94,21 +93,18 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	return add(mgr, newReconciler(mgr, configInfo, volumeManager, recorder))
 }
 
-// newReconciler returns a new reconcile.Reconciler.
-func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo,
-	volumeManager volumes.Manager, recorder record.EventRecorder) reconcile.Reconciler {
-	return &ReconcileCnsRegisterVolume{client: mgr.GetClient(), scheme: mgr.GetScheme(),
-		configInfo: configInfo, volumeManager: volumeManager, recorder: recorder}
+// newReconciler returns a new reconcile.Reconciler
+func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo, volumeManager volumes.Manager, recorder record.EventRecorder) reconcile.Reconciler {
+	return &ReconcileCnsRegisterVolume{client: mgr.GetClient(), scheme: mgr.GetScheme(), configInfo: configInfo, volumeManager: volumeManager, recorder: recorder}
 }
 
-// add adds a new Controller to mgr with r as the reconcile.Reconciler.
+// add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	ctx, log := logger.GetNewContextWithLogger()
 
 	maxWorkerThreads := getMaxWorkerThreadsToReconcileCnsRegisterVolume(ctx)
-	// Create a new controller.
-	c, err := controller.New("cnsregistervolume-controller", mgr,
-		controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
+	// Create a new controller
+	c, err := controller.New("cnsregistervolume-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
 	if err != nil {
 		log.Errorf("Failed to create new CnsRegisterVolume controller with error: %+v", err)
 		return err
@@ -116,7 +112,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 	backOffDuration = make(map[string]time.Duration)
 
-	// Watch for changes to primary resource CnsRegisterVolume.
+	// Watch for changes to primary resource CnsRegisterVolume
 	err = c.Watch(&source.Kind{Type: &cnsregistervolumev1alpha1.CnsRegisterVolume{}}, &handler.EnqueueRequestForObject{})
 	if err != nil {
 		log.Errorf("Failed to watch for changes to CnsRegisterVolume resource with error: %+v", err)
@@ -125,14 +121,13 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	return nil
 }
 
-// blank assignment to verify that ReconcileCnsRegisterVolume implements
-// reconcile.Reconciler.
+// blank assignment to verify that ReconcileCnsRegisterVolume implements reconcile.Reconciler
 var _ reconcile.Reconciler = &ReconcileCnsRegisterVolume{}
 
-// ReconcileCnsRegisterVolume reconciles a CnsRegisterVolume object.
+// ReconcileCnsRegisterVolume reconciles a CnsRegisterVolume object
 type ReconcileCnsRegisterVolume struct {
 	// This client, initialized using mgr.Client() above, is a split client
-	// that reads objects from the cache and writes to the apiserver.
+	// that reads objects from the cache and writes to the apiserver
 	client        client.Client
 	scheme        *runtime.Scheme
 	configInfo    *commonconfig.ConfigurationInfo
@@ -140,17 +135,14 @@ type ReconcileCnsRegisterVolume struct {
 	recorder      record.EventRecorder
 }
 
-// Reconcile reads that state of the cluster for a CnsRegisterVolume object
-// and makes changes based on the state read and what is in the
-// CnsRegisterVolume.Spec.
+// Reconcile reads that state of the cluster for a CnsRegisterVolume object and makes changes based on the state read
+// and what is in the CnsRegisterVolume.Spec
 // Note:
-// The Controller will requeue the Request to be processed again if the
-// returned error is non-nil or Result.Requeue is true. Otherwise, upon
-// completion it will remove the work from the queue.
-func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
-	request reconcile.Request) (reconcile.Result, error) {
+// The Controller will requeue the Request to be processed again if the returned error is non-nil or
+// Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
+func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	log := logger.GetLogger(ctx)
-	// Fetch the CnsRegisterVolume instance.
+	// Fetch the CnsRegisterVolume instance
 	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
 	err := r.client.Get(ctx, request.NamespacedName, instance)
 	if err != nil {
@@ -160,7 +152,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		}
 		log.Errorf("Error reading the CnsRegisterVolume with name: %q on namespace: %q. Err: %+v",
 			request.Name, request.Namespace, err)
-		// Error reading the object - return with err.
+		// Error reading the object - return with err
 		return reconcile.Result{}, err
 	}
 	// Initialize backOffDuration for the instance, if required.
@@ -172,8 +164,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	timeout = backOffDuration[instance.Name]
 	backOffDurationMapMutex.Unlock()
 
-	// If the CnsRegistereVolume instance is already registered, remove the
-	// instance from the queue.
+	// If the CnsRegistereVolume instance is already registered, remove the instance from the queue
 	if instance.Status.Registered {
 		backOffDurationMapMutex.Lock()
 		delete(backOffDuration, instance.Name)
@@ -181,9 +172,8 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{}, nil
 	}
 
-	log.Infof("Reconciling CnsRegisterVolume with instance: %q from namespace: %q. timeout %q seconds",
-		instance.Name, request.Namespace, timeout)
-	// Validate CnsRegisterVolume spec to check for valid entries.
+	log.Infof("Reconciling CnsRegisterVolume with instance: %q from namespace: %q. timeout %q seconds", instance.Name, request.Namespace, timeout)
+	// Validate CnsRegisterVolume spec to check for valid entries
 	err = validateCnsRegisterVolumeSpec(ctx, instance)
 	if err != nil {
 		log.Errorf(err.Error())
@@ -191,7 +181,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 	// Verify if CnsRegisterVolume request is for block volume registration
-	// Currently file volume registration is not supported.
+	// Currently file volume registration is not supported
 	ok := isBlockVolumeRegisterRequest(ctx, instance)
 	if !ok {
 		msg := fmt.Sprintf("AccessMode: %s is not supported", instance.Spec.AccessMode)
@@ -211,7 +201,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		volumeID string
 		pvName   string
 	)
-	// Create Volume for the input CnsRegisterVolume instance.
+	// Create Volume for the input CnsRegisterVolume instance
 	createSpec := constructCreateSpecForInstance(r, instance, vc.Config.Host)
 	log.Infof("Creating CNS volume: %+v for CnsRegisterVolume request with name: %q on namespace: %q",
 		instance, instance.Name, instance.Namespace)
@@ -245,24 +235,23 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	// Verify if the volume is accessible to Pacific cluster.
+	// Verify if the volume is accessible to Pacific cluster
 	isAccessible := isDatastoreAccessibleToCluster(ctx, vc, r.configInfo.Cfg.Global.ClusterID, volume.DatastoreUrl)
 	if !isAccessible {
-		log.Errorf("Volume: %s present on datastore: %s is not accessible to all nodes in the cluster: %s",
-			volumeID, volume.DatastoreUrl, r.configInfo.Cfg.Global.ClusterID)
+		log.Errorf("Volume: %s present on datastore: %s is not accessible to all nodes in the cluster: %s", volumeID, volume.DatastoreUrl, r.configInfo.Cfg.Global.ClusterID)
 		setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to all nodes in the cluster")
-		// Untag the CNS volume which was created previously.
+		// Untag the CNS volume which was created previously
 		err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
 		if err != nil {
 			log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
 		}
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	// Verify if storage policy is empty.
+	// Verify if storage policy is empty
 	if volume.StoragePolicyId == "" {
 		log.Errorf("Volume: %s doesn't have storage policy associated with it", volumeID)
 		setInstanceError(ctx, r, instance, "Volume in the spec doesn't have storage policy associated with it")
-		// Untag the CNS volume which was created previously.
+		// Untag the CNS volume which was created previously
 		err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
 		if err != nil {
 			log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
@@ -272,27 +261,25 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
-		log.Errorf("Failed to initialize K8S client when registering the CnsRegisterVolume "+
-			"instance: %s on namespace: %s. Error: %+v", instance.Name, instance.Namespace, err)
+		log.Errorf("Failed to initialize K8S client when registering the CnsRegisterVolume instance: %s on namespace: %s. Error: %+v",
+			instance.Name, instance.Namespace, err)
 		setInstanceError(ctx, r, instance, "Failed to init K8S client for volume registration")
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	// Get K8S storageclass name mapping the storagepolicy id.
+	// Get K8S storageclass name mapping the storagepolicy id
 	storageClassName, err := getK8sStorageClassName(ctx, k8sclient, volume.StoragePolicyId, request.Namespace)
 	if err != nil {
-		msg := fmt.Sprintf("Failed to find K8S Storageclass mapping storagepolicyId: %s and assigned to namespace: %s",
-			volume.StoragePolicyId, request.Namespace)
+		msg := fmt.Sprintf("Failed to find K8S Storageclass mapping storagepolicyId: %s and assigned to namespace: %s", volume.StoragePolicyId, request.Namespace)
 		log.Error(msg)
 		setInstanceError(ctx, r, instance, msg)
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	log.Infof("Volume with storagepolicyId: %s is mapping to K8S storage class: %s and assigned to namespace: %s",
-		volume.StoragePolicyId, storageClassName, request.Namespace)
+	log.Infof("Volume with storagepolicyId: %s is mapping to K8S storage class: %s and assigned to namespace: %s", volume.StoragePolicyId, storageClassName, request.Namespace)
 
 	capacityInMb := volume.BackingObjectDetails.GetCnsBackingObjectDetails().CapacityInMb
 	accessMode := instance.Spec.AccessMode
-	// Set accessMode to ReadWriteOnce if DiskURLPath is used for import.
+	// Set accessMode to ReadWriteOnce if DiskURLPath is used for import
 	if accessMode == "" && instance.Spec.DiskURLPath != "" {
 		accessMode = v1.ReadWriteOnce
 	}
@@ -300,7 +287,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			log.Infof("PV: %s not found. Creating a new PV", pvName)
-			// Create Persistent volume with claimRef.
+			// Create Persistent volume with claimRef
 			claimRef := &v1.ObjectReference{
 				Kind:       "PersistentVolumeClaim",
 				APIVersion: "v1",
@@ -313,8 +300,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			pv, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, pvSpec, metav1.CreateOptions{})
 			if err != nil {
 				log.Errorf("Failed to create PV with spec: %+v. Error: %+v", pvSpec, err)
-				setInstanceError(ctx, r, instance,
-					fmt.Sprintf("Failed to create PV: %s for volume with err: %+v", pvName, err))
+				setInstanceError(ctx, r, instance, fmt.Sprintf("Failed to create PV: %s for volume with err: %+v", pvName, err))
 				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
 			log.Infof("PV: %s is created successfully", pvName)
@@ -325,25 +311,22 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 	}
-	// If PV is already bound to a different PVC at this point, then its a
-	// duplicate request.
+	// If PV is already bound to a different PVC at this point, then its a duplicate request
 	if pv.Status.Phase == v1.VolumeBound && pv.Spec.ClaimRef.Name != instance.Spec.PvcName {
 		log.Errorf("Duplicate Request. There already exists a PV: %s which is bound", pvName)
 		setInstanceError(ctx, r, instance, "Duplicate Request")
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	// Create PVC mapping to above created PV.
+	// Create PVC mapping to above created PV
 	log.Infof("Now creating pvc: %s", instance.Spec.PvcName)
 	pvcSpec := getPersistentVolumeClaimSpec(instance.Spec.PvcName, instance.Namespace, capacityInMb,
 		storageClassName, accessMode, pvName)
 	log.Debugf("PVC spec is: %+v", pvcSpec)
-	pvc, err := k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Create(ctx,
-		pvcSpec, metav1.CreateOptions{})
+	pvc, err := k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Create(ctx, pvcSpec, metav1.CreateOptions{})
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
 			log.Infof("PVC: %s already exists", instance.Spec.PvcName)
-			pvc, err = k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Get(ctx,
-				instance.Spec.PvcName, metav1.GetOptions{})
+			pvc, err = k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Get(ctx, instance.Spec.PvcName, metav1.GetOptions{})
 			if err != nil {
 				msg := fmt.Sprintf("Failed to get PVC: %s on namespace: %s", instance.Spec.PvcName, instance.Namespace)
 				log.Errorf(msg)
@@ -351,20 +334,18 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
 			if pvc.Status.Phase == v1.ClaimBound && pvc.Spec.VolumeName != pvName {
-				// This is handle cases where PVC with this name already exists and
-				// is bound. This happens when a new CnsRegisterVolume instance is
-				// created to import a new volume with PVC name which is already
-				// created and is bound.
-				msg := fmt.Sprintf("Another PVC: %s already exists in namespace: %s which is Bound to a different PV",
-					instance.Spec.PvcName, instance.Namespace)
+				// This is handle cases where PVC with this name already exists and is bound
+				// This happens when a new CnsRegisterVolume instance is created to import a new
+				// volume with PVC name which is already created and is bound.
+				msg := fmt.Sprintf("Another PVC: %s already exists in namespace: %s which is Bound to a different PV", instance.Spec.PvcName, instance.Namespace)
 				log.Errorf(msg)
 				setInstanceError(ctx, r, instance, msg)
-				// Untag the CNS volume which was created previously.
+				// Untag the CNS volume which was created previously
 				err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
 				if err != nil {
 					log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
 				} else {
-					// Delete PV created above.
+					// Delete PV created above
 					err = k8sclient.CoreV1().PersistentVolumes().Delete(ctx, pvName, *metav1.NewDeleteOptions(0))
 					if err != nil {
 						log.Errorf("Failed to delete PV: %s with error: %+v", pvName, err)
@@ -374,14 +355,13 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			}
 		} else {
 			log.Errorf("Failed to create PVC with spec: %+v. Error: %+v", pvcSpec, err)
-			setInstanceError(ctx, r, instance,
-				fmt.Sprintf("Failed to create PVC: %s for volume with err: %+v", instance.Spec.PvcName, err))
+			setInstanceError(ctx, r, instance, fmt.Sprintf("Failed to create PVC: %s for volume with err: %+v", instance.Spec.PvcName, err))
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 	} else {
 		log.Infof("PVC: %s is created successfully", instance.Spec.PvcName)
 	}
-	// Watch for PVC to be bound.
+	// Watch for PVC to be bound
 	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
 	if isBound {
 		log.Infof("PVC: %s is bound", instance.Spec.PvcName)
@@ -391,7 +371,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	// Update the instance to indicate the volume registration is successful.
+	// Update the instance to indicate the volume registration is successful
 	msg := fmt.Sprintf("Successfully registered the volume on namespace: %s", instance.Namespace)
 	err = setInstanceSuccess(ctx, r, instance, instance.Spec.PvcName, pvc.UID, msg)
 	if err != nil {
@@ -407,8 +387,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	return reconcile.Result{}, nil
 }
 
-// validateCnsRegisterVolumeSpec validates the input params of
-// CnsRegisterVolume instance.
+// validateCnsRegisterVolumeSpec validates the input params of CnsRegisterVolume instance
 func validateCnsRegisterVolumeSpec(ctx context.Context, instance *cnsregistervolumev1alpha1.CnsRegisterVolume) error {
 	var msg string
 	if instance.Spec.VolumeID != "" && instance.Spec.DiskURLPath != "" {
@@ -423,8 +402,7 @@ func validateCnsRegisterVolumeSpec(ctx context.Context, instance *cnsregistervol
 	return nil
 }
 
-// isBlockVolumeRegisterRequest verifies if block volume register is requested
-// via CnsRegisterVolume instance.
+// isBlockVolumeRegisterRequest verifies if block volume register is requested via CnsRegisterVolume instance
 func isBlockVolumeRegisterRequest(ctx context.Context, instance *cnsregistervolumev1alpha1.CnsRegisterVolume) bool {
 	if instance.Spec.AccessMode != "" {
 		if instance.Spec.AccessMode == v1.ReadWriteOnce {
@@ -438,8 +416,7 @@ func isBlockVolumeRegisterRequest(ctx context.Context, instance *cnsregistervolu
 	return false
 }
 
-// setInstanceError sets error and records an event on the CnsRegisterVolume
-// instance.
+// setInstanceError sets error and records an event on the CnsRegisterVolume instance
 func setInstanceError(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	instance *cnsregistervolumev1alpha1.CnsRegisterVolume, errMsg string) {
 	log := logger.GetLogger(ctx)
@@ -451,8 +428,7 @@ func setInstanceError(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	recordEvent(ctx, r, instance, v1.EventTypeWarning, errMsg)
 }
 
-// setInstanceSuccess sets instance to success and records an event on the
-// CnsRegisterVolume instance.
+// setInstanceSuccess sets instance to success and records an event on the CnsRegisterVolume instance
 func setInstanceSuccess(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	instance *cnsregistervolumev1alpha1.CnsRegisterVolume, pvcName string, pvcUID apitypes.UID, msg string) error {
 	instance.Status.Registered = true
@@ -466,7 +442,7 @@ func setInstanceSuccess(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	return nil
 }
 
-// setInstanceOwnerRef sets instance ownerRef to PVC instance that it created.
+// setInstanceOwnerRef sets instance ownerRef to PVC instance that it created
 func setInstanceOwnerRef(instance *cnsregistervolumev1alpha1.CnsRegisterVolume, pvcName string,
 	pvcUID apitypes.UID) {
 	bController := true
@@ -484,22 +460,21 @@ func setInstanceOwnerRef(instance *cnsregistervolumev1alpha1.CnsRegisterVolume, 
 	}
 }
 
-// recordEvent records the event, sets the backOffDuration for the instance
-// appropriately and logs the message.
+// recordEvent records the event, sets the backOffDuration for the instance appropriately
+// and logs the message.
 // backOffDuration is reset to 1 second on success and doubled on failure.
-func recordEvent(ctx context.Context, r *ReconcileCnsRegisterVolume,
-	instance *cnsregistervolumev1alpha1.CnsRegisterVolume, eventtype string, msg string) {
+func recordEvent(ctx context.Context, r *ReconcileCnsRegisterVolume, instance *cnsregistervolumev1alpha1.CnsRegisterVolume, eventtype string, msg string) {
 	log := logger.GetLogger(ctx)
 	log.Debugf("Event type is %s", eventtype)
 	switch eventtype {
 	case v1.EventTypeWarning:
-		// Double backOff duration.
+		// Double backOff duration
 		backOffDurationMapMutex.Lock()
 		backOffDuration[instance.Name] = backOffDuration[instance.Name] * 2
 		r.recorder.Event(instance, v1.EventTypeWarning, "CnsRegisterVolumeFailed", msg)
 		backOffDurationMapMutex.Unlock()
 	case v1.EventTypeNormal:
-		// Reset backOff duration to one second.
+		// Reset backOff duration to one second
 		backOffDurationMapMutex.Lock()
 		backOffDuration[instance.Name] = time.Second
 		r.recorder.Event(instance, v1.EventTypeNormal, "CnsRegisterVolumeSucceeded", msg)
@@ -507,9 +482,8 @@ func recordEvent(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	}
 }
 
-// updateCnsRegisterVolume updates the CnsRegisterVolume instance in K8S.
-func updateCnsRegisterVolume(ctx context.Context, client client.Client,
-	instance *cnsregistervolumev1alpha1.CnsRegisterVolume) error {
+// updateCnsRegisterVolume updates the CnsRegisterVolume instance in K8S
+func updateCnsRegisterVolume(ctx context.Context, client client.Client, instance *cnsregistervolumev1alpha1.CnsRegisterVolume) error {
 	log := logger.GetLogger(ctx)
 	err := client.Update(ctx, instance)
 	if err != nil {

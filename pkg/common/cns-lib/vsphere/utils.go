@@ -136,7 +136,7 @@ func CreateCnsKuberenetesEntityReference(entityType string, entityName string,
 }
 
 // GetVirtualCenterConfig returns VirtualCenterConfig Object created using
-// vSphere Configuration specified in the argument.
+// vSphere Configuration specified in the arguement.
 func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCenterConfig, error) {
 	log := logger.GetLogger(ctx)
 	var err error
@@ -199,10 +199,11 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 	for idx := range vcConfig.TargetvSANFileShareDatastoreURLs {
 		vcConfig.TargetvSANFileShareDatastoreURLs[idx] = strings.TrimSpace(vcConfig.TargetvSANFileShareDatastoreURLs[idx])
 		if vcConfig.TargetvSANFileShareDatastoreURLs[idx] == "" {
-			return nil, logger.LogNewError(log, "invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
+			return nil, errors.New("invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
 		}
 		if !strings.HasPrefix(vcConfig.TargetvSANFileShareDatastoreURLs[idx], "ds:///vmfs/volumes/vsan:") {
-			return nil, logger.LogNewError(log, "non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
+			err = errors.New("non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
+			return nil, err
 		}
 	}
 	return vcConfig, nil
@@ -433,7 +434,9 @@ func IsvSphereVersion70U3orAbove(ctx context.Context, aboutInfo types.AboutInfo)
 	if len(version) >= 3 {
 		vSphereVersionInt, err := strconv.Atoi(version[0:3])
 		if err != nil {
-			return false, logger.LogNewErrorf(log, "error while converting version %q to integer, err %+v", version, err)
+			msg := fmt.Sprintf("error while converting version %q to integer, err %+v", version, err)
+			log.Errorf(msg)
+			return false, errors.New(msg)
 		}
 		// Check if the current vSphere version is 7.0.3 or higher.
 		if vSphereVersionInt >= VSphere70u3Version {

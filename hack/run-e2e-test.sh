@@ -51,18 +51,7 @@ else
     read -ra OPTS <<< "-v $GINKGO_OPTS"
 fi
 
-if [ "$FOCUS" == "csi-block-vanilla" ]
-then
-    ginkgo -mod=mod "${OPTS[@]}" --focus="csi-block-vanilla-destructive" tests/e2e
-    # Checking for test status
-    TEST_PASS=$?
-    if [[ $TEST_PASS -ne 0 ]]; then
-        exit 1
-    fi
-    ginkgo -mod=mod "${OPTS[@]}" --focus="csi-block-vanilla" tests/e2e
-else
-    ginkgo -mod=mod "${OPTS[@]}" --focus="$FOCUS" tests/e2e
-fi
+ginkgo -mod=mod "${OPTS[@]}" --focus="$FOCUS" tests/e2e
 
 # Checking for test status
 TEST_PASS=$?

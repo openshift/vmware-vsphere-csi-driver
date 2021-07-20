@@ -101,7 +101,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: vsphere-webhook
-          image: gcr.io/cloud-provider-vsphere/csi/ci/syncer:latest
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.3.0-rc.3
           args:
             - "--operation-mode=WEBHOOK_SERVER"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
@@ -109,7 +109,7 @@ spec:
           imagePullPolicy: "Always"
           env:
             - name: WEBHOOK_CONFIG_PATH
-              value: "/run/secrets/tls/webhook.config"
+              value: "/etc/webhook/webhook.config"
             - name: LOGGER_LEVEL
               value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
             - name: CSI_NAMESPACE
@@ -117,7 +117,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.namespace
           volumeMounts:
-            - mountPath: /run/secrets/tls
+            - mountPath: /etc/webhook
               name: webhook-certs
               readOnly: true
       volumes:

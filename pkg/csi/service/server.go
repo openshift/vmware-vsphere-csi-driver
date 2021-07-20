@@ -17,6 +17,8 @@ limitations under the License.
 package service
 
 import (
+	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -94,24 +96,32 @@ func (s *nonBlockingGRPCServer) serve(endpoint string, ids csi.IdentityServer,
 	log := logger.GetLoggerWithNoContext()
 	u, err := url.Parse(endpoint)
 	if err != nil {
-		return logger.LogNewErrorf(log, "failed to parse the endpoint %s. Err: %v", endpoint, err)
+		msg := fmt.Sprintf("failed to parse the endpoint %s. Err: %v", endpoint, err)
+		log.Error(msg)
+		return fmt.Errorf(msg)
 	}
 
-	// CSI driver currently supports only unix path.
+	// CSI driver currently supports only unix path
 	if u.Scheme != "unix" {
-		return logger.LogNewErrorf(log, "endpoint scheme %s not supported", u.Scheme)
+		msg := fmt.Sprintf("endpoint scheme %s not supported", u.Scheme)
+		log.Error(msg)
+		return fmt.Errorf(msg)
 	}
 
 	addr := u.Path
 
 	// Remove UNIX sock file if present.
 	if err := os.Remove(addr); err != nil && !os.IsNotExist(err) {
-		return logger.LogNewErrorf(log, "failed to remove %s. Err: %v", addr, err)
+		msg := fmt.Sprintf("failed to remove %s. Err: %v", addr, err)
+		log.Error(msg)
+		return fmt.Errorf(msg)
 	}
 
 	listener, err := net.Listen(u.Scheme, addr)
 	if err != nil {
-		return logger.LogNewErrorf(log, "failed to listen: %v", err)
+		msg := fmt.Sprintf("failed to listen: %v", err)
+		log.Error(msg)
+		return fmt.Errorf(msg)
 	}
 
 	server := grpc.NewServer()
@@ -120,11 +130,11 @@ func (s *nonBlockingGRPCServer) serve(endpoint string, ids csi.IdentityServer,
 	// Register the CSI services.
 	// Always require the identity service.
 	if ids == nil {
-		return logger.LogNewError(log, "identity service is required")
+		return errors.New("identity service is required")
 	}
 	// Either a Controller or Node service should be supplied.
 	if cs == nil && ns == nil {
-		return logger.LogNewError(log, "either a controller or node service is required")
+		return errors.New("either a controller or node service is required")
 	}
 
 	// Always register the identity service.
@@ -135,19 +145,21 @@ func (s *nonBlockingGRPCServer) serve(endpoint string, ids csi.IdentityServer,
 	mode := os.Getenv(csitypes.EnvVarMode)
 	if strings.EqualFold(mode, "controller") {
 		if cs == nil {
-			return logger.LogNewError(log, "controller service required when running in controller mode")
+			return errors.New("controller service required when running in controller mode")
 		}
 		csi.RegisterControllerServer(s.server, cs)
 		log.Info("controller service registered")
 	} else if strings.EqualFold(mode, "node") {
 		if ns == nil {
-			return logger.LogNewError(log, "node service required when running in node mode")
+			return errors.New("node service required when running in node mode")
 		}
 		csi.RegisterNodeServer(s.server, ns)
 		log.Info("node service registered")
 	} else {
-		return logger.LogNewErrorf(log, "invalid value %q specified for %s, expecting 'node' or 'controller'",
+		msg := fmt.Sprintf("invalid value %q specified for %s, expecting 'node' or 'controller'",
 			mode, csitypes.EnvVarMode)
+		log.Error(msg)
+		return fmt.Errorf(msg)
 	}
 
 	log.Infof("Listening for connections on address: %s", listener.Addr())

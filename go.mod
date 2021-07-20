@@ -1,6 +1,6 @@
 module sigs.k8s.io/vsphere-csi-driver
 
-go 1.16
+go 1.15
 
 require (
 	github.com/akutz/gofsutil v0.1.2
@@ -28,7 +28,7 @@ require (
 	github.com/spf13/viper v1.7.1
 	github.com/thecodeteam/gofsutil v0.1.2 // indirect
 	github.com/vmware-tanzu/vm-operator-api v0.1.3
-	github.com/vmware/govmomi v0.26.1-0.20210616182200-66b9538af589
+	github.com/vmware/govmomi v0.26.0
 	go.uber.org/zap v1.17.0
 	golang.org/x/crypto v0.0.0-20210220033148-5ea612d1eb83
 	golang.org/x/lint v0.0.0-20210508222113-6edffad5e616 // indirect

@@ -52,8 +52,7 @@ const (
 	vmUUIDAnnotationKey   = "vmware-system-vm-uuid"
 )
 
-// DiskDecommController is responsible for watching and processing disk
-// decommission request.
+// DiskDecommController is responsible for watching and processing disk decommission request
 type DiskDecommController struct {
 	migrationCntlr   *migrationController
 	k8sDynamicClient dynamic.Interface
@@ -61,19 +60,15 @@ type DiskDecommController struct {
 	pvResource       *schema.GroupVersionResource
 	pvcResource      *schema.GroupVersionResource
 	spWatch          watch.Interface
-	// Stores the current disk decommission mode ("ensureAccessibility"/
-	// "evacuateAll"/none) of a SP to evaluate whether or not a new event is a
-	// request for disk decommissioning of a SP. Keys are SP name and values
-	// are disk decomm mode.
+	// stores the current disk decommission mode ("ensureAccessibility"/"evacuateAll"/none) of a SP to evaluate whether or not
+	// a new event is a request for disk decommissioning of a SP. Keys are SP name and values are disk decomm mode.
 	diskDecommMode map[string]string
-	// 1 weighted semaphore to make sure only one disk decomm request is being
-	// executed.
+	// 1 weighted semaphore to make sure only one disk decomm request is being executed
 	execSemaphore *semaphore.Weighted
 }
 
-// detachVolumes detaches all the volumes present in the specified StoragePool
-// from corresponding PodVM.
-// XXX: Use lister and informers if these operations become too expensive.
+// detachVolumes detaches all the volumes present in the specified StoragePool from corresponding PodVM
+// XXX: use lister and informers if these operations become too expensive.
 func (w *DiskDecommController) detachVolumes(ctx context.Context, storagePoolName string) error {
 	log := logger.GetLogger(ctx)
 	k8sClient, err := k8s.NewClient(ctx)
@@ -82,8 +77,7 @@ func (w *DiskDecommController) detachVolumes(ctx context.Context, storagePoolNam
 		return err
 	}
 
-	// Shallow copy VC to prevent nil pointer dereference exception caused due to
-	// vc.Disconnect func running in parallel.
+	// shallow copy VC to prevent nil pointer dereference exception caused due to vc.Disconnect func running in parallel
 	vc := *w.migrationCntlr.vc
 	err = vc.Connect(ctx)
 	if err != nil {
@@ -129,12 +123,10 @@ func (w *DiskDecommController) detachVolumes(ctx context.Context, storagePoolNam
 
 		for _, pod := range pods.Items {
 			for _, podAttachedVol := range pod.Spec.Volumes {
-				if podAttachedVol.PersistentVolumeClaim != nil &&
-					podAttachedVol.PersistentVolumeClaim.ClaimName == vol.PVC.Name {
+				if podAttachedVol.PersistentVolumeClaim != nil && podAttachedVol.PersistentVolumeClaim.ClaimName == vol.PVC.Name {
 					vmUUID := pod.Annotations[vmUUIDAnnotationKey]
 					if vmUUID == "" {
-						log.Infof("PodVM corresponding to pod %v might not be created yet. Skipping detach operation",
-							pod.Name)
+						log.Infof("PodVM corresponding to pod %v might not be created yet. Skipping detach operation", pod.Name)
 						continue
 					}
 					vm, err := dc.GetVirtualMachineByUUID(ctx, vmUUID, true)
@@ -143,7 +135,7 @@ func (w *DiskDecommController) detachVolumes(ctx context.Context, storagePoolNam
 						return err
 					}
 					log.Debugf("vSphere CSI driver is detaching volume: %s from vm: %s", volumeID, vm.InventoryPath)
-					// It does not throw error if disk is already detached.
+					// it does not throw error if disk is already detached
 					err = volManager.DetachVolume(ctx, vm, volumeID)
 					if err != nil {
 						log.Errorf("failed to detach volume %s with err %+v", volumeID, err)
@@ -158,14 +150,12 @@ func (w *DiskDecommController) detachVolumes(ctx context.Context, storagePoolNam
 	return nil
 }
 
-// DecommissionDisk is responsible for making progress on disk decommission
-// request. It does so by getting SvMotion plan from placement engine,
-// persisting the migration plan through PVC objects and and passing this info
-// to migration controller which migrates the volume to other local host
-// attached disk.
+// DecommissionDisk is responsible for making progress on disk decommission request.
+// It does so by getting SvMotion plan from placement engine, persisting the migration plan through PVC objects and
+// and passing this info to migration controller which migrates the volume to other local host attached disk.
 func (w *DiskDecommController) DecommissionDisk(ctx context.Context, storagePoolName string, maintenanceMode string) {
 	log := logger.GetLogger(ctx)
-	// Make sure only 1 DecommissionDisk func is executing for a StoragePool.
+	// make sure only 1 DecommissionDisk func is executing for a StoragePool
 	_ = w.execSemaphore.Acquire(ctx, 1)
 	defer w.execSemaphore.Release(1)
 	migrationFailed := false
@@ -178,7 +168,7 @@ func (w *DiskDecommController) DecommissionDisk(ctx context.Context, storagePool
 			}
 			return
 		}
-		// Get drain label of storagePool.
+		// get drain label of storagePool
 		_, found, _ := getDrainMode(ctx, storagePoolName)
 		if !found {
 			log.Infof("Disk decommission of StoragePool %v has been aborted/ terminated", storagePoolName)
@@ -272,10 +262,9 @@ func initDiskDecommController(ctx context.Context, migrationCntlr *migrationCont
 	w.diskDecommMode = make(map[string]string)
 	w.execSemaphore = semaphore.NewWeighted(1)
 
-	// Get all the pvc resource for which targetSPAnnotationKey annotations
-	// exists. This will give us list of all pending migrations.
-	pvcList, err := w.k8sDynamicClient.Resource(*w.pvcResource).Namespace(v1.NamespaceAll).List(
-		ctx, metav1.ListOptions{})
+	// get all the pvc resource for which targetSPAnnotationKey annotations exists.
+	// This will give us list of all pending migrations.
+	pvcList, err := w.k8sDynamicClient.Resource(*w.pvcResource).Namespace(v1.NamespaceAll).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return w, err
 	}
@@ -289,20 +278,19 @@ func initDiskDecommController(ctx context.Context, migrationCntlr *migrationCont
 	}
 	w.migrationCntlr.MigrateVolumes(ctx, pvcToMigrate, false)
 
-	// Start StoragePool watch to look for events putting SP under disk
-	// decommission.
+	// start StoragePool watch to look for events putting SP under disk decommission
 	err = w.renewStoragePoolWatch(ctx)
 	if err != nil {
 		return w, err
 	}
 	go w.watchStoragePool(ctx)
 
-	// Get all sp resource.
+	// get all sp resource
 	spList, err := w.k8sDynamicClient.Resource(*w.spResource).List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return w, err
 	}
-	// Make progress on StoragePool which are under disk decommission.
+	// make progress on StoragePool which are under disk decommission
 	for _, sp := range spList.Items {
 		spName := sp.GetName()
 		if w.shouldEnterDiskDecommission(ctx, &sp) && spName != "" {
@@ -313,8 +301,8 @@ func initDiskDecommController(ctx context.Context, migrationCntlr *migrationCont
 	return w, nil
 }
 
-// As our watch can and will expire, we need a helper to renew it. Note that
-// after we re-new it, we will get a bunch of already processed events.
+// As our watch can and will expire, we need a helper to renew it. Note that after we re-new it,
+// we will get a bunch of already processed events.
 func (w *DiskDecommController) renewStoragePoolWatch(ctx context.Context) error {
 	log := logger.GetLogger(ctx)
 	spClient, spResource, err := getSPClient(ctx)
@@ -324,7 +312,7 @@ func (w *DiskDecommController) renewStoragePoolWatch(ctx context.Context) error 
 	// This means every 24h our watch may expire and require to be re-created.
 	// When that happens, we may need to do a full remediation, hence we change
 	// from 30m (default) to 24h.
-	timeout := int64(60 * 60 * 24) // 24 hours.
+	timeout := int64(60 * 60 * 24) // 24h
 	w.spWatch, err = spClient.Resource(*spResource).Watch(ctx, metav1.ListOptions{
 		TimeoutSeconds: &timeout,
 	})
@@ -336,12 +324,10 @@ func (w *DiskDecommController) renewStoragePoolWatch(ctx context.Context) error 
 	return nil
 }
 
-// watchStoragePool looks for event putting a SP under disk decommission. It
-// does so by storing the current drain label value for each StoragePool. Once
-// it gets an event which updates the drain label (established by comparing
-// stored drain label value with new one) of a SP to ensureAccessibilityMM/
-// fullDataEvacuationMM/noMigrationMM it invokes the func to process disk
-// decommossion of that storage pool.
+// watchStoragePool looks for event putting a SP under disk decommission. It does so by storing the current drain label
+// value for each StoragePool. Once it gets an event which updates the drain label (established by comparing stored drain
+// label value with new one) of a SP to ensureAccessibilityMM/fullDataEvacuationMM/noMigrationMM it invokes the func to process disk decommossion
+// of that storage pool.
 func (w *DiskDecommController) watchStoragePool(ctx context.Context) {
 	log := logger.GetLogger(ctx)
 	done := false
@@ -361,8 +347,7 @@ func (w *DiskDecommController) watchStoragePool(ctx context.Context) {
 			}
 			sp, ok := e.Object.(*unstructured.Unstructured)
 			if !ok {
-				log.Warnf("Object in StoragePool watch event is not of type *unstructured.Unstructured, but of type %T",
-					e.Object)
+				log.Warnf("Object in StoragePool watch event is not of type *unstructured.Unstructured, but of type %T", e.Object)
 				continue
 			}
 			spName := sp.GetName()
@@ -396,9 +381,8 @@ func (w *DiskDecommController) shouldEnterDiskDecommission(ctx context.Context, 
 			w.diskDecommMode[spName] = drainMode
 		}
 	}()
-	if (drainMode == fullDataEvacuationMM || drainMode == ensureAccessibilityMM || drainMode == noMigrationMM) &&
-		drainMode != w.diskDecommMode[spName] {
-		// Check if status field is already populated.
+	if (drainMode == fullDataEvacuationMM || drainMode == ensureAccessibilityMM || drainMode == noMigrationMM) && drainMode != w.diskDecommMode[spName] {
+		// check if status field is already populated
 		drainStatus, _, _ := unstructured.NestedString(sp.Object, "status", "diskDecomm", drainStatusField)
 		if drainStatus != drainFailStatus && drainStatus != drainSuccessStatus {
 			return true

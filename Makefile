@@ -331,7 +331,7 @@ else
             ifndef KUBECONFIG
                 $(error Requires KUBECONFIG from a deployed testbed to run integration-unit-test)
             else
-		$(eval INTEGRATION_TEST_PKGS += ./pkg/csi/service/vanilla ./pkg/syncer ./pkg/common/utils)
+		$(eval INTEGRATION_TEST_PKGS += ./pkg/csi/service/vanilla ./pkg/syncer)
             endif
         endif
     endif

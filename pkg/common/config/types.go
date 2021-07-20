@@ -69,9 +69,6 @@ type Config struct {
 	// Virtual Center configurations
 	VirtualCenter map[string]*VirtualCenterConfig
 
-	// Snapshot configurations.
-	Snapshot SnapshotConfig
-
 	// Guest Cluster configurations, only used by GC
 	GC GCConfig
 
@@ -136,10 +133,4 @@ type GCConfig struct {
 	TanzuKubernetesClusterName string `gcfg:"tanzukubernetescluster-name"`
 	// Cluster Distribution Name
 	ClusterDistribution string `gcfg:"cluster-distribution"`
-}
-
-// SnapshotConfig contains snapshot configuration.
-type SnapshotConfig struct {
-	// GlobalMaxSnapshotsPerBlockVolume specifies the maximum number of block volume snapshots per volume.
-	GlobalMaxSnapshotsPerBlockVolume int `gcfg:"global-max-snapshots-per-block-volume"`
 }

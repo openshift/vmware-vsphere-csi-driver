@@ -73,7 +73,7 @@ Where the entries have the following meaning:
 
 - `cluster-id` - represents the unique cluster identifier. Each kubernetes cluster should have it's own unique cluster-id set in the configuration file. The cluster ID should not exceed 64 characters.
 
-- `cluster-distribution` - represents the distribution of the kubernetes cluster. This parameter is optional but will be made mandatory in a future release. Examples are `Openshift`, `Anthos` and `TKGI`.
+- `cluster-distribution` - represents the distribution of the kubernetes cluster. This parameter is optional but will be made mandatory in a future release. Examples are `Openshift`, `Anthos` and `PKS`.
 
   - values with special character `\r` causes vSphere CSI controller to go into CrashLoopBackOff state.
 
@@ -83,7 +83,7 @@ Where the entries have the following meaning:
 
 - `insecure-flag` - should be set to true to use self-signed certificate for login.
 
-- `user` - vCenter username. Specify username along with domain name for example - `user = "userName@domainName"` or  `user = "domainName\\username"` . Note: For active directory user if domain name is not specified, vSphere CSI driver will not function properly.
+- `user` - vCenter username.
 
 - `password` - password for vCenter user specified with user.
 

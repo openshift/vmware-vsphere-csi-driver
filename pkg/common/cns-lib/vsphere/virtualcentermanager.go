@@ -54,8 +54,7 @@ type VirtualCenterManager interface {
 	IsvSANFileServicesSupported(ctx context.Context, host string) (bool, error)
 	// IsExtendVolumeSupported checks if extend volume is supported or not.
 	IsExtendVolumeSupported(ctx context.Context, host string) (bool, error)
-	// IsOnlineExtendVolumeSupported checks if online extend volume is supported
-	// or not on the vCenter Host.
+	// IsOnlineExtendVolumeSupported checks if online extend volume is supported or not on the vCenter Host
 	IsOnlineExtendVolumeSupported(ctx context.Context, host string) (bool, error)
 }
 
@@ -107,16 +106,14 @@ func (m *defaultVirtualCenterManager) GetAllVirtualCenters() []*VirtualCenter {
 	return vcs
 }
 
-func (m *defaultVirtualCenterManager) RegisterVirtualCenter(ctx context.Context,
-	config *VirtualCenterConfig) (*VirtualCenter, error) {
+func (m *defaultVirtualCenterManager) RegisterVirtualCenter(ctx context.Context, config *VirtualCenterConfig) (*VirtualCenter, error) {
 	log := logger.GetLogger(ctx)
 	if _, exists := m.virtualCenters.Load(config.Host); exists {
 		log.Errorf("VC was already found in registry, failed to register with config %v", config)
 		return nil, ErrVCAlreadyRegistered
 	}
 
-	// Note that the Client isn't initialized here.
-	vc := &VirtualCenter{Config: config}
+	vc := &VirtualCenter{Config: config} // Note that the Client isn't initialized here.
 	m.virtualCenters.Store(config.Host, vc)
 	log.Infof("Successfully registered VC %q", vc.Config.Host)
 	return vc, nil
@@ -182,15 +179,14 @@ func (m *defaultVirtualCenterManager) IsExtendVolumeSupported(ctx context.Contex
 func (m *defaultVirtualCenterManager) IsOnlineExtendVolumeSupported(ctx context.Context, host string) (bool, error) {
 	log := logger.GetLogger(ctx)
 
-	// Get VC instance.
+	// Get VC instance
 	vcenter, err := m.GetVirtualCenter(ctx, host)
 	if err != nil {
 		log.Errorf("Failed to get vCenter. Err: %v", err)
 		return false, err
 	}
 	vCenterVersion := vcenter.Client.Version
-	if vCenterVersion != cns.ReleaseVSAN67u3 && vCenterVersion != cns.ReleaseVSAN70 &&
-		vCenterVersion != cns.ReleaseVSAN70u1 {
+	if vCenterVersion != cns.ReleaseVSAN67u3 && vCenterVersion != cns.ReleaseVSAN70 && vCenterVersion != cns.ReleaseVSAN70u1 {
 		return true, nil
 	}
 	log.Infof("Online volume expansion is not supported on vCenter version %q", vCenterVersion)
