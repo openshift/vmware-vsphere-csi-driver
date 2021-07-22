@@ -71,6 +71,8 @@ Considering the above inventory, roles should be assigned as specified below:
 | CNS-VM | ![CNS-VM-USAGE](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/CNS-VM-USAGE.png)|
 | CNS-SEARCH-AND-SPBM | ![CNS-SEARCH-AND-SPBM-USAGE](https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/docs/images/CNS-SEARCH-AND-SPBM-USAGE.png)|
 
+**Note: When the new entity (Node VM, Datastore) is added in the vCenter inventory for the Kubernetes cluster, roles need to be applied to them.**
+
 ## Setting up the management network <a id="setup_management_network"></a>
 
 By default, CPI and CSI Pods are scheduled on k8s master nodes. In this case, for non-topology aware Kubernetes clusters, it is sufficient to provide the k8s master node(s) credentials to the vCenter that this cluster runs on.
@@ -185,7 +187,7 @@ cloud-config   1      82s
 
 Remove vsphere.conf file created at /etc/kubernetes/
 
-Step-3: Create Roles, Roles Bindings, Service Account, Service and cloud-controller-manager Pod.
+Step-3: Create Roles, Roles Bindings, Service Account, Service and cloud-controller-manager Pod
 
 ```bash
 kubectl apply -f https://raw.githubusercontent.com/kubernetes/cloud-provider-vsphere/master/manifests/controller-manager/cloud-controller-manager-roles.yaml

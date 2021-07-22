@@ -62,7 +62,7 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 		client = f.ClientSet
 		if vanillaCluster {
 			namespace = f.Namespace.Name
-			controllerNamespace = kubeSystemNamespace
+			controllerNamespace = GetAndExpectStringEnvVar(envCSINamespace)
 		} else {
 			namespace = GetAndExpectStringEnvVar(envSupervisorClusterNamespace)
 			controllerNamespace = csiSystemNamespace
@@ -96,7 +96,7 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 		}
 
 		for _, pv := range pvs {
-			err = framework.WaitForPersistentVolumeDeleted(client, pv.Name, framework.Poll, framework.PodDeleteTimeout)
+			err = fpv.WaitForPersistentVolumeDeleted(client, pv.Name, framework.Poll, framework.PodDeleteTimeout)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv.Spec.CSI.VolumeHandle)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Volume: %s should not be present in the CNS after it is deleted from kubernetes", pv.Spec.CSI.VolumeHandle))

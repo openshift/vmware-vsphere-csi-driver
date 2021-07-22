@@ -57,6 +57,9 @@ type Config struct {
 
 		//CSIAuthCheckIntervalInMin specifies the interval that the auth check for datastores will be trigger
 		CSIAuthCheckIntervalInMin int `gcfg:"csi-auth-check-intervalinmin"`
+		// CnsVolumeOperationRequestCleanupIntervalInMin specifies the interval after which
+		// stale CnsVolumeOperationRequest instances will be cleaned up.
+		CnsVolumeOperationRequestCleanupIntervalInMin int `gcfg:"cnsvolumeoperationrequest-cleanup-intervalinmin"`
 	}
 
 	// Multiple sets of Net Permissions applied to all file shares
@@ -113,6 +116,8 @@ type VirtualCenterConfig struct {
 	Datacenters string `gcfg:"datacenters"`
 	// Target datastore urls for provisioning file volumes.
 	TargetvSANFileShareDatastoreURLs string `gcfg:"targetvSANFileShareDatastoreURLs"`
+	// TargetvSANFileShareClusters represents file service enabled vSAN clusters on which file volumes can be created.
+	TargetvSANFileShareClusters string `gcfg:"targetvSANFileShareClusters"`
 }
 
 // GCConfig contains information used by guest cluster to access a supervisor

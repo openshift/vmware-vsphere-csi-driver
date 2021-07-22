@@ -182,7 +182,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		} else {
 			vmUUID, err = getVMUUIDFromNodeName(pod.Spec.NodeName)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			verifyCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, true)
+			verifyCRDInSupervisorWithWait(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, true)
 		}
 		isDiskAttached, err := e2eVSphere.isVolumeAttachedToVM(client, volumeID, vmUUID)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -207,9 +207,8 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(isDiskDetached).To(gomega.BeTrue(), fmt.Sprintf("Volume %q is not detached from the node %q", pv.Spec.CSI.VolumeHandle, pod.Spec.NodeName))
 			if guestCluster {
-				ginkgo.By("Waiting for 30 seconds to allow CnsNodeVMAttachment controller to reconcile resource")
-				time.Sleep(waitTimeForCNSNodeVMAttachmentReconciler)
-				verifyCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, false)
+				ginkgo.By("Waiting for CnsNodeVMAttachment controller to reconcile resource")
+				verifyCRDInSupervisorWithWait(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, false)
 			}
 		}
 
@@ -230,7 +229,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		} else {
 			vmUUID, err = getVMUUIDFromNodeName(pod.Spec.NodeName)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			verifyCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, true)
+			verifyCRDInSupervisorWithWait(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, true)
 		}
 		isDiskAttached, err = e2eVSphere.isVolumeAttachedToVM(client, volumeID, vmUUID)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -257,7 +256,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 			if guestCluster {
 				ginkgo.By("Waiting for 30 seconds to allow CnsNodeVMAttachment controller to reconcile resource")
 				time.Sleep(waitTimeForCNSNodeVMAttachmentReconciler)
-				verifyCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, false)
+				verifyCRDInSupervisorWithWait(ctx, f, pod.Spec.NodeName+"-"+svcPVCName, crdCNSNodeVMAttachment, crdVersion, crdGroup, false)
 			}
 		}
 	})
@@ -319,8 +318,6 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		}
 
 		storageclass, err := createStorageClass(client, scParameters, nil, "", "", false, storagePolicyName)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		storageclass, err = client.StorageV1().StorageClasses().Get(ctx, storagePolicyName, metav1.GetOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		log.Infof("storageclass Name :%s", storageclass.GetName())
 
@@ -418,7 +415,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		pvc = nil
 
 		ginkgo.By("Verify PV should be deleted automatically")
-		framework.ExpectNoError(framework.WaitForPersistentVolumeDeleted(client, pv.Name, poll, pollTimeoutShort))
+		framework.ExpectNoError(fpv.WaitForPersistentVolumeDeleted(client, pv.Name, poll, pollTimeoutShort))
 		pv = nil
 
 		ginkgo.By("Verify CRD should be deleted automatically")

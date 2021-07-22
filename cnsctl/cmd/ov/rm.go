@@ -13,19 +13,21 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package ov
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"os"
 )
 
 var datastore string
 var forceDelete bool
 
-// rmCmd represents the rm command
+// rmCmd represents the rm command.
 var rmCmd = &cobra.Command{
 	Use:   "rm",
 	Short: "Remove specified volume IDs",
@@ -37,14 +39,16 @@ var rmCmd = &cobra.Command{
 			fmt.Printf("error: no volumes specified to be deleted.\n")
 			os.Exit(1)
 		}
-		// TODO: Add implementation
+		// TODO: Add implementation.
 	},
 }
 
+// InitRm helps initialize rmCmd.
 func InitRm() {
 	rmCmd.PersistentFlags().StringVarP(&datastore, "datastore", "d", "", "a single datastore name")
 	rmCmd.PersistentFlags().BoolVarP(&forceDelete, "force", "f", false, "force delete the volume")
-	rmCmd.PersistentFlags().StringVarP(&cfgFile, "kubeconfig", "k", viper.GetString("kubeconfig"), "kubeconfig file (alternatively use CNSCTL_KUBECONFIG env variable)")
+	rmCmd.PersistentFlags().StringVarP(&cfgFile, "kubeconfig", "k", viper.GetString("kubeconfig"),
+		"kubeconfig file (alternatively use CNSCTL_KUBECONFIG env variable)")
 	ovCmd.AddCommand(rmCmd)
 }
 

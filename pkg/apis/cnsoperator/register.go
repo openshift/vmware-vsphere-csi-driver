@@ -97,6 +97,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		&cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment{},
 		&cnsnodevmattachmentv1alpha1.CnsNodeVmAttachmentList{},
 	)
+
 	scheme.AddKnownTypes(
 		SchemeGroupVersion,
 		&metav1.Status{},

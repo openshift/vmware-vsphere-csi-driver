@@ -26,7 +26,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	volumes "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	commonconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
 	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
 )
@@ -87,6 +87,8 @@ type (
 	podMap = map[string][]*v1.Pod
 	// Maps K8s PV's Spec.CSI.VolumeHandle to corresponding PVC object
 	volumeHandlePVCMap = map[string]*v1.PersistentVolumeClaim
+	// Maps CnsVolume's VolumeId.Id to vol.HealthStatus
+	volumeIdHealthStatusMap = map[string]string
 )
 
 type metadataSyncInformer struct {
@@ -95,7 +97,7 @@ type metadataSyncInformer struct {
 	host               string
 	cnsOperatorClient  client.Client
 	supervisorClient   clientset.Interface
-	configInfo         *commonconfig.ConfigurationInfo
+	configInfo         *config.ConfigurationInfo
 	k8sInformerManager *k8s.InformerManager
 	pvLister           corelisters.PersistentVolumeLister
 	pvcLister          corelisters.PersistentVolumeClaimLister

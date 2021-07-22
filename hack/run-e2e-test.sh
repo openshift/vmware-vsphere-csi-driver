@@ -20,7 +20,8 @@ set -o pipefail
 
 # Fetching ginkgo for running the test
 export GO111MODULE=on
-if ! (go mod vendor && go get -u github.com/onsi/ginkgo/ginkgo)
+export ACK_GINKGO_DEPRECATIONS=1.16.4
+if ! (go mod vendor && go get -u github.com/onsi/ginkgo/ginkgo@v1.16.4)
 then
     echo "go mod vendor or go get ginkgo error"
     exit 1
@@ -50,7 +51,7 @@ else
     read -ra OPTS <<< "-v $GINKGO_OPTS"
 fi
 
-ginkgo "${OPTS[@]}" --focus="$FOCUS" tests/e2e
+ginkgo -mod=mod "${OPTS[@]}" --focus="$FOCUS" tests/e2e
 
 # Checking for test status
 TEST_PASS=$?

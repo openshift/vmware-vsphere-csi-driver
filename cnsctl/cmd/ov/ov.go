@@ -13,18 +13,20 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 */
+
 package ov
 
 import (
 	"fmt"
+	"os"
+
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"os"
 )
 
 var datacenter, vcHost, vcUser, vcPwd string
 
-// ovCmd represents the ov command
+// ovCmd represents the ov command.
 var ovCmd = &cobra.Command{
 	Use:   "ov",
 	Short: "Orphan volume commands",
@@ -35,15 +37,20 @@ var ovCmd = &cobra.Command{
 	},
 }
 
+// InitOv helps initialize ovCmd.
 func InitOv(rootCmd *cobra.Command) {
 	InitLs()
 	InitRm()
 	InitCleanup()
 
-	ovCmd.PersistentFlags().StringVarP(&vcHost, "host", "H", viper.GetString("host"), "vCenter host (alternatively use CNSCTL_HOST env variable)")
-	ovCmd.PersistentFlags().StringVarP(&vcUser, "user", "u", viper.GetString("user"), "vCenter user (alternatively use CNSCTL_USER env variable)")
-	ovCmd.PersistentFlags().StringVarP(&vcPwd, "password", "p", viper.GetString("password"), "vCenter password (alternatively use CNSCTL_PASSWORD env variable)")
-	ovCmd.PersistentFlags().StringVarP(&datacenter, "datacenter", "D", viper.GetString("datacenter"), "datacenter name (alternatively use CNSCTL_DATACENTER env variable)")
+	ovCmd.PersistentFlags().StringVarP(&vcHost, "host", "H", viper.GetString("host"),
+		"vCenter host (alternatively use CNSCTL_HOST env variable)")
+	ovCmd.PersistentFlags().StringVarP(&vcUser, "user", "u", viper.GetString("user"),
+		"vCenter user (alternatively use CNSCTL_USER env variable)")
+	ovCmd.PersistentFlags().StringVarP(&vcPwd, "password", "p", viper.GetString("password"),
+		"vCenter password (alternatively use CNSCTL_PASSWORD env variable)")
+	ovCmd.PersistentFlags().StringVarP(&datacenter, "datacenter", "D", viper.GetString("datacenter"),
+		"datacenter name (alternatively use CNSCTL_DATACENTER env variable)")
 
 	rootCmd.AddCommand(ovCmd)
 }

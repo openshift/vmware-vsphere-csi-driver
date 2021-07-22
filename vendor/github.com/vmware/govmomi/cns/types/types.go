@@ -18,6 +18,7 @@ package types
 
 import (
 	"reflect"
+	"time"
 
 	"github.com/vmware/govmomi/vim25/types"
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
@@ -95,6 +96,7 @@ type CnsVolumeCreateSpec struct {
 	BackingObjectDetails BaseCnsBackingObjectDetails           `xml:"backingObjectDetails,typeattr"`
 	Profile              []types.BaseVirtualMachineProfileSpec `xml:"profile,omitempty,typeattr"`
 	CreateSpec           BaseCnsBaseCreateSpec                 `xml:"createSpec,omitempty,typeattr"`
+	VolumeSource         BaseCnsVolumeSource                   `xml:"volumeSource,omitempty,typeattr"`
 }
 
 func init() {
@@ -585,6 +587,16 @@ func init() {
 	types.Add("CnsFault", reflect.TypeOf((*CnsFault)(nil)).Elem())
 }
 
+type CnsVolumeNotFoundFault struct {
+	CnsFault
+
+	VolumeId CnsVolumeId `xml:"volumeId"`
+}
+
+func init() {
+	types.Add("CnsVolumeNotFoundFault", reflect.TypeOf((*CnsVolumeNotFoundFault)(nil)).Elem())
+}
+
 type CnsAlreadyRegisteredFault struct {
 	CnsFault `xml:"fault,typeattr"`
 
@@ -629,4 +641,164 @@ type CnsNFSAccessControlSpec struct {
 
 func init() {
 	types.Add("CnsNFSAccessControlSpec", reflect.TypeOf((*CnsNFSAccessControlSpec)(nil)).Elem())
+}
+
+type CnsQueryAsync CnsQueryAsyncRequestType
+
+func init() {
+	types.Add("CnsQueryAsync", reflect.TypeOf((*CnsQueryAsync)(nil)).Elem())
+}
+
+type CnsQueryAsyncRequestType struct {
+	This      types.ManagedObjectReference `xml:"_this"`
+	Filter    CnsQueryFilter               `xml:"filter"`
+	Selection *CnsQuerySelection           `xml:"selection,omitempty"`
+}
+
+func init() {
+	types.Add("CnsQueryAsyncRequestType", reflect.TypeOf((*CnsQueryAsyncRequestType)(nil)).Elem())
+}
+
+type CnsQueryAsyncResponse struct {
+	Returnval types.ManagedObjectReference `xml:"returnval"`
+}
+
+type CnsAsyncQueryResult struct {
+	CnsVolumeOperationResult
+
+	QueryResult CnsQueryResult `xml:"queryResult,omitempty"`
+}
+
+func init() {
+	types.Add("CnsAsyncQueryResult", reflect.TypeOf((*CnsAsyncQueryResult)(nil)).Elem())
+}
+
+// Cns Snapshot Types
+
+type CnsCreateSnapshotsRequestType struct {
+	This          types.ManagedObjectReference `xml:"_this"`
+	SnapshotSpecs []CnsSnapshotCreateSpec      `xml:"snapshotSpecs,omitempty"`
+}
+
+func init() {
+	types.Add("CnsCreateSnapshotsRequestType", reflect.TypeOf((*CnsCreateSnapshotsRequestType)(nil)).Elem())
+}
+
+type CnsCreateSnapshots CnsCreateSnapshotsRequestType
+
+func init() {
+	types.Add("CnsCreateSnapshots", reflect.TypeOf((*CnsCreateSnapshots)(nil)).Elem())
+}
+
+type CnsCreateSnapshotsResponse struct {
+	Returnval types.ManagedObjectReference `xml:"returnval"`
+}
+
+type CnsSnapshotCreateSpec struct {
+	types.DynamicData
+
+	VolumeId    CnsVolumeId `xml:"volumeId"`
+	Description string      `xml:"description"`
+}
+
+func init() {
+	types.Add("CnsSnapshotCreateSpec", reflect.TypeOf((*CnsSnapshotCreateSpec)(nil)).Elem())
+}
+
+type CnsDeleteSnapshotsRequestType struct {
+	This                types.ManagedObjectReference `xml:"_this"`
+	SnapshotDeleteSpecs []CnsSnapshotDeleteSpec      `xml:"snapshotDeleteSpecs,omitempty"`
+}
+
+func init() {
+	types.Add("CnsDeleteSnapshotsRequestType", reflect.TypeOf((*CnsDeleteSnapshotsRequestType)(nil)).Elem())
+}
+
+type CnsDeleteSnapshots CnsDeleteSnapshotsRequestType
+
+func init() {
+	types.Add("CnsDeleteSnapshots", reflect.TypeOf((*CnsDeleteSnapshots)(nil)).Elem())
+}
+
+type CnsDeleteSnapshotsResponse struct {
+	Returnval types.ManagedObjectReference `xml:"returnval"`
+}
+
+type CnsSnapshotId struct {
+	types.DynamicData
+
+	Id string `xml:"id"`
+}
+
+func init() {
+	types.Add("CnsSnapshotId", reflect.TypeOf((*CnsSnapshotId)(nil)).Elem())
+}
+
+type CnsSnapshotDeleteSpec struct {
+	types.DynamicData
+
+	VolumeId   CnsVolumeId   `xml:"volumeId"`
+	SnapshotId CnsSnapshotId `xml:"snapshotId"`
+}
+
+func init() {
+	types.Add("CnsSnapshotDeleteSpec", reflect.TypeOf((*CnsSnapshotDeleteSpec)(nil)).Elem())
+}
+
+type CnsSnapshot struct {
+	types.DynamicData
+
+	SnapshotId  CnsSnapshotId `xml:"snapshotId"`
+	VolumeId    CnsVolumeId   `xml:"volumeId"`
+	Description string        `xml:"description,omitempty"`
+	CreateTime  time.Time     `xml:"createTime"`
+}
+
+func init() {
+	types.Add("CnsSnapshot", reflect.TypeOf((*CnsSnapshot)(nil)).Elem())
+}
+
+type CnsSnapshotOperationResult struct {
+	CnsVolumeOperationResult
+}
+
+func init() {
+	types.Add("CnsSnapshotOperationResult", reflect.TypeOf((*CnsSnapshotOperationResult)(nil)).Elem())
+}
+
+type CnsSnapshotCreateResult struct {
+	CnsSnapshotOperationResult
+	Snapshot CnsSnapshot `xml:"snapshot,omitempty"`
+}
+
+func init() {
+	types.Add("CnsSnapshotCreateResult", reflect.TypeOf((*CnsSnapshotCreateResult)(nil)).Elem())
+}
+
+type CnsSnapshotDeleteResult struct {
+	CnsSnapshotOperationResult
+	SnapshotId CnsSnapshotId `xml:"snapshotId,omitempty"`
+}
+
+func init() {
+	types.Add("CnsSnapshotDeleteResult", reflect.TypeOf((*CnsSnapshotDeleteResult)(nil)).Elem())
+}
+
+type CnsVolumeSource struct {
+	types.DynamicData
+}
+
+func init() {
+	types.Add("CnsVolumeSource", reflect.TypeOf((*CnsVolumeSource)(nil)).Elem())
+}
+
+type CnsSnapshotVolumeSource struct {
+	CnsVolumeSource
+
+	VolumeId   CnsVolumeId   `xml:"volumeId,omitempty"`
+	SnapshotId CnsSnapshotId `xml:"snapshotId,omitempty"`
+}
+
+func init() {
+	types.Add("CnsSnapshotVolumeSource", reflect.TypeOf((*CnsSnapshotVolumeSource)(nil)).Elem())
 }

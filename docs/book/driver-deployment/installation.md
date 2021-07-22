@@ -1,4 +1,6 @@
 <!-- markdownlint-disable MD033 -->
+<!-- markdownlint-disable MD034 -->
+<!-- markdownlint-disable MD014 -->
 # vSphere CSI Driver - Installation
 
 This section contains steps to install vSphere CSI Driver. Please visit the [Prerequisite](prerequisites.md) section before proceeding.
@@ -12,7 +14,6 @@ The following steps need to be performed on the k8s node where the vSphere CSI d
   - [vSphere configuration file for block volumes](#vsphereconf_for_block)
   - [vSphere configuration file for file volumes](#vsphereconf_for_file)
 - [Create a kubernetes secret for vSphere credentials](#create_k8s_secret)
-- [Create Roles, ServiceAccount and ClusterRoleBinding for vSphere CSI Driver](#csi_service_account)
 - [Install vSphere CSI driver](#install)
 - [Verify that CSI has been successfully deployed](#verify)
 
@@ -46,6 +47,8 @@ Create a configuration file that will contain details to connect to vSphere.
 
 The default file to write these configuration details is the `csi-vsphere.conf` file. If you would like to use a file with another name, change the environment variable `VSPHERE_CSI_CONFIG` in the deployment YAMLs described in the section [Install vSphere CSI driver](#install) below.
 
+For deployment with zones refer to https://vsphere-csi-driver.sigs.k8s.io/driver-deployment/deploying_csi_with_zones.html
+
 ### vSphere configuration file for block volumes <a id="vsphereconf_for_block"></a>
 
 Here is an example vSphere configuration file for block volumes, with dummy values:
@@ -54,6 +57,7 @@ Here is an example vSphere configuration file for block volumes, with dummy valu
 $ cat /etc/kubernetes/csi-vsphere.conf
 [Global]
 cluster-id = "<cluster-id>"
+cluster-distribution = "<cluster-distribution>"
 ca-file = <ca file path> # optional, use with insecure-flag set to false
 thumbprint = "<cert thumbprint>" # optional, use with insecure-flag set to false without providing ca-file
 
@@ -68,6 +72,12 @@ datacenters = "<datacenter1-path>, <datacenter2-path>, ..."
 Where the entries have the following meaning:
 
 - `cluster-id` - represents the unique cluster identifier. Each kubernetes cluster should have it's own unique cluster-id set in the configuration file. The cluster ID should not exceed 64 characters.
+
+- `cluster-distribution` - represents the distribution of the kubernetes cluster. This parameter is optional but will be made mandatory in a future release. Examples are `Openshift`, `Anthos` and `PKS`.
+
+  - values with special character `\r` causes vSphere CSI controller to go into CrashLoopBackOff state.
+
+  - values of more than 128 characters will cause the PVC creation to be stuck in `Pending` state.
 
 - `VirtualCenter` - section defines vCenter IP address / FQDN.
 
@@ -96,6 +106,7 @@ For file volumes, there are some extra parameters added to the config to help sp
 $ cat /etc/kubernetes/csi-vsphere.conf
 [Global]
 cluster-id = "<cluster-id>"
+cluster-distribution = "<cluster-distribution>"
 ca-file = <ca file path> # optional, use with insecure-flag set to false
 
 [NetPermissions "A"]
@@ -170,33 +181,30 @@ For security purposes, it is advised to remove this configuration file.
 rm csi-vsphere.conf
 ```
 
-## Create Roles, ServiceAccount and ClusterRoleBinding for vSphere CSI Driver <a id="csi_service_account"></a>
-
-Create ClusterRole, ServiceAccounts and ClusterRoleBinding needed for installation of vSphere CSI Driver
-
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/manifests/v2.0.0/vsphere-7.0/vanilla/rbac/vsphere-csi-controller-rbac.yaml
-```
-
-Click [here](https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/master/manifests/v2.0.0/vsphere-7.0/vanilla/rbac) to view the roles assigned to vSphere CSI Driver.
-
 ## Install vSphere CSI driver <a id="install"></a>
 
-Our CSI Controller runs as a Kubernetes deployment, with a replica count of 1. For version `v2.0.0`, the `vsphere-csi-controller` Pod consists of 6 containers – the CSI controller, External Provisioner, External Attacher, External Resizer, Liveness probe and [vSphere Syncer](https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/master/pkg/syncer).
+Before you deploy the vSphere CSI driver, refer to the [Compatibility](../compatiblity_matrix.md) page to view the supported kubernetes versions for a particular vSphere CSI version and [feature support](../supported_features_matrix.md) page to see what features are supported on that version.
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/manifests/v2.0.0/vsphere-7.0/vanilla/deploy/vsphere-csi-controller-deployment.yaml
-```
+- Get the deployment manifests pertaining to the version of vSphere CSI driver.
+  - [v2.2.0](../releases/v2.2.0.md) deployment manifests - https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/v2.2.0/manifests/v2.2.0
+  - [v2.1.1](../releases/v2.1.1.md) deployment manifests - https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/v2.1.1/manifests/v2.1.1
+  - [v2.1.0](../releases/v2.1.0.md) deployment manifests - https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/release-2.1/manifests/v2.1.0
 
-There is also a CSI node Daemonset to be deployed, that will run on every node.
+  NOTE: Refer [vSphere CSI Driver - Deployment with Topology](deploying_csi_with_zones.md) to deploy your kubernetes cluster with topology aware provisioning feature.
 
-```bash
-kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/master/manifests/v2.0.0/vsphere-7.0/vanilla/deploy/vsphere-csi-node-ds.yaml
-```
+- Create the roles, cluster roles and service accounts needed for installation of vSphere CSI Driver by deploying the YAML files available in the `rbac` folder of the vSphere CSI driver version you have chosen.
 
-Click [here](https://github.com/kubernetes-sigs/vsphere-csi-driver/tree/master/manifests/v2.0.0/vsphere-7.0/vanilla/deploy) to view the deployment manifest for vSphere CSI driver.
+    ```bash
+    $ kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/v2.2.0/manifests/v2.2.0/rbac/vsphere-csi-controller-rbac.yaml
+    $ kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/v2.2.0/manifests/v2.2.0/rbac/vsphere-csi-node-rbac.yaml
+    ```
 
-NOTE: Visit [vSphere CSI Driver - Deployment with Topology](deploying_csi_with_zones.md) to deploy your kubernetes cluster with topology aware provisioning feature.
+- Deploy the CSI controller and node daemonset using the YAML files available in the `deploy` folder of the same version.
+
+    ```bash
+    $ kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/v2.2.0/manifests/v2.2.0/deploy/vsphere-csi-controller-deployment.yaml
+    $ kubectl apply -f https://raw.githubusercontent.com/kubernetes-sigs/vsphere-csi-driver/v2.2.0/manifests/v2.2.0/deploy/vsphere-csi-node-ds.yaml
+    ```
 
 ## Verify that CSI has been successfully deployed <a id="verify"></a>
 

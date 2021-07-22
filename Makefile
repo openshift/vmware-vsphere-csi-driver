@@ -4,6 +4,7 @@ all: build
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
 GOFLAGS_VENDOR := -mod=vendor
+
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
 
@@ -137,7 +138,7 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-$(SYNCER_BIN): $(SYNCER_BIN_SRCS)
+$(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
@@ -198,6 +199,7 @@ deploy: | $(DOCKER_SOCK)
 ################################################################################
 .PHONY: clean
 clean:
+	@rm -f Dockerfile*
 	rm -f $(CSI_BIN) vsphere-csi-*.tar.gz vsphere-csi-*.zip \
 		$(SYNCER_BIN) vsphere-syncer-*.tar.gz vsphere-syncer-*.zip \
 		image-*.tar image-*.d $(DIST_OUT)/* $(BIN_OUT)/*
@@ -361,14 +363,11 @@ test-e2e:
 ################################################################################
 ##                                 LINTING                                    ##
 ################################################################################
-.PHONY: check fmt lint mdlint shellcheck vet
-check: fmt lint mdlint shellcheck staticcheck vet golangci-lint
+.PHONY: check fmt mdlint shellcheck vet
+check: fmt mdlint shellcheck staticcheck vet golangci-lint
 
 fmt:
 	hack/check-format.sh
-
-lint:
-	hack/check-lint.sh
 
 mdlint:
 	hack/check-mdlint.sh

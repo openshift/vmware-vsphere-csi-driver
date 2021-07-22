@@ -26,8 +26,7 @@ import (
 	"sync"
 	"time"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-
+	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
 	v1 "k8s.io/api/core/v1"
@@ -42,16 +41,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
 
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	cnsoperatorapis "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator"
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
 	cnsnode "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/node"
 	volumes "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
 	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/pkg/syncer/cnsoperator/types"
 )
 
@@ -72,11 +71,14 @@ var (
 // Add creates a new CnsNodeVmAttachment Controller and adds it to the Manager, vSphereSecretConfigInfo
 // and VirtualCenterTypes. The Manager will set fields on the Controller
 // and Start it when the Manager is Started.
-func Add(mgr manager.Manager, configInfo *config.ConfigurationInfo, volumeManager volumes.Manager) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
+func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
+	configInfo *config.ConfigurationInfo, volumeManager volumes.Manager) error {
+	ctx, log := logger.GetNewContextWithLogger()
+	if clusterFlavor != cnstypes.CnsClusterFlavorWorkload {
+		log.Debug("Not initializing the CnsNodeVmAttachment Controller as its a non-WCP CSI deployment")
+		return nil
+	}
+
 	// Initializes kubernetes client
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -97,19 +99,13 @@ func Add(mgr manager.Manager, configInfo *config.ConfigurationInfo, volumeManage
 
 // newReconciler returns a new reconcile.Reconciler
 func newReconciler(mgr manager.Manager, configInfo *config.ConfigurationInfo, volumeManager volumes.Manager, recorder record.EventRecorder) reconcile.Reconciler {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
+	ctx, _ := logger.GetNewContextWithLogger()
 	return &ReconcileCnsNodeVMAttachment{client: mgr.GetClient(), scheme: mgr.GetScheme(), configInfo: configInfo, volumeManager: volumeManager, nodeManager: cnsnode.GetManager(ctx), recorder: recorder}
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
-	log := logger.GetLogger(ctx)
-
+	ctx, log := logger.GetNewContextWithLogger()
 	maxWorkerThreads := getMaxWorkerThreadsToReconcileCnsNodeVmAttachment(ctx)
 	// Create a new controller
 	c, err := controller.New("cnsnodevmattachment-controller", mgr, controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
@@ -149,10 +145,7 @@ type ReconcileCnsNodeVMAttachment struct {
 // Note:
 // The Controller will requeue the Request to be processed again if the returned error is non-nil or
 // Result.Requeue is true, otherwise upon completion it will remove the work from the queue.
-func (r *ReconcileCnsNodeVMAttachment) Reconcile(request reconcile.Request) (reconcile.Result, error) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	ctx = logger.NewContextWithLogger(ctx)
+func (r *ReconcileCnsNodeVMAttachment) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
 	log := logger.GetLogger(ctx)
 
 	// Fetch the CnsNodeVmAttachment instance
@@ -207,7 +200,7 @@ func (r *ReconcileCnsNodeVMAttachment) Reconcile(request reconcile.Request) (rec
 		dcMoref = value[0]
 	}
 	// Get node VM by nodeUUID
-	var dc *vsphere.Datacenter
+	var dc *cnsvsphere.Datacenter
 	vcenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, r.configInfo, false)
 	if err != nil {
 		msg := fmt.Sprintf("failed to get virtual center instance with error: %v", err)
@@ -219,7 +212,7 @@ func (r *ReconcileCnsNodeVMAttachment) Reconcile(request reconcile.Request) (rec
 		recordEvent(ctx, r, instance, v1.EventTypeWarning, msg)
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	dc = &vsphere.Datacenter{
+	dc = &cnsvsphere.Datacenter{
 		Datacenter: object.NewDatacenter(vcenter.Client.Client,
 			vimtypes.ManagedObjectReference{
 				Type:  "Datacenter",
@@ -290,7 +283,7 @@ func (r *ReconcileCnsNodeVMAttachment) Reconcile(request reconcile.Request) (rec
 
 		log.Debugf("vSphere CSI driver is attaching volume: %q to nodevm: %+v for CnsNodeVmAttachment request with name: %q on namespace: %q",
 			volumeID, nodeVM, request.Name, request.Namespace)
-		diskUUID, attachErr := volumes.GetManager(ctx, vcenter).AttachVolume(ctx, nodeVM, volumeID)
+		diskUUID, attachErr := r.volumeManager.AttachVolume(ctx, nodeVM, volumeID, false)
 
 		if attachErr != nil {
 			log.Errorf("failed to attach disk: %q to nodevm: %+v for CnsNodeVmAttachment request with name: %q on namespace: %q. Err: %+v",
@@ -370,9 +363,9 @@ func (r *ReconcileCnsNodeVMAttachment) Reconcile(request reconcile.Request) (rec
 		}
 		log.Debugf("vSphere CSI driver is detaching volume: %q to nodevm: %+v for CnsNodeVmAttachment request with name: %q on namespace: %q",
 			cnsVolumeID, nodeVM, request.Name, request.Namespace)
-		detachErr := volumes.GetManager(ctx, vcenter).DetachVolume(ctx, nodeVM, cnsVolumeID)
+		detachErr := r.volumeManager.DetachVolume(ctx, nodeVM, cnsVolumeID)
 		if detachErr != nil {
-			if vsphere.IsManagedObjectNotFound(detachErr) {
+			if cnsvsphere.IsManagedObjectNotFound(detachErr, nodeVM.VirtualMachine.Reference()) {
 				msg := fmt.Sprintf("Found a managed object not found fault for vm: %+v", nodeVM)
 				removeFinalizerFromCRDInstance(ctx, instance, request)
 				err = updateCnsNodeVMAttachment(ctx, r.client, instance)
@@ -441,7 +434,7 @@ func getVCDatacentersFromConfig(cfg *config.Config) (map[string][]string, error)
 		}
 	}
 	if len(vcdcMap) == 0 {
-		err = errors.New("Unable get vCenter datacenters from vsphere config")
+		err = errors.New("unable get vCenter datacenters from vsphere config")
 	}
 	return vcdcMap, err
 }
