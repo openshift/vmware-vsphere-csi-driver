@@ -19,14 +19,12 @@ package cnsvolumeoperationrequest
 import (
 	"context"
 	"fmt"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/pkg/errors"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,17 +81,8 @@ func InitVolumeOperationRequestInterface(ctx context.Context, cleanupInterval in
 		log.Info(
 			"Creating CnsVolumeOperationRequest definition on API server and initializing VolumeOperationRequest instance",
 		)
-		err := k8s.CreateCustomResourceDefinitionFromSpec(
-			ctx,
-			crdName,
-			crdSingular,
-			crdPlural,
-			reflect.TypeOf(cnsvolumeoperationrequestv1alpha1.CnsVolumeOperationRequest{}).
-				Name(),
-			cnsvolumeoperationrequestv1alpha1.SchemeGroupVersion.Group,
-			cnsvolumeoperationrequestv1alpha1.SchemeGroupVersion.Version,
-			apiextensionsv1beta1.NamespaceScoped,
-		)
+
+		err := k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cns.vmware.com_cnsvolumeoperationrequests.yaml")
 		if err != nil {
 			log.Errorf("failed to create CnsVolumeOperationRequest CRD with error: %v", err)
 			return nil, err

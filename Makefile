@@ -121,6 +121,15 @@ endif
 
 syncer_manifest: controller-gen
 	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/apis/storagepool/... output:crd:dir=pkg/apis/storagepool/config
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/apis/migration/... output:crd:dir=pkg/apis/migration/config
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/apis/cnsoperator/cnsnodevmattachment/... output:crd:dir=pkg/apis/cnsoperator/config
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/internalapis/cnsvolumeoperationrequest/... output:crd:dir=pkg/internalapis/cnsvolumeoperationrequest/config
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/internalapis/featurestates/... output:crd:dir=pkg/internalapis/featurestates/config
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/internalapis/csinodetopology/... output:crd:dir=pkg/internalapis/csinodetopology/config
+# TODO: There's a struct in a dependency (vendor/github.com/vmware/govmomi/cns/types/types.go)
+# that's missing a JSON tag, which makes this command always fail. The YAML file is generated correctly, so we ignore the error.
+	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/apis/cnsoperator/cnsvolumemetadata/... output:crd:dir=pkg/apis/cnsoperator/config | true
+
 # find or download controller-gen
 # download controller-gen if necessary
 controller-gen:

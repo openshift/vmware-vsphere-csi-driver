@@ -10,57 +10,55 @@ spec:
     plural: cnsfileaccessconfigs
     singular: cnsfileaccessconfig
   scope: Namespaced
-  validation:
-    openAPIV3Schema:
-      description: CnsFileAccessConfig is the Schema for the cnsfileaccessconfig API
-      properties:
-        apiVersion:
-          description: 'APIVersion defines the versioned schema of this representation
-            of an object. Servers should convert recognized schemas to the latest
-            internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources'
-          type: string
-        kind:
-          description: 'Kind is a string value representing the REST resource this
-            object represents. Servers may infer this from the endpoint the client
-            submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
-          type: string
-        metadata:
-          type: object
-        spec:
-          type: object
-          description: CnsFileAccessConfigSpec defines the desired state of CnsFileAccessConfig
-          properties:
-            pvcName:
-              description: PvcName indicates the name of the PVC on the supervisor Cluster.
-              type: string
-              pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
-            vmName:
-              description: VMName is the name of VirtualMachine instance on SV cluster.
-              type: string
-              pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
-          required:
-          - pvcName
-          type: object
-        status:
-          type: object
-          description: CnsFileAccessConfigStatus defines the observed state of CnsFileAccessConfig.
-          properties:
-            done:
-              description: Done indicates whether the ACL has been configured on file volume.
-              type: boolean
-            accessPoints:
-              description: Access points per protocol supported by the volume.
-              additionalProperties:
-                items:
-                  type: string
-              type: object
-            error:
-              description: The last error encountered during file volume config operation, if any
-              type: string
-  version: v1alpha1
   versions:
   - name: v1alpha1
-    served: true
+    schema:
+      openAPIV3Schema:
+        description: CnsFileAccessConfig is the Schema for the cnsfileaccessconfig API
+        properties:
+          apiVersion:
+            description: 'APIVersion defines the versioned schema of this representation
+              of an object. Servers should convert recognized schemas to the latest
+              internal value, and may reject unrecognized values. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#resources'
+            type: string
+          kind:
+            description: 'Kind is a string value representing the REST resource this
+              object represents. Servers may infer this from the endpoint the client
+              submits requests to. Cannot be updated. In CamelCase. More info: https://git.k8s.io/community/contributors/devel/api-conventions.md#types-kinds'
+            type: string
+          metadata:
+            type: object
+          spec:
+            type: object
+            description: CnsFileAccessConfigSpec defines the desired state of CnsFileAccessConfig
+            properties:
+              pvcName:
+                description: PvcName indicates the name of the PVC on the supervisor Cluster.
+                type: string
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+              vmName:
+                description: VMName is the name of VirtualMachine instance on SV cluster.
+                type: string
+                pattern: '^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
+            required:
+            - pvcName
+            type: object
+          status:
+            type: object
+            description: CnsFileAccessConfigStatus defines the observed state of CnsFileAccessConfig.
+            properties:
+              done:
+                description: Done indicates whether the ACL has been configured on file volume.
+                type: boolean
+              accessPoints:
+                description: Access points per protocol supported by the volume.
+                additionalProperties:
+                  items:
+                    type: string
+                type: object
+              error:
+                description: The last error encountered during file volume config operation, if any
+                type: string
     storage: true
 status:
   acceptedNames:
