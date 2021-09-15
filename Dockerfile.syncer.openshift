@@ -1,9 +1,9 @@
-FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.16-openshift-4.9 AS builder
+FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.16-openshift-4.10 AS builder
 WORKDIR /go/src/github.com/kubernetes-sigs/vsphere-csi-driver
 COPY . .
 RUN make build # TODO: build only driver
 
-FROM registry.ci.openshift.org/ocp/4.9:base
+FROM registry.ci.openshift.org/ocp/4.10:base
 RUN mkdir -p config
 ADD pkg/apis/cnsoperator/config/cnsregistervolume_crd.yaml /config/
 ADD pkg/apis/cnsoperator/config/cnsfileaccessconfig_crd.yaml /config/
