@@ -76,7 +76,7 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
-		scSpec := getVSphereStorageClassSpec(storageclassname, nil, allowedTopologies, "", "", false)
+		scSpec := getVSphereStorageClassSpec(defaultNginxStorageClassName, nil, allowedTopologies, "", "", false)
 		sc, err := client.StorageV1().StorageClasses().Create(ctx, scSpec, metav1.CreateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
@@ -92,14 +92,17 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
 
 		ssPodsBeforeDelete := fss.GetPodList(client, statefulset)
-		gomega.Expect(ssPodsBeforeDelete.Items).NotTo(gomega.BeEmpty(), fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
-		gomega.Expect(len(ssPodsBeforeDelete.Items) == 1).To(gomega.BeTrue(), "Number of Pods in the statefulset should be 1")
+		gomega.Expect(ssPodsBeforeDelete.Items).NotTo(gomega.BeEmpty(),
+			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
+		gomega.Expect(len(ssPodsBeforeDelete.Items) == 1).To(gomega.BeTrue(),
+			"Number of Pods in the statefulset should be 1")
 
 		ginkgo.By("Deleting the pod")
 		pod = &ssPodsBeforeDelete.Items[0]
 		DeleteStatefulPodAtIndex(client, 0, statefulset)
 
-		// Wait for 30 seconds, after deleting the pod. By the end of this wait, the pod would be created again on any of the nodes
+		// Wait for 30 seconds, after deleting the pod. By the end of this wait,
+		// the pod would be created again on any of the nodes.
 		time.Sleep(time.Duration(sleepTimeOut) * time.Second)
 
 		for _, volumespec := range pod.Spec.Volumes {

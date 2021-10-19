@@ -298,6 +298,8 @@ spec:
         app: vsphere-csi-node
         role: vsphere-csi
     spec:
+      hostNetwork: true
+      dnsPolicy: "ClusterFirstWithHostNet"
       serviceAccountName: vsphere-csi-node
       priorityClassName: system-node-critical # Guarantees scheduling for critical system pods
       containers:
@@ -420,7 +422,7 @@ data:
   "volume-extend": "true"
   "volume-health": "true"
   "online-volume-extend": "true"
-  "file-volume": "false"
+  "file-volume": "true"
   "trigger-csi-fullsync": "false"
   "csi-sv-feature-states-replication": "false"
 kind: ConfigMap

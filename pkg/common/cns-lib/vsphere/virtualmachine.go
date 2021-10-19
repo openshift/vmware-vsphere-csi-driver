@@ -25,7 +25,7 @@ import (
 
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25/mo"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
@@ -65,13 +65,14 @@ func (vm *VirtualMachine) IsActive(ctx context.Context) (bool, error) {
 	return false, nil
 }
 
-// renew renews the virtual machine and datacenter objects given its virtual center.
+// renew renews the virtual machine and datacenter objects on the given vc.
 func (vm *VirtualMachine) renew(vc *VirtualCenter) {
 	vm.VirtualMachine = object.NewVirtualMachine(vc.Client.Client, vm.VirtualMachine.Reference())
 	vm.Datacenter.Datacenter = object.NewDatacenter(vc.Client.Client, vm.Datacenter.Reference())
 }
 
-// GetAllAccessibleDatastores gets the list of accessible Datastores for the given Virtual Machine
+// GetAllAccessibleDatastores gets the list of accessible Datastores for the
+// given Virtual Machine.
 func (vm *VirtualMachine) GetAllAccessibleDatastores(ctx context.Context) ([]*DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
 	host, err := vm.HostSystem(ctx)
@@ -117,11 +118,30 @@ const (
 	providerPrefix = "vsphere://"
 )
 
+// GetUUIDFromVMReference fetches the UUID of the VM by looking at the config.uuid property from the VM ref.
+func GetUUIDFromVMReference(ctx context.Context, vc *VirtualCenter, vmRef types.ManagedObjectReference) (
+	string, error) {
+	log := logger.GetLogger(ctx)
+	vmObj := object.NewVirtualMachine(vc.Client.Client, vmRef)
+	var vm mo.VirtualMachine
+	err := vmObj.Properties(ctx, vmRef, []string{"config.uuid"}, &vm)
+	if err != nil {
+		return "", logger.LogNewErrorf(log, "failed to retrieve UUID from VM reference %+v. Error: %+v",
+			vmRef, err)
+	}
+	if vm.Config == nil || vm.Config.Uuid == "" {
+		return "", logger.LogNewErrorf(log, "failed to retrieve UUID from VM reference %+v.", vmRef)
+	}
+	return vm.Config.Uuid, nil
+}
+
 // GetVirtualMachineByUUID returns virtual machine given its UUID in entire VC.
 // If instanceUuid is set to true, then UUID is an instance UUID.
-// In this case, this function searches for virtual machines whose instance UUID matches the given uuid.
+// In this case, this function searches for virtual machines whose instance UUID
+// matches the given uuid.
 // If instanceUuid is set to false, then UUID is BIOS UUID.
-// In this case, this function searches for virtual machines whose BIOS UUID matches the given uuid.
+// In this case, this function searches for virtual machines whose BIOS UUID
+// matches the given uuid.
 func GetVirtualMachineByUUID(ctx context.Context, uuid string, instanceUUID bool) (*VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
 	log.Infof("Initiating asynchronous datacenter listing with uuid %s", uuid)
@@ -197,7 +217,7 @@ func GetVirtualMachineByUUID(ctx context.Context, uuid string, instanceUUID bool
 	}
 }
 
-// GetHostSystem returns HostSystem object of the virtual machine
+// GetHostSystem returns HostSystem object of the virtual machine.
 func (vm *VirtualMachine) GetHostSystem(ctx context.Context) (*object.HostSystem, error) {
 	log := logger.GetLogger(ctx)
 	vmHost, err := vm.VirtualMachine.HostSystem(ctx)
@@ -215,7 +235,7 @@ func (vm *VirtualMachine) GetHostSystem(ctx context.Context) (*object.HostSystem
 	return vmHost, nil
 }
 
-// GetTagManager returns tagManager using vm client
+// GetTagManager returns tagManager using vm client.
 func (vm *VirtualMachine) GetTagManager(ctx context.Context) (*tags.Manager, error) {
 	log := logger.GetLogger(ctx)
 	virtualCenter, err := GetVirtualCenterManager(ctx).GetVirtualCenter(ctx, vm.VirtualCenterHost)
@@ -226,8 +246,8 @@ func (vm *VirtualMachine) GetTagManager(ctx context.Context) (*tags.Manager, err
 	return GetTagManager(ctx, virtualCenter)
 }
 
-// GetAncestors returns ancestors of VM
-// example result: "Folder", "Datacenter", "Cluster"
+// GetAncestors returns ancestors of VM.
+// Example result: "Folder", "Datacenter", "Cluster".
 func (vm *VirtualMachine) GetAncestors(ctx context.Context) ([]mo.ManagedEntity, error) {
 	log := logger.GetLogger(ctx)
 	vmHost, err := vm.GetHostSystem(ctx)
@@ -237,7 +257,7 @@ func (vm *VirtualMachine) GetAncestors(ctx context.Context) ([]mo.ManagedEntity,
 	}
 	var objects []mo.ManagedEntity
 	pc := vm.Datacenter.Client().ServiceContent.PropertyCollector
-	// example result: ["Folder", "Datacenter", "Cluster"]
+	// Example result: ["Folder", "Datacenter", "Cluster"]
 	objects, err = mo.Ancestors(ctx, vm.Datacenter.Client(), pc, vmHost.Reference())
 	if err != nil {
 		log.Errorf("GetAncestors failed for %s with err %v", vmHost.Reference(), err)
@@ -247,17 +267,20 @@ func (vm *VirtualMachine) GetAncestors(ctx context.Context) ([]mo.ManagedEntity,
 	return objects, nil
 }
 
-// GetZoneRegion returns zone and region of the node vm
-func (vm *VirtualMachine) GetZoneRegion(ctx context.Context, zoneCategoryName string, regionCategoryName string, tagManager *tags.Manager) (zone string, region string, err error) {
+// GetZoneRegion returns zone and region of the node vm.
+func (vm *VirtualMachine) GetZoneRegion(ctx context.Context, zoneCategoryName string,
+	regionCategoryName string, tagManager *tags.Manager) (zone string, region string, err error) {
 	log := logger.GetLogger(ctx)
-	log.Debugf("GetZoneRegion: called with zoneCategoryName: %s, regionCategoryName: %s", zoneCategoryName, regionCategoryName)
+	log.Debugf("GetZoneRegion: called with zoneCategoryName: %s, regionCategoryName: %s",
+		zoneCategoryName, regionCategoryName)
 	var objects []mo.ManagedEntity
 	objects, err = vm.GetAncestors(ctx)
 	if err != nil {
 		log.Errorf("GetAncestors failed for %s with err %v", vm.Reference(), err)
 		return "", "", err
 	}
-	// search the hierarchy, example order: ["Host", "Cluster", "Datacenter", "Folder"]
+	// Search the hierarchy, example order:
+	//    ["Host", "Cluster", "Datacenter", "Folder"]
 	for i := range objects {
 		obj := objects[len(objects)-1-i]
 		log.Debugf("Name: %s, Type: %s", obj.Self.Value, obj.Self.Type)
@@ -296,23 +319,27 @@ func (vm *VirtualMachine) GetZoneRegion(ctx context.Context, zoneCategoryName st
 	return zone, region, err
 }
 
-// IsInZoneRegion checks if virtual machine belongs to specified zone and region
-// This function returns true if virtual machine belongs to specified zone/region, else returns false.
-func (vm *VirtualMachine) IsInZoneRegion(ctx context.Context, zoneCategoryName string, regionCategoryName string, zoneValue string, regionValue string, tagManager *tags.Manager) (bool, error) {
+// IsInZoneRegion checks if VM belongs to specified zone and region.
+// This function returns true if yes, false otherwise.
+func (vm *VirtualMachine) IsInZoneRegion(ctx context.Context, zoneCategoryName string, regionCategoryName string,
+	zoneValue string, regionValue string, tagManager *tags.Manager) (bool, error) {
 	log := logger.GetLogger(ctx)
-	log.Infof("IsInZoneRegion: called with zoneCategoryName: %s, regionCategoryName: %s, zoneValue: %s, regionValue: %s", zoneCategoryName, regionCategoryName, zoneValue, regionValue)
+	log.Infof("IsInZoneRegion: called with zoneCategoryName: %s, regionCategoryName: %s, zoneValue: %s, regionValue: %s",
+		zoneCategoryName, regionCategoryName, zoneValue, regionValue)
 	vmZone, vmRegion, err := vm.GetZoneRegion(ctx, zoneCategoryName, regionCategoryName, tagManager)
 	if err != nil {
 		log.Errorf("failed to get accessibleTopology for vm: %v, err: %v", vm.Reference(), err)
 		return false, err
 	}
 	if regionValue == "" && zoneValue != "" && vmZone == zoneValue {
-		// region is not specified, if zone matches with look up zone value, return true
+		// Region is not specified. If zone matches with look up zone value,
+		// return true.
 		log.Debugf("MoRef [%v] belongs to zone [%s]", vm.Reference(), zoneValue)
 		return true, nil
 	}
 	if zoneValue == "" && regionValue != "" && vmRegion == regionValue {
-		// zone is not specified, if region matches with look up region value, return true
+		// Zone is not specified. If region matches with look up region value,
+		// return true.
 		log.Debugf("MoRef [%v] belongs to region [%s]", vm.Reference(), regionValue)
 		return true, nil
 	}
@@ -323,7 +350,119 @@ func (vm *VirtualMachine) IsInZoneRegion(ctx context.Context, zoneCategoryName s
 	return false, nil
 }
 
-// GetUUIDFromProviderID Returns VM UUID from Node's providerID
+// GetUUIDFromProviderID Returns VM UUID from Node's providerID.
 func GetUUIDFromProviderID(providerID string) string {
 	return strings.TrimPrefix(providerID, providerPrefix)
+}
+
+// GetSharedDatastoresForVMs returns shared datastores accessible to specified
+// nodeVMs list.
+func GetSharedDatastoresForVMs(ctx context.Context, nodeVMs []*VirtualMachine) ([]*DatastoreInfo, error) {
+	var sharedDatastores []*DatastoreInfo
+	log := logger.GetLogger(ctx)
+	for _, nodeVM := range nodeVMs {
+		log.Debugf("Getting accessible datastores for node %s", nodeVM.VirtualMachine)
+		accessibleDatastores, err := nodeVM.GetAllAccessibleDatastores(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(sharedDatastores) == 0 {
+			sharedDatastores = accessibleDatastores
+		} else {
+			var sharedAccessibleDatastores []*DatastoreInfo
+			for _, sharedDs := range sharedDatastores {
+				// Check if sharedDatastores is found in accessibleDatastores.
+				for _, accessibleDs := range accessibleDatastores {
+					// Intersection is performed based on the datastoreUrl as this
+					// uniquely identifies the datastore.
+					if sharedDs.Info.Url == accessibleDs.Info.Url {
+						sharedAccessibleDatastores = append(sharedAccessibleDatastores, sharedDs)
+						break
+					}
+				}
+			}
+			sharedDatastores = sharedAccessibleDatastores
+		}
+		if len(sharedDatastores) == 0 {
+			return nil, fmt.Errorf("no shared datastores found for nodeVm: %+v", nodeVM)
+		}
+	}
+	return sharedDatastores, nil
+}
+
+// GetTopologyLabels populates the topology labels of the nodeVM in topologyCategories
+// parameter given the category names.
+func (vm *VirtualMachine) GetTopologyLabels(ctx context.Context, tagManager *tags.Manager,
+	topologyCategories map[string]string) error {
+	log := logger.GetLogger(ctx)
+
+	// Get NodeVM ancestors.
+	objects, err := vm.GetAncestors(ctx)
+	if err != nil {
+		log.Errorf("GetAncestors failed for %v with err %v", vm.Reference(), err)
+		return err
+	}
+	// Search the hierarchy for topology tags.
+	// Example order of entities in VM ancestors in reverse iteration:
+	// Name: host-31, Type: HostSystem
+	// Name: domain-c53, Type: ClusterComputeResource
+	// Name: group-h5, Type: Folder
+	// Name: datacenter-3, Type: Datacenter
+	// Name: group-d1, Type: Folder
+	for i := range objects {
+		obj := objects[len(objects)-1-i]
+		objTags, err := tagManager.GetAttachedTags(ctx, obj)
+		if err != nil {
+			return logger.LogNewErrorf(log, "cannot get attached tags for object %v. Error: %v", obj.Self, err)
+		}
+		for _, tag := range objTags {
+			log.Debugf("Found tag: %q for object %v", tag.Name, obj.Self)
+			// Get category for tag.
+			category, err := tagManager.GetCategory(ctx, tag.CategoryID)
+			if err != nil {
+				return logger.LogNewErrorf(log, "failed to get category for tag: %q. Error: %+v", tag.Name, err)
+			}
+			// Check if the category belongs to a topology domain recognised by the driver.
+			val, exists := topologyCategories[category.Name]
+			log.Debugf("Found category %q for object %+v with tag: %q ", val, obj.Self, tag.Name)
+			if exists {
+				// Update the value if it doesn't already exist.
+				if val == "" {
+					log.Infof("Found category: %s for object %v with tag: %s",
+						category.Name, obj.Self, tag.Name)
+					topologyCategories[category.Name] = tag.Name
+				} else {
+					// Error out on duplicate values for the same category.
+					return logger.LogNewErrorf(log, "duplicate values detected for category %s as %q and %q",
+						category.Name, val, tag.Name)
+				}
+			}
+			// Check if values for all topology domains have been retrieved.
+			// If yes, then return.
+			if len(findMissingCategories(topologyCategories)) == 0 {
+				log.Infof("Tags related to all topology categories found. Skipping tag check on following "+
+					"entities: %v", objects[:len(objects)-1-i])
+				return nil
+			}
+		}
+	}
+	// Raise error if nodeVM does not have a topology label associated with
+	// each category in the vSphere config secret `Labels` section.
+	missing := findMissingCategories(topologyCategories)
+	if len(missing) != 0 {
+		return logger.LogNewErrorf(log, "nodeVM %s does not have labels for the following categories: %+v",
+			vm.Reference(), missing)
+	}
+	return nil
+}
+
+// findMissingCategories returns the list of keys with an empty string as value.
+func findMissingCategories(topologyCategories map[string]string) []string {
+	missing := make([]string, 0)
+	for key, val := range topologyCategories {
+		if val == "" {
+			missing = append(missing, key)
+		}
+	}
+	return missing
 }

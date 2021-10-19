@@ -20,10 +20,10 @@ import (
 	"context"
 	"sync"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
 // FakeK8SOrchestrator is used to mock common K8S Orchestrator instance to store FSS values
@@ -59,4 +59,12 @@ type MockVolumeMigrationService interface {
 // interface by storing the operation details in an in-memory map.
 type fakeVolumeOperationRequestInterface struct {
 	volumeOperationRequestMap map[string]*cnsvolumeoperationrequest.VolumeOperationRequestDetails
+}
+
+// mockControllerVolumeTopology is a mock of the k8sorchestrator controllerVolumeTopology type.
+type mockControllerVolumeTopology struct {
+}
+
+// mockNodeVolumeTopology is a mock of the k8sorchestrator nodeVolumeTopology type.
+type mockNodeVolumeTopology struct {
 }

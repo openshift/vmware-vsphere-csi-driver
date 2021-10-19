@@ -19,18 +19,12 @@ package cnsvolumeoperationrequest
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cnsvolumeoperationrequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 )
 
 const (
-	// CRDName represent the name of cnsvolumeoperationrequest CRD
-	crdName = "cnsvolumeoperationrequests.cns.vmware.com"
-	// CRDSingular represent the singular name of cnsvolumeoperationrequest CRD
-	crdSingular = "cnsvolumeoperationrequest"
-	// CRDPlural represent the plural name of cnsvolumeoperationrequest CRD
-	crdPlural = "cnsvolumeoperationrequests"
-	// maxEntriesInLatestOperationDetails specifies the maximum length of
-	// the LatestOperationDetails allowed in a cnsvolumeoperationrequest instance
+	// maxEntriesInLatestOperationDetails specifies the maximum length of the
+	// LatestOperationDetails allowed in a cnsvolumeoperationrequest instance.
 	maxEntriesInLatestOperationDetails = 10
 	// TaskInvocationStatusInProgress represents a task thats status is InProgress.
 	TaskInvocationStatusInProgress = "InProgress"
@@ -61,8 +55,10 @@ type OperationDetails struct {
 	Error                   string
 }
 
-// CreateVolumeOperationRequestDetails returns an object of type VolumeOperationRequestDetails from the input parameters.
-func CreateVolumeOperationRequestDetails(name, volumeID, snapshotID string, capacity int64, taskInvocationTimestamp metav1.Time, taskID, opID, taskStatus, error string) *VolumeOperationRequestDetails {
+// CreateVolumeOperationRequestDetails returns an object of type
+// VolumeOperationRequestDetails from the input parameters.
+func CreateVolumeOperationRequestDetails(name, volumeID, snapshotID string, capacity int64,
+	taskInvocationTimestamp metav1.Time, taskID, opID, taskStatus, error string) *VolumeOperationRequestDetails {
 	return &VolumeOperationRequestDetails{
 		Name:       name,
 		VolumeID:   volumeID,
@@ -78,10 +74,12 @@ func CreateVolumeOperationRequestDetails(name, volumeID, snapshotID string, capa
 	}
 }
 
-// convertToCnsVolumeOperationRequestDetails converts an object of type OperationDetails to the OperationDetails type
-// defined by the CnsVolumeOperationRequest Custom Resource.
-func convertToCnsVolumeOperationRequestDetails(details OperationDetails) *cnsvolumeoperationrequestv1alpha1.OperationDetails {
-	return &cnsvolumeoperationrequestv1alpha1.OperationDetails{
+// convertToCnsVolumeOperationRequestDetails converts an object of type
+// OperationDetails to the OperationDetails type defined by the
+// CnsVolumeOperationRequest Custom Resource.
+func convertToCnsVolumeOperationRequestDetails(
+	details OperationDetails) *cnsvolumeoprequestv1alpha1.OperationDetails {
+	return &cnsvolumeoprequestv1alpha1.OperationDetails{
 		TaskInvocationTimestamp: details.TaskInvocationTimestamp,
 		TaskID:                  details.TaskID,
 		OpID:                    details.OpID,

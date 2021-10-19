@@ -6,6 +6,7 @@
 - [Setting up the management network](#setup_management_network)
 - [Virtual Machine Configuration](#vm_configuration)
 - [vSphere Cloud Provider Interface (CPI)](#vsphere_cpi)
+- [CoreDNS configurations for vSAN file share volumes](#coredns)
 
 ## Compatible vSphere and ESXi versions <a id="compatible_vsphere_esxi_versions"></a>
 
@@ -85,12 +86,12 @@ Refer to the [Deployment with Zones](deploying_csi_with_zones.md) to understand 
 
 Make sure to configure all the VMs that form the Kubernetes cluster with the following:
 
+- VMware Tools need to be installed on the Node Virtual Machines. Refer to this [KB Article](https://kb.vmware.com/s/article/2004754) to know about installation steps.
 - We recommend using the VMware Paravirtual SCSI controller for Primary Disk on the Node VMs.
 - Set the `disk.EnableUUID` parameter to `TRUE` for each node VM. This step is necessary so that the VMDK always presents a consistent UUID to the VM, thus allowing the disk to be mounted properly.
   - This can be done on the VirtualCenter User Interface by right-clicking on the VM → Edit Settings → VM Options → Advanced → Edit Configuration.
 - VM Hardware version must be 15 or higher.
   - This can be done on the VirtualCenter User Interface by right-clicking on the VM → Compatibility → Upgrade VM Compatibility.
-
 The VMs can also be configured by using the `govc` command-line tool.
 
 - Install `govc` on your devbox/workstation.
@@ -207,3 +208,46 @@ ProviderID: vsphere://<provider-id5>
 ```
 
 vSphere CSI driver needs the `ProviderID` field to be set for all nodes.
+
+## CoreDNS configurations for vSAN file share volumes<a id="coredns"></a>
+
+[v2.3.0](../releases/v2.3.0.md) release of the driver requires DNS forwarding configuration in CoreDNS ConfigMap to help resolve vSAN file share hostname.
+
+Modify the CoreDNS ConfigMap and add the conditional forwarder configuration:
+
+   ```bash
+   kubectl -n kube-system edit configmap coredns
+   ```
+
+Output:
+
+   ```bash
+   .:53 {
+    errors
+    health {
+       lameduck 5s
+    }
+    ready
+    kubernetes cluster.local in-addr.arpa ip6.arpa {
+       pods insecure
+       fallthrough in-addr.arpa ip6.arpa
+       ttl 30
+    }
+    prometheus :9153
+    forward . /etc/resolv.conf {
+       max_concurrent 1000
+    }
+    cache 30
+    loop
+    reload
+    loadbalance
+   }
+   vsanfs-sh.prv:53 {
+   errors
+   cache 30
+   forward . 10.161.191.241
+   }
+   ```
+
+In the above configuration `vsanfs-sh.prv` is the DNS suffix for vSAN file Service and `10.161.191.241` is the DNS server that helps resolve file share hostname.
+DNS suffix and DNS IP address can be obtained from vCenter (vSphere Cluster -> Configure -> vSAN -> Services -> File Service)

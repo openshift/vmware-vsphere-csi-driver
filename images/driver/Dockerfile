@@ -16,7 +16,7 @@
 ##                               BUILD ARGS                                   ##
 ################################################################################
 # This build arg allows the specification of a custom Golang image.
-ARG GOLANG_IMAGE=golang:1.15
+ARG GOLANG_IMAGE=golang:1.16
 
 # This build arg allows the specification of a custom base image.
 ARG BASE_IMAGE=gcr.io/cloud-provider-vsphere/extra/csi-driver-base:latest
@@ -40,13 +40,21 @@ COPY pkg/    pkg/
 COPY cmd/    cmd/
 ENV CGO_ENABLED=0
 ENV GOPROXY ${GOPROXY:-https://proxy.golang.org}
-RUN go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/pkg/csi/service.Version=${VERSION}" -o vsphere-csi ./cmd/vsphere-csi
+RUN go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service.Version=${VERSION}" -o vsphere-csi ./cmd/vsphere-csi
 
 ################################################################################
 ##                               MAIN STAGE                                   ##
 ################################################################################
 FROM ${BASE_IMAGE}
+
+# This build arg is the git commit to embed in the CSI binary
+ARG GIT_COMMIT
+
+# This label will be overridden from driver base image
+LABEL git_commit=$GIT_COMMIT
 LABEL "maintainers"="Divyen Patel <divyenp@vmware.com>, Sandeep Pissay Srinivasa Rao <ssrinivas@vmware.com>, Xing Yang <yangxi@vmware.com>"
+
+ADD pkg/apis/migration/config/cns.vmware.com_cnsvspherevolumemigrations.yaml /config/
 
 # install nfs-utils, util-linux and e2fsprogs
 # nfs-utils  : The nfs-utils package contains simple nfs client service.
@@ -65,5 +73,9 @@ RUN tdnf -y install \
 RUN tdnf clean all
 
 COPY --from=builder /build/vsphere-csi /bin/vsphere-csi
+
+RUN mkdir -p config
+ADD pkg/internalapis/cnsvolumeoperationrequest/config/cns.vmware.com_cnsvolumeoperationrequests.yaml /config/
+ADD pkg/apis/migration/config/cns.vmware.com_cnsvspherevolumemigrations.yaml /config/
 
 ENTRYPOINT ["/bin/vsphere-csi"]

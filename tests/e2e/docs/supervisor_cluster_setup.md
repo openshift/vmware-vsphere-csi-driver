@@ -73,6 +73,8 @@ datacenters should be comma separated if deployed on multi-datacenters
     export KUBECONFIG=~/.kube/config
     export STORAGE_POLICY_FOR_SHARED_DATASTORES="shared-ds-policy"
     export STORAGE_POLICY_FOR_NONSHARED_DATASTORES="non-shared-ds-policy"
+    # For few SVC block volume expansion tests we need a storage policy which has thick provisioning enabled
+    export STORAGE_POLICY_WITH_THICK_PROVISIONING="<policy-name>"
     # Make sure env var FULL_SYNC_WAIT_TIME should be at least double of the manifest variable FULL_SYNC_INTERVAL_MINUTES in csi-driver-deploy.yaml
     export FULL_SYNC_WAIT_TIME=350    # In seconds
     export USER=root
@@ -89,11 +91,11 @@ datacenters should be comma separated if deployed on multi-datacenters
     export DISK_URL_PATH="https://<VC_IP>/folder/<vmName>/<vmName_1.vmdk>?dcPath=<DatacenterPath>&dsName=<dataStoreName>"
     export COMPUTE_CLUSTER_NAME="<your_cluster_name>"
     #shared VVOL datastore url
-    export SHARED_VVOL_DATASTORE_URL="ds:///vmfs/volumes/vvol:5c5ddeccfb2f476c-ac17f22d228af0f1/"
+    export SHARED_VVOL_DATASTORE_URL="<shared-VVOL-datastore-url>"
     #shared NFS datastore url
-    export SHARED_NFS_DATASTORE_URL="ds:///vmfs/volumes/fb4efbd8-6e969410/"
+    export SHARED_NFS_DATASTORE_URL="<shared-NFS-datastore-url>"
     #shared VMFS datastore url
-    export SHARED_VMFS_DATASTORE_URL="ds:///vmfs/volumes/6009698f-424076e2-c60d-02008c6fa7e4/"
+    export SHARED_VMFS_DATASTORE_URL="<shared-VMFS-datastore-url>"
 
 ### To run full sync test, need do extra following steps
 

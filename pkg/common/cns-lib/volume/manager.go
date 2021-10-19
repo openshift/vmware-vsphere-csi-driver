@@ -18,7 +18,6 @@ package volume
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -32,10 +31,11 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/prometheus"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	csifault "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/fault"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/prometheus"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
 const (
@@ -60,13 +60,22 @@ const (
 // Manager provides functionality to manage volumes.
 type Manager interface {
 	// CreateVolume creates a new volume given its spec.
-	CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo, error)
+	// When CreateVolume failed, the second return value (faultType) and third return value(error) need to be set, and
+	// should not be nil.
+	CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo, string, error)
 	// AttachVolume attaches a volume to a virtual machine given the spec.
-	AttachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string, checkNVMeController bool) (string, error)
+	// When AttachVolume failed, the second return value (faultType) and third return value(error) need to be set, and
+	// should not be nil.
+	AttachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine,
+		volumeID string, checkNVMeController bool) (string, string, error)
 	// DetachVolume detaches a volume from the virtual machine given the spec.
-	DetachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string) error
+	// When DetachVolume failed, the first return value (faultType) and second return value(error) need to be set, and
+	// should not be nil.
+	DetachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string) (string, error)
 	// DeleteVolume deletes a volume given its spec.
-	DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) error
+	// When DeleteVolume failed, the first return value (faultType) and second return value(error) need to be set, and
+	// should not be nil.
+	DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) (string, error)
 	// UpdateVolumeMetadata updates a volume metadata given its spec.
 	UpdateVolumeMetadata(ctx context.Context, spec *cnstypes.CnsVolumeMetadataUpdateSpec) error
 	// QueryVolumeInfo calls the CNS QueryVolumeInfo API and return a task, from
@@ -81,13 +90,15 @@ type Manager interface {
 	// volume fields would be returned as part of the CnsQueryResult, if the
 	// querySelection parameters are not specified.
 	QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter,
-		querySelection cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error)
+		querySelection *cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error)
 	// QueryVolume returns volumes matching the given filter.
 	QueryVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error)
 	// RelocateVolume migrates volumes to their target datastore as specified in relocateSpecList.
 	RelocateVolume(ctx context.Context, relocateSpecList ...cnstypes.BaseCnsVolumeRelocateSpec) (*object.Task, error)
 	// ExpandVolume expands a volume to a new size.
-	ExpandVolume(ctx context.Context, volumeID string, size int64) error
+	// When ExpandVolume failed, the first return value (faultType) and second return value(error) need to be set, and
+	// should not be nil.
+	ExpandVolume(ctx context.Context, volumeID string, size int64) (string, error)
 	// ResetManager helps set new manager instance and VC configuration.
 	ResetManager(ctx context.Context, vcenter *cnsvsphere.VirtualCenter)
 	// ConfigureVolumeACLs configures net permissions for a given CnsVolumeACLConfigureSpec.
@@ -96,12 +107,26 @@ type Manager interface {
 	RegisterDisk(ctx context.Context, path string, name string) (string, error)
 	// RetrieveVStorageObject helps in retreiving virtual disk information for a given volume id.
 	RetrieveVStorageObject(ctx context.Context, volumeID string) (*vim25types.VStorageObject, error)
+	// CreateSnapshot helps create a snapshot for a block volume
+	CreateSnapshot(ctx context.Context, volumeID string, desc string) (*CnsSnapshotInfo, error)
+	// DeleteSnapshot helps delete a snapshot for a block volume
+	DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string) error
+	// QuerySnapshots retrieves the list of snapshots based on the query filter.
+	QuerySnapshots(ctx context.Context, snapshotQueryFilter cnstypes.CnsSnapshotQueryFilter) (
+		*cnstypes.CnsSnapshotQueryResult, error)
 }
 
 // CnsVolumeInfo hold information related to volume created by CNS.
 type CnsVolumeInfo struct {
 	DatastoreURL string
 	VolumeID     cnstypes.CnsVolumeId
+}
+
+type CnsSnapshotInfo struct {
+	SnapshotID                string
+	SourceVolumeID            string
+	SnapshotDescription       string
+	SnapshotCreationTimestamp time.Time
 }
 
 var (
@@ -111,13 +136,23 @@ var (
 	// read/write on manager instance.
 	managerInstanceLock sync.Mutex
 	volumeTaskMap       = make(map[string]*createVolumeTaskDetails)
+	// volumeTaskMapLock is used to serialize writes to volumeTaskMap.
+	volumeTaskMapLock sync.Mutex
+	snapshotTaskMap   = make(map[string]*createSnapshotTaskDetails)
+	// snapshotTaskMapLock is used to serialize writes to snapshotTaskMap.
+	// Alternatively, we may use Sync.Map for snapshotTaskMap without using a lock explicitly
+	snapshotTaskMapLock sync.Mutex
 	// Alias for CreateVolumeOperationRequestDetails function declaration.
 	createRequestDetails = cnsvolumeoperationrequest.CreateVolumeOperationRequestDetails
 )
 
+// createSnapshotTaskDetails has the same structure as createVolumeTaskDetails
+type createSnapshotTaskDetails struct {
+	createVolumeTaskDetails
+}
+
 // createVolumeTaskDetails contains taskInfo object and expiration time.
 type createVolumeTaskDetails struct {
-	sync.Mutex
 	task           *object.Task
 	expirationTime time.Time
 }
@@ -167,9 +202,31 @@ func ClearTaskInfoObjects() {
 				// the entry has to be deleted.
 				log.Debugf("Found an expired taskInfo: %+v for volume %q. Deleting it from task map",
 					volumeTaskMap[pvc].task, pvc)
-				taskDetails.Lock()
-				delete(volumeTaskMap, pvc)
-				taskDetails.Unlock()
+				func() {
+					volumeTaskMapLock.Lock()
+					defer volumeTaskMapLock.Unlock()
+					delete(volumeTaskMap, pvc)
+				}()
+			}
+		}
+		// clear task info objects for CreateSnapshot task
+		for snapshotTaskKey, taskDetails := range snapshotTaskMap {
+			// Get the time difference between current time and the expiration
+			// time from the snapshotTaskMap.
+			diff := time.Until(taskDetails.expirationTime)
+			// Checking if the expiration time has elapsed.
+			if int(diff.Hours()) < 0 || int(diff.Minutes()) < 0 || int(diff.Seconds()) < 0 {
+				// If one of the parameters in the time object is negative, it means
+				// the entry has to be deleted.
+				log.Debugf("Found an expired taskInfo: %+v for snapshot %q. Deleting it from task map",
+					snapshotTaskMap[snapshotTaskKey].task, snapshotTaskKey)
+				func() {
+					// put the snapshotTaskMap update operation with locking into an anonymous func
+					// to ensure the deferred unlock is called right after the update.
+					snapshotTaskMapLock.Lock()
+					defer snapshotTaskMapLock.Unlock()
+					delete(snapshotTaskMap, snapshotTaskKey)
+				}()
 			}
 		}
 	}
@@ -180,11 +237,8 @@ func (m *defaultManager) ResetManager(ctx context.Context, vcenter *cnsvsphere.V
 	log := logger.GetLogger(ctx)
 	managerInstanceLock.Lock()
 	defer managerInstanceLock.Unlock()
-	if vcenter.Config.Host != managerInstance.virtualCenter.Config.Host {
-		log.Infof("Re-initializing defaultManager.virtualCenter")
-		managerInstance.virtualCenter = vcenter
-	}
-	m.virtualCenter.Config = vcenter.Config
+	log.Infof("Re-initializing defaultManager.virtualCenter")
+	managerInstance.virtualCenter = vcenter
 	if m.virtualCenter.Client != nil {
 		m.virtualCenter.Client.Timeout = time.Duration(vcenter.Config.VCClientTimeout) * time.Minute
 		log.Infof("VC client timeout is set to %v", m.virtualCenter.Client.Timeout)
@@ -192,11 +246,11 @@ func (m *defaultManager) ResetManager(ctx context.Context, vcenter *cnsvsphere.V
 	log.Infof("Done resetting volume.defaultManager")
 }
 
-// createVolumeWithImprovedIdempotency leverages the VolumeOperationRequest interface to persist CNS task
-// information. It uses this persisted information to handle idempotency of CreateVolume callbacks to CNS
-// for the same volume.
+// createVolumeWithImprovedIdempotency leverages the VolumeOperationRequest
+// interface to persist CNS task information. It uses this persisted information
+// to handle idempotency of CreateVolume callbacks to CNS for the same volume.
 func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (
-	*CnsVolumeInfo, error) {
+	*CnsVolumeInfo, string, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Store the volume name passed in by input spec, this
@@ -210,9 +264,10 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 	)
 
 	if m.operationStore == nil {
-		return nil, logger.LogNewError(log, "operation store cannot be nil")
+		return nil, csifault.CSIInternalFault, logger.LogNewError(log, "operation store cannot be nil")
 	}
 
+	var faultType string
 	// Determine if CNS CreateVolume needs to be invoked.
 	volumeOperationDetails, err := m.operationStore.GetRequestDetails(ctx, volNameFromInputSpec)
 	switch {
@@ -229,7 +284,7 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 					VolumeID: cnstypes.CnsVolumeId{
 						Id: volumeOperationDetails.VolumeID,
 					},
-				}, nil
+				}, "", nil
 			}
 			// Validate if previous operation is pending.
 			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
@@ -250,11 +305,12 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 		volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0, metav1.Now(), "", "",
 			taskInvocationStatusInProgress, "")
 	default:
-		return nil, err
+		return nil, csifault.CSIInternalFault, err
 	}
 	defer func() {
-		// Persist the operation details before returning. Only success or error needs to be stored as
-		// InProgress details are stored when the task is created on CNS.
+		// Persist the operation details before returning. Only success or error
+		// needs to be stored as InProgress details are stored when the task is
+		// created on CNS.
 		if volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
 			volumeOperationDetails.OperationDetails.TaskStatus != taskInvocationStatusInProgress {
 			err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails)
@@ -265,7 +321,8 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 	}()
 	if task == nil {
 		// The task object is nil in two cases:
-		// - No previous CreateVolume task for this volume was retrieved from the persistent store.
+		// - No previous CreateVolume task for this volume was retrieved from the
+		//   persistent store.
 		// - The previous CreateVolume task failed.
 		// In both cases, invoke CNS CreateVolume again.
 		task, err = invokeCNSCreateVolume(ctx, m.virtualCenter, spec)
@@ -274,13 +331,14 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 			volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
 				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, "", "",
 				taskInvocationStatusError, err.Error())
-			return nil, err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return nil, faultType, err
 		}
 		if !isStaticallyProvisioned(spec) {
 			// Persist task details only for dynamically provisioned volumes.
 			volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
-				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
-				task.Reference().Value, "", taskInvocationStatusInProgress, "")
+				metav1.Now(), task.Reference().Value, "", taskInvocationStatusInProgress,
+				"")
 			err = m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails)
 			if err != nil {
 				// Don't return if CreateVolume details can't be stored.
@@ -289,23 +347,79 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 		}
 	}
 
-	// Get the taskInfo.
-	taskInfo, err := cns.GetTaskInfo(ctx, task)
-	if err != nil || taskInfo == nil {
-		log.Errorf("failed to get taskInfo for CreateVolume task with err: %v", err)
-		return nil, err
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		if cnsvsphere.IsManagedObjectNotFound(err, task.Reference()) {
+			log.Debugf("CreateVolume task %s not found in vCenter. Querying CNS "+
+				"to determine if the volume %s was successfully created.",
+				task.Reference().Value, volNameFromInputSpec)
+			queryFilter := cnstypes.CnsQueryFilter{
+				Names:               []string{volNameFromInputSpec},
+				ContainerClusterIds: []string{spec.Metadata.ContainerClusterArray[0].ClusterId},
+			}
+			queryResult, queryAllVolumeErr := m.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
+			if queryAllVolumeErr != nil {
+				log.Debugf("failed to query CNS for volume %s with error: %v. Cannot "+
+					"determine if CreateVolume task %s was successful.", volNameFromInputSpec,
+					queryAllVolumeErr, task.Reference().Value)
+				return nil, ExtractFaultTypeFromErr(ctx, err), err
+			}
+			if len(queryResult.Volumes) > 0 {
+				if len(queryResult.Volumes) != 1 {
+					log.Infof("CNS Query returned multiple entries for volume %s: %v. Returning volume ID "+
+						"of first entry: %s", volNameFromInputSpec, spew.Sdump(queryResult.Volumes),
+						queryResult.Volumes[0].VolumeId.Id)
+				}
+				volumeID := queryResult.Volumes[0].VolumeId.Id
+				volumeOperationDetails = createRequestDetails(volNameFromInputSpec, volumeID, "", 0,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+					volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusSuccess, "")
+				log.Debugf("Found volume %s with id %s", volNameFromInputSpec, volumeID)
+				return &CnsVolumeInfo{
+					DatastoreURL: "",
+					VolumeID: cnstypes.CnsVolumeId{
+						Id: volumeID,
+					},
+				}, "", nil
+			}
+			log.Errorf("volume with name %s not present in CNS. Marking task %s as failed.",
+				volNameFromInputSpec, task.Reference().Value)
+			volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
+				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+				volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusError, err.Error())
+
+			return nil, ExtractFaultTypeFromErr(ctx, err), err
+		}
+		// WaitForResult can fail for many reasons, including:
+		// - CNS restarted and marked "InProgress" tasks as "Failed".
+		// - Any failures from CNS.
+		// - Any failures at lower layers like FCD and SPS.
+		// In all cases, mark task as failed and retry.
+		log.Errorf("failed to get CreateVolume taskInfo from CNS with error: %v", err)
+		volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
+			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+			volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusError, err.Error())
+
+		return nil, ExtractFaultTypeFromErr(ctx, err), err
 	}
 
 	log.Infof("CreateVolume: VolumeName: %q, opId: %q", volNameFromInputSpec, taskInfo.ActivationId)
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return nil, csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for CreateVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("failed to get task result for task %s and volume name %s with error: %v",
 			task.Reference().Value, volNameFromInputSpec, err)
-		return nil, err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return nil, faultType, err
 	}
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
 		// Validate if the volume is already registered.
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 		resp, err := validateCreateVolumeResponseFault(ctx, volNameFromInputSpec, volumeOperationRes)
 		if err != nil {
 			volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
@@ -316,10 +430,10 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
 				taskInfo.ActivationId, taskInvocationStatusSuccess, "")
 		}
-		return resp, err
+		return resp, faultType, err
 	}
 	// Extract the CnsVolumeInfo from the taskResult.
-	resp, err := getCnsVolumeInfoFromTaskResult(ctx, m.virtualCenter, volNameFromInputSpec,
+	resp, faultType, err := getCnsVolumeInfoFromTaskResult(ctx, m.virtualCenter, volNameFromInputSpec,
 		volumeOperationRes.VolumeId, taskResult)
 	if err != nil {
 		volumeOperationDetails = createRequestDetails(volNameFromInputSpec, "", "", 0,
@@ -330,13 +444,15 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
 			taskInfo.ActivationId, taskInvocationStatusSuccess, "")
 	}
-	return resp, err
+	return resp, faultType, err
 
 }
 
-// createVolume invokes CNS CreateVolume. It stores task information in an in-memory map to handle idempotency
-// of CreateVolume calls for the same volume.
-func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo, error) {
+// createVolume invokes CNS CreateVolume. It stores task information in an
+// in-memory map to handle idempotency of CreateVolume calls for the same
+// volume.
+func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo,
+	string, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Reference to the CreateVolume task on CNS.
@@ -346,12 +462,13 @@ func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVol
 		// name may exceed 80 characters.
 		volNameFromInputSpec = spec.Name
 	)
-
+	var faultType string
 	task = getPendingCreateVolumeTaskFromMap(ctx, volNameFromInputSpec)
 	if task == nil {
 		task, err = invokeCNSCreateVolume(ctx, m.virtualCenter, spec)
 		if err != nil {
-			return nil, err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return nil, faultType, err
 		}
 		if !isStaticallyProvisioned(spec) {
 			var taskDetails createVolumeTaskDetails
@@ -359,44 +476,66 @@ func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVol
 			taskDetails.task = task
 			taskDetails.expirationTime = time.Now().Add(time.Hour * time.Duration(
 				defaultOpsExpirationTimeInHours))
-			volumeTaskMap[volNameFromInputSpec] = &taskDetails
+			func() {
+				volumeTaskMapLock.Lock()
+				defer volumeTaskMapLock.Unlock()
+				volumeTaskMap[volNameFromInputSpec] = &taskDetails
+			}()
 		}
+	} else {
+		// Create new task object with latest vCenter Client to avoid
+		// NotAuthenticated fault for cached tasks objects.
+		task = object.NewTask(m.virtualCenter.Client.Client, task.Reference())
 	}
 
 	// Get the taskInfo.
 	taskInfo, err := cns.GetTaskInfo(ctx, task)
 	if err != nil || taskInfo == nil {
 		log.Errorf("failed to get taskInfo for CreateVolume task with err: %v", err)
-		return nil, err
+		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+		} else {
+			faultType = csifault.CSITaskInfoEmptyFault
+		}
+		return nil, faultType, err
 	}
 
 	log.Infof("CreateVolume: VolumeName: %q, opId: %q", volNameFromInputSpec, taskInfo.ActivationId)
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return nil, csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for CreateVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("failed to get task result for task %s and volume name %s with error: %v",
 			task.Reference().Value, volNameFromInputSpec, err)
-		return nil, err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return nil, faultType, err
 	}
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 		// Validate if the volume is already registered.
 		resp, err := validateCreateVolumeResponseFault(ctx, volNameFromInputSpec, volumeOperationRes)
 		if err != nil {
 			// Remove the taskInfo object associated with the volume name when the
 			// current task fails. This is needed to ensure the sub-sequent create
 			// volume call from the external provisioner invokes Create Volume.
-			taskDetailsInMap, ok := volumeTaskMap[volNameFromInputSpec]
+			_, ok := volumeTaskMap[volNameFromInputSpec]
 			if ok {
-				taskDetailsInMap.Lock()
-				log.Debugf("Deleted task for %s from volumeTaskMap because the task has failed",
-					volNameFromInputSpec)
-				delete(volumeTaskMap, volNameFromInputSpec)
-				taskDetailsInMap.Unlock()
+				func() {
+					volumeTaskMapLock.Lock()
+					defer volumeTaskMapLock.Unlock()
+					log.Debugf("Deleted task for %s from volumeTaskMap because the task has failed",
+						volNameFromInputSpec)
+					delete(volumeTaskMap, volNameFromInputSpec)
+				}()
 			}
 			log.Errorf("failed to create cns volume %s. createSpec: %q, fault: %q",
 				volNameFromInputSpec, spew.Sdump(spec), spew.Sdump(volumeOperationRes.Fault))
 		}
-		return resp, err
+		return resp, faultType, err
 	}
 
 	// Reeturn CnsVolumeInfo from the taskResult.
@@ -405,18 +544,22 @@ func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVol
 }
 
 // CreateVolume creates a new volume given its spec.
-func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo, error) {
-	internalCreateVolume := func() (*CnsVolumeInfo, error) {
+func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo,
+	string, error) {
+	internalCreateVolume := func() (*CnsVolumeInfo, string, error) {
 		log := logger.GetLogger(ctx)
+		var faultType string
 		err := validateManager(ctx, m)
 		if err != nil {
 			log.Errorf("failed to validate manager with error: %v", err)
-			return nil, err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return nil, faultType, err
 		}
 		err = setupConnection(ctx, m.virtualCenter, spec)
 		if err != nil {
 			log.Errorf("failed to setup connection to CNS with error: %v", err)
-			return nil, err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return nil, faultType, err
 		}
 		// Call CreateVolume implementation based on FSS value.
 		if m.idempotencyHandlingEnabled {
@@ -425,7 +568,9 @@ func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVol
 		return m.createVolume(ctx, spec)
 	}
 	start := time.Now()
-	resp, err := internalCreateVolume()
+	resp, faultType, err := internalCreateVolume()
+	log := logger.GetLogger(ctx)
+	log.Debugf("internalCreateVolume: returns fault %q", faultType)
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsCreateVolumeOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -434,23 +579,26 @@ func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVol
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
 
-	return resp, err
+	return resp, faultType, err
 }
 
 // AttachVolume attaches a volume to a virtual machine given the spec.
 func (m *defaultManager) AttachVolume(ctx context.Context,
-	vm *cnsvsphere.VirtualMachine, volumeID string, checkNVMeController bool) (string, error) {
-	internalAttachVolume := func() (string, error) {
+	vm *cnsvsphere.VirtualMachine, volumeID string, checkNVMeController bool) (string, string, error) {
+	internalAttachVolume := func() (string, string, error) {
 		log := logger.GetLogger(ctx)
+		var faultType string
 		err := validateManager(ctx, m)
 		if err != nil {
-			return "", err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return "", faultType, err
 		}
 		// Set up the VC connection.
 		err = m.virtualCenter.ConnectCns(ctx)
 		if err != nil {
 			log.Errorf("ConnectCns failed with err: %+v", err)
-			return "", err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return "", faultType, err
 		}
 		// Construct the CNS AttachSpec list.
 		var cnsAttachSpecList []cnstypes.CnsVolumeAttachDetachSpec
@@ -461,60 +609,68 @@ func (m *defaultManager) AttachVolume(ctx context.Context,
 			Vm: vm.Reference(),
 		}
 		cnsAttachSpecList = append(cnsAttachSpecList, cnsAttachSpec)
-		// Call the CNS AttachVolume
+		// Call the CNS AttachVolume.
 		task, err := m.virtualCenter.CnsClient.AttachVolume(ctx, cnsAttachSpecList)
 		if err != nil {
 			log.Errorf("CNS AttachVolume failed from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
-			return "", err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return "", faultType, err
 		}
-		// Get the taskInfo
+		// Get the taskInfo.
 		taskInfo, err := cns.GetTaskInfo(ctx, task)
 		if err != nil || taskInfo == nil {
 			log.Errorf("failed to get taskInfo for AttachVolume task from vCenter %q with err: %v",
 				m.virtualCenter.Config.Host, err)
-			return "", err
+			if err != nil {
+				faultType = ExtractFaultTypeFromErr(ctx, err)
+			} else {
+				faultType = csifault.CSITaskInfoEmptyFault
+			}
+			return "", faultType, err
 		}
 		log.Infof("AttachVolume: volumeID: %q, vm: %q, opId: %q", volumeID, vm.String(), taskInfo.ActivationId)
 		// Get the taskResult
 		taskResult, err := cns.GetTaskResult(ctx, taskInfo)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			log.Errorf("unable to find AttachVolume result from vCenter %q with taskID %s and attachResults %v",
 				m.virtualCenter.Config.Host, taskInfo.Task.Value, taskResult)
-			return "", err
+			return "", faultType, err
 		}
 
 		if taskResult == nil {
-			log.Errorf("taskResult is empty for AttachVolume task: %q, opId: %q",
-				taskInfo.Task.Value, taskInfo.ActivationId)
-			return "", errors.New("taskResult is empty")
+			return "", csifault.CSITaskResultEmptyFault,
+				logger.LogNewErrorf(log, "taskResult is empty for AttachVolume task: %q, opId: %q",
+					taskInfo.Task.Value, taskInfo.ActivationId)
 		}
 
 		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 		if volumeOperationRes.Fault != nil {
+			faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 			_, isResourceInUseFault := volumeOperationRes.Fault.Fault.(*vim25types.ResourceInUse)
 			if isResourceInUseFault {
 				log.Infof("observed ResourceInUse fault while attaching volume: %q with vm: %q", volumeID, vm.String())
-				// check if volume is already attached to the requested node
+				// Check if volume is already attached to the requested node.
 				diskUUID, err := IsDiskAttached(ctx, vm, volumeID, checkNVMeController)
 				if err != nil {
-					return "", err
+					return "", faultType, err
 				}
 				if diskUUID != "" {
-					return diskUUID, nil
+					return diskUUID, "", nil
 				}
 			}
-			msg := fmt.Sprintf("failed to attach cns volume: %q to node vm: %q. fault: %q. opId: %q",
+			return "", faultType, logger.LogNewErrorf(log, "failed to attach cns volume: %q to node vm: %q. fault: %q. opId: %q",
 				volumeID, vm.String(), spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
-			log.Error(msg)
-			return "", errors.New(msg)
 		}
 		diskUUID := interface{}(taskResult).(*cnstypes.CnsVolumeAttachResult).DiskUUID
 		log.Infof("AttachVolume: Volume attached successfully. volumeID: %q, opId: %q, vm: %q, diskUUID: %q",
 			volumeID, taskInfo.ActivationId, vm.String(), diskUUID)
-		return diskUUID, nil
+		return diskUUID, "", nil
 	}
 	start := time.Now()
-	resp, err := internalAttachVolume()
+	resp, faultType, err := internalAttachVolume()
+	log := logger.GetLogger(ctx)
+	log.Debugf("internalAttachVolume: returns fault %q for volume %q", faultType, volumeID)
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsAttachVolumeOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -522,22 +678,26 @@ func (m *defaultManager) AttachVolume(ctx context.Context,
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsAttachVolumeOpType,
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	return resp, err
+	return resp, faultType, err
 }
 
 // DetachVolume detaches a volume from the virtual machine given the spec.
-func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string) error {
-	internalDetachVolume := func() error {
+func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string) (string,
+	error) {
+	internalDetachVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
+		var faultType string
 		err := validateManager(ctx, m)
 		if err != nil {
-			return err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return faultType, err
 		}
 		// Set up the VC connection.
 		err = m.virtualCenter.ConnectCns(ctx)
 		if err != nil {
 			log.Errorf("ConnectCns failed with err: %+v", err)
-			return err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return faultType, err
 		}
 		// Construct the CNS DetachSpec list.
 		var cnsDetachSpecList []cnstypes.CnsVolumeAttachDetachSpec
@@ -551,13 +711,14 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 		// Call the CNS DetachVolume.
 		task, err := m.virtualCenter.CnsClient.DetachVolume(ctx, cnsDetachSpecList)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			if cnsvsphere.IsManagedObjectNotFound(err, cnsDetachSpec.Vm) {
 				// Detach failed with managed object not found, marking detach as
 				// successful, as Node VM is deleted and not present in the vCenter
 				// inventory.
 				log.Infof("Node VM: %v not found on vCenter. Marking Detach for volume:%q successful. err: %v",
 					vm, volumeID, err)
-				return nil
+				return "", nil
 			}
 			if cnsvsphere.IsNotFoundError(err) {
 				// Detach failed with NotFound error, check if the volume is already detached.
@@ -566,23 +727,27 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 				if err != nil {
 					log.Errorf("DetachVolume err: %+v. Unable to check if volume: %q is already detached from vm: %+v",
 						err, volumeID, vm)
-					return err
+					return faultType, err
 				}
 				if diskUUID == "" {
 					log.Infof("volumeID: %q not found on vm: %+v. Assuming it is already detached", volumeID, vm)
-					return nil
+					return "", nil
 				}
 			}
-			msg := fmt.Sprintf("failed to detach cns volume:%q from node vm: %+v. err: %v", volumeID, vm, err)
-			log.Error(msg)
-			return errors.New(msg)
+			return faultType, logger.LogNewErrorf(log, "failed to detach cns volume:%q from node vm: %+v. err: %v",
+				volumeID, vm, err)
 		}
 		// Get the taskInfo.
 		taskInfo, err := cns.GetTaskInfo(ctx, task)
 		if err != nil || taskInfo == nil {
 			log.Errorf("failed to get taskInfo for DetachVolume task from vCenter %q with err: %v",
 				m.virtualCenter.Config.Host, err)
-			return err
+			if err != nil {
+				faultType = ExtractFaultTypeFromErr(ctx, err)
+			} else {
+				faultType = csifault.CSITaskInfoEmptyFault
+			}
+			return faultType, err
 		}
 		log.Infof("DetachVolume: volumeID: %q, vm: %q, opId: %q", volumeID, vm.String(), taskInfo.ActivationId)
 		// Get the task results for the given task.
@@ -590,15 +755,17 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 		if err != nil {
 			log.Errorf("unable to find DetachVolume task result from vCenter %q with taskID %s and detachResults %v",
 				m.virtualCenter.Config.Host, taskInfo.Task.Value, taskResult)
-			return err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return faultType, err
 		}
 		if taskResult == nil {
-			log.Errorf("taskResult is empty for DetachVolume task: %q, opId: %q",
-				taskInfo.Task.Value, taskInfo.ActivationId)
-			return errors.New("taskResult is empty")
+			return csifault.CSITaskResultEmptyFault,
+				logger.LogNewErrorf(log, "taskResult is empty for DetachVolume task: %q, opId: %q",
+					taskInfo.Task.Value, taskInfo.ActivationId)
 		}
 		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 		if volumeOperationRes.Fault != nil {
+			faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 			_, isNotFoundFault := volumeOperationRes.Fault.Fault.(*vim25types.NotFound)
 			if isNotFoundFault {
 				// check if volume is already detached from the VM
@@ -606,25 +773,25 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 				if err != nil {
 					log.Errorf("DetachVolume fault: %+v. Unable to check if volume: %q is already detached from vm: %+v",
 						spew.Sdump(volumeOperationRes.Fault), volumeID, vm)
-					return err
+					return faultType, err
 				}
 				if diskUUID == "" {
 					log.Infof("DetachVolume: volumeID: %q not found on vm: %+v. Assuming it is already detached",
 						volumeID, vm)
-					return nil
+					return "", nil
 				}
 			}
-			msg := fmt.Sprintf("failed to detach cns volume: %q from node vm: %+v. fault: %+v, opId: %q",
+			return faultType, logger.LogNewErrorf(log, "failed to detach cns volume: %q from node vm: %+v. fault: %+v, opId: %q",
 				volumeID, vm, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
-			log.Error(msg)
-			return errors.New(msg)
 		}
 		log.Infof("DetachVolume: Volume detached successfully. volumeID: %q, vm: %q, opId: %q",
 			volumeID, taskInfo.ActivationId, vm.String())
-		return nil
+		return "", nil
 	}
 	start := time.Now()
-	err := internalDetachVolume()
+	faultType, err := internalDetachVolume()
+	log := logger.GetLogger(ctx)
+	log.Debugf("internalDetachVolume: returns fault %q for volume %q", faultType, volumeID)
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDetachVolumeOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -632,23 +799,26 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDetachVolumeOpType,
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	return err
+	return faultType, err
 }
 
 // DeleteVolume deletes a volume given its spec.
-func (m *defaultManager) DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) error {
-	internalDeleteVolume := func() error {
+func (m *defaultManager) DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) (string, error) {
+	internalDeleteVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
+		var faultType string
 		err := validateManager(ctx, m)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			log.Errorf("failed to validate manager with error: %v", err)
-			return err
+			return faultType, err
 		}
 		// Set up the VC connection.
 		err = m.virtualCenter.ConnectCns(ctx)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			log.Errorf("ConnectCns failed with err: %+v", err)
-			return err
+			return faultType, err
 		}
 		if m.idempotencyHandlingEnabled {
 			return m.deleteVolumeWithImprovedIdempotency(ctx, volumeID, deleteDisk)
@@ -656,7 +826,9 @@ func (m *defaultManager) DeleteVolume(ctx context.Context, volumeID string, dele
 		return m.deleteVolume(ctx, volumeID, deleteDisk)
 	}
 	start := time.Now()
-	err := internalDeleteVolume()
+	faultType, err := internalDeleteVolume()
+	log := logger.GetLogger(ctx)
+	log.Debugf("internalDeleteVolume: returns fault %q for volume %q", faultType, volumeID)
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteVolumeOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -664,11 +836,12 @@ func (m *defaultManager) DeleteVolume(ctx context.Context, volumeID string, dele
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteVolumeOpType,
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	return err
+	return faultType, err
 }
 
-// deleteVolume attempts to delete the volume on CNS. CNS task information is not persisted.
-func (m *defaultManager) deleteVolume(ctx context.Context, volumeID string, deleteDisk bool) error {
+// deleteVolume attempts to delete the volume on CNS. CNS task information
+// is not persisted.
+func (m *defaultManager) deleteVolume(ctx context.Context, volumeID string, deleteDisk bool) (string, error) {
 	log := logger.GetLogger(ctx)
 	// Construct the CNS VolumeId list.
 	var cnsVolumeIDList []cnstypes.CnsVolumeId
@@ -678,41 +851,57 @@ func (m *defaultManager) deleteVolume(ctx context.Context, volumeID string, dele
 	// Call the CNS DeleteVolume.
 	cnsVolumeIDList = append(cnsVolumeIDList, cnsVolumeID)
 	task, err := m.virtualCenter.CnsClient.DeleteVolume(ctx, cnsVolumeIDList, deleteDisk)
+	var faultType string
 	if err != nil {
+		faultType = ExtractFaultTypeFromErr(ctx, err)
 		if cnsvsphere.IsNotFoundError(err) {
 			log.Infof("VolumeID: %q, not found, thus returning success", volumeID)
-			return nil
+			return "", nil
 		}
 		log.Errorf("CNS DeleteVolume failed from the  vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
-		return err
+		return faultType, err
 	}
 	// Get the taskInfo.
 	taskInfo, err := cns.GetTaskInfo(ctx, task)
 	if err != nil || taskInfo == nil {
 		log.Errorf("failed to get DeleteVolume taskInfo from vCenter %q with err: %v",
 			m.virtualCenter.Config.Host, err)
-		return err
+		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+		} else {
+			faultType = csifault.CSITaskInfoEmptyFault
+		}
+		return faultType, err
 	}
 	log.Infof("DeleteVolume: volumeID: %q, opId: %q", volumeID, taskInfo.ActivationId)
 	// Get the task results for the given task.
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for DeleteVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("failed to get DeleteVolume task result with error: %v", err)
-		return err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return faultType, err
 	}
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
-		return logger.LogNewErrorf(log, "failed to delete volume: %q, fault: %q, opID: %q",
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
+		return faultType, logger.LogNewErrorf(log, "failed to delete volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 	}
 	log.Infof("DeleteVolume: Volume deleted successfully. volumeID: %q, opId: %q",
 		volumeID, taskInfo.ActivationId)
-	return nil
+	return "", nil
 }
 
-// deleteVolumeWithImprovedIdempotency attempts to delete the volume on CNS. CNS task information is persisted
-// by leveraging the VolumeOperationRequest interface.
-func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context, volumeID string, deleteDisk bool) error {
+// deleteVolumeWithImprovedIdempotency attempts to delete the volume on CNS.
+// CNS task information is persisted by leveraging the VolumeOperationRequest
+// interface.
+func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context,
+	volumeID string, deleteDisk bool) (string, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Reference to the DeleteVolume task on CNS.
@@ -723,21 +912,20 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 		// be persisted.
 		volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails
 	)
+	var faultType string
 	if m.operationStore == nil {
-		return logger.LogNewError(log, "operation store cannot be nil")
+		return csifault.CSIInternalFault, logger.LogNewError(log, "operation store cannot be nil")
 	}
 	// Determine if CNS needs to be invoked.
 	volumeOperationDetails, err := m.operationStore.GetRequestDetails(ctx, instanceName)
 	switch {
 	case err == nil:
 		if volumeOperationDetails.OperationDetails != nil {
-			// Validate if previous attempt was
-			// successful.
+			// Validate if previous attempt was successful.
 			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusSuccess {
-				return nil
+				return "", nil
 			}
-			// Validate if previous operation is
-			// pending.
+			// Validate if previous operation is pending.
 			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
 				volumeOperationDetails.OperationDetails.TaskID != "" {
 				taskMoRef := vim25types.ManagedObjectReference{
@@ -751,12 +939,13 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, metav1.Now(),
 			"", "", taskInvocationStatusInProgress, "")
 	default:
-		return err
+		return csifault.CSIInternalFault, err
 	}
 
 	defer func() {
-		// Persist the operation details before returning. Only success or error needs to be stored as
-		// InProgress details are stored when the task is created on CNS.
+		// Persist the operation details before returning. Only success or error
+		// needs to be stored as InProgress details are stored when the task is
+		// created on CNS.
 		if volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
 			volumeOperationDetails.OperationDetails.TaskStatus != taskInvocationStatusInProgress {
 			err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails)
@@ -768,7 +957,8 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 
 	if task == nil {
 		// The task object is nil in two cases:
-		// - No previous CreateVolume task for this volume was retrieved from the persistent store.
+		// - No previous CreateVolume task for this volume was retrieved from the
+		//   persistent store.
 		// - The previous CreateVolume task failed.
 		// In both cases, invoke CNS CreateVolume again.
 		var cnsVolumeIDList []cnstypes.CnsVolumeId
@@ -779,16 +969,17 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 		cnsVolumeIDList = append(cnsVolumeIDList, cnsVolumeID)
 		task, err = m.virtualCenter.CnsClient.DeleteVolume(ctx, cnsVolumeIDList, deleteDisk)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			if cnsvsphere.IsNotFoundError(err) {
 				log.Infof("VolumeID: %q, not found, thus returning success", volumeID)
 				volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
 					metav1.Now(), "", "", taskInvocationStatusSuccess, "")
-				return nil
+				return "", nil
 			}
 			log.Errorf("CNS DeleteVolume failed from the  vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
 			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
 				metav1.Now(), "", "", taskInvocationStatusError, err.Error())
-			return err
+			return faultType, err
 		}
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, metav1.Now(),
 			task.Reference().Value, "", taskInvocationStatusInProgress, "")
@@ -801,34 +992,47 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 	// Get the taskInfo.
 	taskInfo, err := cns.GetTaskInfo(ctx, task)
 	if err != nil || taskInfo == nil {
-		log.Errorf("failed to get taskInfo for DeleteVolume task from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
-		return err
+		log.Errorf("failed to get taskInfo for DeleteVolume task from vCenter %q with err: %v",
+			m.virtualCenter.Config.Host, err)
+		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+		} else {
+			faultType = csifault.CSITaskInfoEmptyFault
+		}
+		return faultType, err
 	}
 
 	log.Infof("DeleteVolume: volumeID: %q, opId: %q", volumeID, taskInfo.ActivationId)
 	// Get the task results for the given task.
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for DeleteVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("unable to find DeleteVolume task result from vCenter %q with taskID %s and deleteResults %v",
 			m.virtualCenter.Config.Host, taskInfo.Task.Value, taskResult)
-		return err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return faultType, err
 	}
 
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 		msg := fmt.Sprintf("failed to delete volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
 			task.Reference().Value, taskInfo.ActivationId, taskInvocationStatusError, msg)
-		return logger.LogNewError(log, msg)
+		return faultType, logger.LogNewError(log, msg)
 	}
 	log.Infof("DeleteVolume: Volume deleted successfully. volumeID: %q, opId: %q",
 		volumeID, taskInfo.ActivationId)
 	volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
 		volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
 		taskInfo.ActivationId, taskInvocationStatusSuccess, "")
-	return nil
+	return "", nil
 }
 
 // UpdateVolume updates a volume given its spec.
@@ -885,16 +1089,13 @@ func (m *defaultManager) UpdateVolumeMetadata(ctx context.Context, spec *cnstype
 			return err
 		}
 		if taskResult == nil {
-			log.Errorf("taskResult is empty for UpdateVolume task: %q, opId: %q",
+			return logger.LogNewErrorf(log, "taskResult is empty for UpdateVolume task: %q, opId: %q",
 				taskInfo.Task.Value, taskInfo.ActivationId)
-			return errors.New("taskResult is empty")
 		}
 		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 		if volumeOperationRes.Fault != nil {
-			msg := fmt.Sprintf("failed to update volume. updateSpec: %q, fault: %q, opID: %q",
+			return logger.LogNewErrorf(log, "failed to update volume. updateSpec: %q, fault: %q, opID: %q",
 				spew.Sdump(spec), spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
-			log.Error(msg)
-			return errors.New(msg)
 		}
 		log.Infof("UpdateVolumeMetadata: Volume metadata updated successfully. volumeID: %q, opId: %q",
 			spec.VolumeId.Id, taskInfo.ActivationId)
@@ -913,19 +1114,22 @@ func (m *defaultManager) UpdateVolumeMetadata(ctx context.Context, spec *cnstype
 }
 
 // ExpandVolume expands a volume given its spec.
-func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size int64) error {
-	internalExpandVolume := func() error {
+func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size int64) (string, error) {
+	internalExpandVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
+		var faultType string
 		err := validateManager(ctx, m)
 		if err != nil {
 			log.Errorf("validateManager failed with err: %+v", err)
-			return err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return faultType, err
 		}
 		// Set up the VC connection.
 		err = m.virtualCenter.ConnectCns(ctx)
 		if err != nil {
 			log.Errorf("ConnectCns failed with err: %+v", err)
-			return err
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+			return faultType, err
 		}
 		if m.idempotencyHandlingEnabled {
 			return m.expandVolumeWithImprovedIdempotency(ctx, volumeID, size)
@@ -934,7 +1138,9 @@ func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size
 
 	}
 	start := time.Now()
-	err := internalExpandVolume()
+	faultType, err := internalExpandVolume()
+	log := logger.GetLogger(ctx)
+	log.Debugf("internalExpandVolume: returns fault %q for volume %q", faultType, volumeID)
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsExpandVolumeOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -942,11 +1148,11 @@ func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsExpandVolumeOpType,
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	return err
+	return faultType, err
 }
 
-// createVolumeWithoutIdempotency invokes CNS ExpandVolume.
-func (m *defaultManager) expandVolume(ctx context.Context, volumeID string, size int64) error {
+// expandVolume invokes CNS ExpandVolume.
+func (m *defaultManager) expandVolume(ctx context.Context, volumeID string, size int64) (string, error) {
 	log := logger.GetLogger(ctx)
 	// Construct the CNS ExtendSpec list.
 	var cnsExtendSpecList []cnstypes.CnsVolumeExtendSpec
@@ -960,45 +1166,58 @@ func (m *defaultManager) expandVolume(ctx context.Context, volumeID string, size
 	// Call the CNS ExtendVolume.
 	log.Infof("Calling CnsClient.ExtendVolume: VolumeID [%q] Size [%d] cnsExtendSpecList [%#v]",
 		volumeID, size, cnsExtendSpecList)
+	var faultType string
 	task, err := m.virtualCenter.CnsClient.ExtendVolume(ctx, cnsExtendSpecList)
 	if err != nil {
+		faultType = ExtractFaultTypeFromErr(ctx, err)
 		if cnsvsphere.IsNotFoundError(err) {
-			return logger.LogNewErrorf(log, "volume %q not found. Cannot expand volume.", volumeID)
+			return faultType, logger.LogNewErrorf(log, "volume %q not found. Cannot expand volume.", volumeID)
 		}
 		log.Errorf("CNS ExtendVolume failed from the vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
-		return err
+		return faultType, err
 	}
 	// Get the taskInfo.
 	taskInfo, err := cns.GetTaskInfo(ctx, task)
 	if err != nil || taskInfo == nil {
 		log.Errorf("failed to get taskInfo for ExtendVolume task from vCenter %q with err: %v",
 			m.virtualCenter.Config.Host, err)
-		return err
+		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
+		} else {
+			faultType = csifault.CSITaskInfoEmptyFault
+		}
+		return faultType, err
 	}
 	log.Infof("ExpandVolume: volumeID: %q, opId: %q", volumeID, taskInfo.ActivationId)
 	// Get the task results for the given task.
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for ExpandVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("failed to get task result for ExtendVolume task %s with error: %v",
 			task.Reference().Value, err)
-		return err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return faultType, err
 	}
-	if taskResult == nil {
-		return logger.LogNewErrorf(log, "TaskResult is empty for ExtendVolume task: %q, opID: %q",
-			taskInfo.Task.Value, taskInfo.ActivationId)
-	}
+
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
-		return logger.LogNewErrorf(log, "failed to extend volume: %q, fault: %q, opID: %q",
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
+		return faultType, logger.LogNewErrorf(log, "failed to extend volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 	}
 	log.Infof("ExpandVolume: Volume expanded successfully. volumeID: %q, opId: %q", volumeID, taskInfo.ActivationId)
-	return nil
+	return "", nil
 }
 
-// expandVolumeWithImprovedIdempotency leverages the VolumeOperationRequest interface to persist CNS task information.
-// It uses this persisted information to handle idempotency of ExpandVolume callbacks to CNS for the same volume.
-func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context, volumeID string, size int64) error {
+// expandVolumeWithImprovedIdempotency leverages the VolumeOperationRequest
+// interface to persist CNS task information. It uses this persisted information
+// to handle idempotency of ExpandVolume callbacks to CNS for the same volume.
+func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context, volumeID string,
+	size int64) (string, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Reference to the ExtendVolume task.
@@ -1009,9 +1228,9 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 		instanceName = "expand-" + volumeID
 		err          error
 	)
-
+	var faultType string
 	if m.operationStore == nil {
-		return logger.LogNewError(log, "operation store cannot be nil")
+		return csifault.CSIInternalFault, logger.LogNewError(log, "operation store cannot be nil")
 	}
 
 	volumeOperationDetails, err = m.operationStore.GetRequestDetails(ctx, instanceName)
@@ -1021,7 +1240,7 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusSuccess &&
 				volumeOperationDetails.Capacity >= size {
 				log.Infof("Volume with ID %s already expanded to size %s", volumeID, size)
-				return nil
+				return "", nil
 			}
 			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
 				volumeOperationDetails.OperationDetails.TaskID != "" {
@@ -1038,7 +1257,7 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 	case apierrors.IsNotFound(err):
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", size, metav1.Now(), "", "", "", "")
 	default:
-		return err
+		return csifault.CSIInternalFault, err
 	}
 	defer func() {
 		// Persist the operation details before returning.
@@ -1053,7 +1272,8 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 
 	if task == nil {
 		// The task object is nil in two cases:
-		// - No previous ExtendVolume task for this volume was retrieved from the persistent store.
+		// - No previous ExtendVolume task for this volume was retrieved from the
+		//   persistent store.
 		// - The previous ExtendVolume task failed.
 		// In both cases, invoke CNS ExtendVolume.
 		var cnsExtendSpecList []cnstypes.CnsVolumeExtendSpec
@@ -1069,14 +1289,15 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 			volumeID, size, cnsExtendSpecList)
 		task, err = m.virtualCenter.CnsClient.ExtendVolume(ctx, cnsExtendSpecList)
 		if err != nil {
+			faultType = ExtractFaultTypeFromErr(ctx, err)
 			if cnsvsphere.IsNotFoundError(err) {
-				return logger.LogNewErrorf(log, "volume %q not found. Cannot expand volume.", volumeID)
+				return faultType, logger.LogNewErrorf(log, "volume %q not found. Cannot expand volume.", volumeID)
 			}
 			log.Errorf("CNS ExtendVolume failed from the vCenter %q with err: %v",
 				m.virtualCenter.Config.Host, err)
 			volumeOperationDetails = createRequestDetails(instanceName, "", "", size, metav1.Now(),
 				"", "", taskInvocationStatusError, err.Error())
-			return err
+			return faultType, err
 		}
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", size, metav1.Now(),
 			task.Reference().Value, "", taskInvocationStatusInProgress, "")
@@ -1086,28 +1307,68 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 		}
 	}
 
-	// Get the taskInfo.
-	taskInfo, err := cns.GetTaskInfo(ctx, task)
-	if err != nil || taskInfo == nil {
-		log.Errorf("failed to get taskInfo for ExtendVolume task from vCenter %q with err: %v",
-			m.virtualCenter.Config.Host, err)
-		return err
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		if cnsvsphere.IsManagedObjectNotFound(err, task.Reference()) {
+			log.Debugf("ExtendVolume task %s not found in vCenter. Querying CNS "+
+				"to determine if volume with ID %s was successfully expanded.",
+				task.Reference().Value, volumeID)
+			if validateVolumeCapacity(ctx, m, volumeID, size) {
+				log.Infof("ExpandVolume: Volume expanded successfully to size %d. volumeID: %q, task: %q",
+					volumeOperationDetails.Capacity, volumeID, task.Reference().Value)
+				volumeOperationDetails = createRequestDetails(instanceName, "", "", volumeOperationDetails.Capacity,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+					volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusSuccess, "")
+				return "", nil
+			}
+		}
+		// WaitForResult can fail for many reasons, including:
+		// - CNS restarted and marked "InProgress" tasks as "Failed".
+		// - Any other CNS failures.
+		// - Any other failures at lower layers like FCD and SPS.
+		// In all cases, mark task as failed and retry.
+		log.Errorf("failed to expand volume with ID %s with error %+v", volumeID, err)
+		volumeOperationDetails = createRequestDetails(instanceName, "", "", volumeOperationDetails.Capacity,
+			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+			volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusError, err.Error())
+		return ExtractFaultTypeFromErr(ctx, err), err
 	}
+
 	log.Infof("ExpandVolume: volumeID: %q, opId: %q", volumeID, taskInfo.ActivationId)
 	// Get the task results for the given task.
 	taskResult, err := getTaskResultFromTaskInfo(ctx, taskInfo)
+	if taskResult == nil {
+		return csifault.CSITaskResultEmptyFault,
+			logger.LogNewErrorf(log, "taskResult is empty for ExpandVolume task: %q, opID: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+	}
 	if err != nil {
 		log.Errorf("failed to get task result for task %s and volume ID %s with error: %v",
 			task.Reference().Value, volumeID, err)
-		return err
+		faultType = ExtractFaultTypeFromErr(ctx, err)
+		return faultType, err
 	}
 
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
+		if _, ok := volumeOperationRes.Fault.Fault.(cnstypes.CnsFault); ok {
+			log.Debugf("ExtendVolume task %s returned with CnsFault. Querying CNS to "+
+				"determine if volume with ID %s was successfully expanded.",
+				task.Reference().Value, volumeID)
+			if validateVolumeCapacity(ctx, m, volumeID, size) {
+				log.Infof("ExpandVolume: Volume expanded successfully to size %d. volumeID: %q, task: %q",
+					volumeOperationDetails.Capacity, volumeID, task.Reference().Value)
+				volumeOperationDetails = createRequestDetails(instanceName, "", "", volumeOperationDetails.Capacity,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
+					volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusSuccess, "")
+				return "", nil
+			}
+		}
+		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", volumeOperationDetails.Capacity,
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
-			taskInfo.ActivationId, taskInvocationStatusError, err.Error())
-		return logger.LogNewErrorf(log, "failed to extend volume: %q, fault: %q, opID: %q",
+			taskInfo.ActivationId, taskInvocationStatusError, volumeOperationRes.Fault.LocalizedMessage)
+		return faultType, logger.LogNewErrorf(log, "failed to extend volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 	}
 
@@ -1117,11 +1378,11 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 		volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, task.Reference().Value,
 		taskInfo.ActivationId, taskInvocationStatusSuccess, "")
 	if volumeOperationDetails.Capacity >= size {
-		return nil
+		return "", nil
 	}
 	// Return an error if the new size is less than the requested size.
 	// The volume will be expanded again on a retry.
-	return logger.LogNewErrorf(log, "volume expanded to size %d but requested size is %d",
+	return csifault.CSIInternalFault, logger.LogNewErrorf(log, "volume expanded to size %d but requested size is %d",
 		volumeOperationDetails.Capacity, size)
 }
 
@@ -1236,16 +1497,13 @@ func (m *defaultManager) QueryVolumeInfo(ctx context.Context,
 			return nil, err
 		}
 		if taskResult == nil {
-			log.Errorf("taskResult is empty for DeleteVolume task: %q, opID: %q",
+			return nil, logger.LogNewErrorf(log, "taskResult is empty for DeleteVolume task: %q, opID: %q",
 				taskInfo.Task.Value, taskInfo.ActivationId)
-			return nil, errors.New("taskResult is empty")
 		}
 		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 		if volumeOperationRes.Fault != nil {
-			msg := fmt.Sprintf("failed to Query volumes: %v, fault: %q, opID: %q",
+			return nil, logger.LogNewErrorf(log, "failed to Query volumes: %v, fault: %q, opID: %q",
 				volumeIDList, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
-			log.Error(msg)
-			return nil, errors.New(msg)
 		}
 		volumeInfoResult := interface{}(taskResult).(*cnstypes.CnsQueryVolumeInfoResult)
 		log.Infof("QueryVolumeInfo successfully returned volumeInfo volumeIDList %v:, opId: %q",
@@ -1339,16 +1597,15 @@ func (m *defaultManager) ConfigureVolumeACLs(ctx context.Context, spec cnstypes.
 		}
 
 		if taskResult == nil {
-			log.Errorf("taskResult is empty for ConfigureVolumeACLs task: %q. ConfigureVolumeACLsSpec: %q",
+			return logger.LogNewErrorf(log,
+				"taskResult is empty for ConfigureVolumeACLs task: %q. ConfigureVolumeACLsSpec: %q",
 				taskInfo.ActivationId, spew.Sdump(spec))
-			return errors.New("taskResult is empty")
 		}
 		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 		if volumeOperationRes.Fault != nil {
-			msg := fmt.Sprintf("failed to apply ConfigureVolumeACLs. VolumeID: %s spec: %q, fault: %q, opId: %q",
+			return logger.LogNewErrorf(log,
+				"failed to apply ConfigureVolumeACLs. VolumeID: %s spec: %q, fault: %q, opId: %q",
 				spec.VolumeId.Id, spew.Sdump(spec), spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
-			log.Error(msg)
-			return errors.New(msg)
 		}
 
 		log.Infof("ConfigureVolumeACLs: Volume ACLs configured successfully. VolumeName: %q, opId: %q, volumeID: %q",
@@ -1433,7 +1690,7 @@ func (m *defaultManager) RetrieveVStorageObject(ctx context.Context,
 // fields would be returned as part of the CnsQueryResult if the querySelection
 // parameters are not specified.
 func (m *defaultManager) QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter,
-	querySelection cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error) {
+	querySelection *cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error) {
 	log := logger.GetLogger(ctx)
 	err := validateManager(ctx, m)
 	if err != nil {
@@ -1448,10 +1705,9 @@ func (m *defaultManager) QueryVolumeAsync(ctx context.Context, queryFilter cnsty
 	}
 	isvSphere70U3orAbove, err := cnsvsphere.IsvSphereVersion70U3orAbove(ctx, m.virtualCenter.Client.ServiceContent.About)
 	if err != nil {
-		msg := fmt.Sprintf("Error while checking the vSphere Version %q to invoke QueryVolumeAsync, Err= %+v",
+		return nil, logger.LogNewErrorf(log,
+			"Error while checking the vSphere Version %q to invoke QueryVolumeAsync, Err= %+v",
 			m.virtualCenter.Client.ServiceContent.About.Version, err)
-		log.Errorf(msg)
-		return nil, errors.New(msg)
 	}
 	if !isvSphere70U3orAbove {
 		msg := fmt.Sprintf("QueryVolumeAsync is not supported in vSphere Version %q",
@@ -1477,19 +1733,449 @@ func (m *defaultManager) QueryVolumeAsync(ctx context.Context, queryFilter cnsty
 		return nil, err
 	}
 	if queryVolumeAsyncTaskResult == nil {
-		log.Errorf("TaskResult is empty for QueryVolumeAsync task: %q, opID: %q",
+		return nil, logger.LogNewErrorf(log, "taskResult is empty for QueryVolumeAsync task: %q, opID: %q",
 			queryVolumeAsyncTaskInfo.Task.Value, queryVolumeAsyncTaskInfo.ActivationId)
-		return nil, errors.New("taskResult is empty")
 	}
 	volumeOperationRes := queryVolumeAsyncTaskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
-		msg := fmt.Sprintf("failed to query volumes using CnsQueryVolumeAsync, fault: %q, opID: %q",
+		return nil, logger.LogNewErrorf(log,
+			"failed to query volumes using CnsQueryVolumeAsync, fault: %q, opID: %q",
 			spew.Sdump(volumeOperationRes.Fault), queryVolumeAsyncTaskInfo.ActivationId)
-		log.Error(msg)
-		return nil, errors.New(msg)
 	}
 	queryVolumeAsyncResult := interface{}(queryVolumeAsyncTaskResult).(*cnstypes.CnsAsyncQueryResult)
 	log.Infof("QueryVolumeAsync successfully returned CnsQueryResult, opId: %q", queryVolumeAsyncTaskInfo.ActivationId)
 	log.Debugf("QueryVolumeAsync returned CnsQueryResult: %+v", spew.Sdump(queryVolumeAsyncResult.QueryResult))
 	return &queryVolumeAsyncResult.QueryResult, nil
+}
+
+func (m *defaultManager) QuerySnapshots(ctx context.Context, snapshotQueryFilter cnstypes.CnsSnapshotQueryFilter) (
+	*cnstypes.CnsSnapshotQueryResult, error) {
+	internalQuerySnapshots := func() (*cnstypes.CnsSnapshotQueryResult, error) {
+		log := logger.GetLogger(ctx)
+		err := validateManager(ctx, m)
+		if err != nil {
+			return nil, err
+		}
+		// Set up the VC connection.
+		err = m.virtualCenter.ConnectCns(ctx)
+		if err != nil {
+			log.Errorf("ConnectCns failed with err: %+v", err)
+			return nil, err
+		}
+		// Call the CNS QuerySnapshots.
+		querySnapshotsTask, err := m.virtualCenter.CnsClient.QuerySnapshots(ctx, snapshotQueryFilter)
+		if err != nil {
+			log.Errorf("Failed to get the task of CNS QuerySnapshots with err: %v", err)
+			return nil, err
+		}
+		querySnapshotsTaskInfo, err := cns.GetTaskInfo(ctx, querySnapshotsTask)
+		if err != nil {
+			log.Errorf("failed to get taskInfo for QuerySnapshots task from vCenter %q with err: %v",
+				m.virtualCenter.Config.Host, err)
+			return nil, err
+		}
+		res, err := cns.GetQuerySnapshotsTaskResult(ctx, querySnapshotsTaskInfo)
+		if err != nil {
+			log.Errorf("failed to get task result for QuerySnapshots task %s with error: %v",
+				querySnapshotsTask.Reference().Value, err)
+			return nil, err
+		}
+		return res, err
+	}
+	start := time.Now()
+	resp, err := internalQuerySnapshots()
+	if err != nil {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusQuerySnapshotsOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusQuerySnapshotsOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return resp, err
+}
+
+// Helper function for create snapshot with different behaviors in the idempotency handling
+// depends on whether the improved idempotency FSS is enabled.
+func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.Context, volumeID string,
+	snapshotName string) (*CnsSnapshotInfo, error) {
+	log := logger.GetLogger(ctx)
+	var (
+		// Reference to the CreateSnapshot task on CNS.
+		createSnapshotsTask *object.Task
+		// Name of the CnsVolumeOperationRequest instance.
+		instanceName = snapshotName + "-" + volumeID
+		// Local instance of CreateSnapshot details that needs to be persisted.
+		volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails
+		// error
+		err error
+	)
+
+	if m.idempotencyHandlingEnabled {
+		if m.operationStore == nil {
+			return nil, logger.LogNewError(log, "operation store cannot be nil")
+		}
+
+		volumeOperationDetails, err = m.operationStore.GetRequestDetails(ctx, instanceName)
+		switch {
+		case err == nil:
+			// Validate if previous operation was successful.
+			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusSuccess &&
+				volumeOperationDetails.VolumeID != "" && volumeOperationDetails.SnapshotID != "" {
+				log.Infof("Snapshot with name %q and id %q on Volume %q is already created on CNS with opId: %q.",
+					instanceName, volumeOperationDetails.SnapshotID, volumeOperationDetails.VolumeID,
+					volumeOperationDetails.OperationDetails.OpID)
+
+				return &CnsSnapshotInfo{
+					SnapshotID:                volumeOperationDetails.SnapshotID,
+					SourceVolumeID:            volumeOperationDetails.VolumeID,
+					SnapshotDescription:       volumeOperationDetails.Name,
+					SnapshotCreationTimestamp: volumeOperationDetails.OperationDetails.TaskInvocationTimestamp.Time,
+				}, nil
+			}
+			// Validate if previous operation is pending.
+			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
+				volumeOperationDetails.OperationDetails.TaskID != "" {
+				log.Infof("Snapshot with name %s has CreateSnapshot task %s pending on CNS.",
+					instanceName,
+					volumeOperationDetails.OperationDetails.TaskID)
+				taskMoRef := vim25types.ManagedObjectReference{
+					Type:  "Task",
+					Value: volumeOperationDetails.OperationDetails.TaskID,
+				}
+				createSnapshotsTask = object.NewTask(m.virtualCenter.Client.Client, taskMoRef)
+			}
+		case apierrors.IsNotFound(err):
+			// Instance doesn't exist. This is likely the first attempt to create the snapshot.
+			volumeOperationDetails = createRequestDetails(
+				instanceName, volumeID, "", 0, metav1.Now(), "", "",
+				taskInvocationStatusInProgress, "")
+		default:
+			return nil, err
+		}
+	} else {
+		// get snapshot task details from an in-memory map
+		createSnapshotsTask = getPendingCreateSnapshotTaskFromMap(ctx, instanceName)
+	}
+
+	defer func() {
+		// Persist the operation details before returning if the improved idempotency is enabled. Only success or error
+		// needs to be stored as InProgress details are stored when the task is created on CNS.
+		if m.idempotencyHandlingEnabled &&
+			volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
+			volumeOperationDetails.OperationDetails.TaskStatus != taskInvocationStatusInProgress {
+			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
+				log.Warnf("failed to store CreateSnapshot details with error: %v", err)
+			}
+		}
+	}()
+
+	if createSnapshotsTask == nil {
+		createSnapshotsTask, err = invokeCNSCreateSnapshot(ctx, m.virtualCenter, volumeID, instanceName)
+		if err != nil {
+			if m.idempotencyHandlingEnabled {
+				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, "", "",
+					taskInvocationStatusError, err.Error())
+			}
+			return nil, logger.LogNewErrorf(log, "failed to create snapshot with error: %v", err)
+		}
+
+		if m.idempotencyHandlingEnabled {
+			// Persist the volume operation details.
+			volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0,
+				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
+				createSnapshotsTask.Reference().Value, "", taskInvocationStatusInProgress, "")
+			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
+				// Don't return if CreateSnapshot details can't be stored.
+				log.Warnf("failed to store CreateSnapshot details with error: %v", err)
+			}
+		} else {
+			// store task details into snapshotTaskMap
+			var taskDetails createSnapshotTaskDetails
+			taskDetails.task = createSnapshotsTask
+			taskDetails.expirationTime = time.Now().Add(time.Hour * time.Duration(
+				defaultOpsExpirationTimeInHours))
+			func() {
+				// put the snapshotTaskMap update operation with locking into an anonymous func
+				// to ensure the deferred unlock is called right after the update.
+				snapshotTaskMapLock.Lock()
+				defer snapshotTaskMapLock.Unlock()
+				snapshotTaskMap[instanceName] = &taskDetails
+			}()
+
+		}
+	}
+
+	// Get the taskInfo and more!
+	createSnapshotsTaskInfo, err := cns.GetTaskInfo(ctx, createSnapshotsTask)
+	if err != nil || createSnapshotsTaskInfo == nil {
+		return nil, logger.LogNewErrorf(log, "Failed to get taskInfo for CreateSnapshots task "+
+			"from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
+	}
+	log.Infof("CreateSnapshots: VolumeID: %q, opId: %q", volumeID, createSnapshotsTaskInfo.ActivationId)
+
+	// Get the taskResult
+	createSnapshotsTaskResult, err := cns.GetTaskResult(ctx, createSnapshotsTaskInfo)
+	if err != nil || createSnapshotsTaskResult == nil {
+		return nil, logger.LogNewErrorf(log, "unable to find the task result for CreateSnapshots task "+
+			"from vCenter %q. taskID: %q, opId: %q createResults: %+v",
+			m.virtualCenter.Config.Host, createSnapshotsTaskInfo.Task.Value, createSnapshotsTaskInfo.ActivationId,
+			createSnapshotsTaskResult)
+	}
+
+	// Handle snapshot operation result
+	createSnapshotsOperationRes := createSnapshotsTaskResult.GetCnsVolumeOperationResult()
+	if createSnapshotsOperationRes.Fault != nil {
+		errMsg := fmt.Sprintf("failed to create snapshot %q on volume %q with fault: %q, opID: %q",
+			instanceName, volumeID, spew.Sdump(createSnapshotsOperationRes.Fault),
+			createSnapshotsTaskInfo.ActivationId)
+
+		if m.idempotencyHandlingEnabled {
+			volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0,
+				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
+				createSnapshotsTaskInfo.ActivationId, taskInvocationStatusError, errMsg)
+		} else {
+			// Remove the task details from map when the current task fails
+			_, ok := snapshotTaskMap[instanceName]
+			if ok {
+				func() {
+					// put the snapshotTaskMap update operation with locking into an anonymous func
+					// to ensure the deferred unlock is called right after the update.
+					snapshotTaskMapLock.Lock()
+					defer snapshotTaskMapLock.Unlock()
+					log.Debugf("Deleted task for %s from snapshotTaskMap because the task has failed",
+						instanceName)
+					delete(snapshotTaskMap, instanceName)
+				}()
+			}
+		}
+
+		return nil, logger.LogNewError(log, errMsg)
+	}
+
+	snapshotCreateResult := interface{}(createSnapshotsTaskResult).(*cnstypes.CnsSnapshotCreateResult)
+
+	cnsSnapshotInfo := &CnsSnapshotInfo{
+		SnapshotID:                snapshotCreateResult.Snapshot.SnapshotId.Id,
+		SourceVolumeID:            snapshotCreateResult.Snapshot.VolumeId.Id,
+		SnapshotDescription:       snapshotCreateResult.Snapshot.Description,
+		SnapshotCreationTimestamp: snapshotCreateResult.Snapshot.CreateTime,
+	}
+
+	if m.idempotencyHandlingEnabled {
+		// create the volumeOperationDetails object for persistence
+		volumeOperationDetails = createRequestDetails(
+			instanceName, cnsSnapshotInfo.SourceVolumeID, cnsSnapshotInfo.SnapshotID, 0,
+			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
+			createSnapshotsTaskInfo.ActivationId, taskInvocationStatusSuccess, "")
+	}
+
+	log.Infof("CreateSnapshot: Snapshot created successfully. VolumeID: %q, SnapshotID: %q, "+
+		"SnapshotCreateTime: %q, opId: %q", cnsSnapshotInfo.SourceVolumeID, cnsSnapshotInfo.SnapshotID,
+		cnsSnapshotInfo.SnapshotCreationTimestamp, createSnapshotsTaskInfo.ActivationId)
+
+	return cnsSnapshotInfo, nil
+}
+
+// The snapshotName parameter denotes the snapshot description required by CNS CreateSnapshot API.
+// This parameter is expected to be filled with the CSI CreateSnapshotRequest Name,
+// which is generated by the CSI snapshotter sidecar.
+func (m *defaultManager) CreateSnapshot(
+	ctx context.Context, volumeID string, snapshotName string) (*CnsSnapshotInfo, error) {
+	internalCreateSnapshot := func() (*CnsSnapshotInfo, error) {
+		log := logger.GetLogger(ctx)
+		err := validateManager(ctx, m)
+		if err != nil {
+			return nil, err
+		}
+		// Set up the VC connection
+		err = m.virtualCenter.ConnectCns(ctx)
+		if err != nil {
+			return nil, logger.LogNewErrorf(log, "ConnectCns failed with err: %+v", err)
+		}
+
+		return m.createSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotName)
+	}
+
+	start := time.Now()
+	cnsSnapshotInfo, err := internalCreateSnapshot()
+	if err != nil {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsCreateSnapshotOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsCreateSnapshotOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return cnsSnapshotInfo, err
+}
+
+// Helper function for create snapshot with different behaviors in the idempotency handling
+// depends on whether the improved idempotency FSS is enabled.
+func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
+	ctx context.Context, volumeID string, snapshotID string) error {
+	log := logger.GetLogger(ctx)
+	var (
+		// Reference to the DeleteVolume task on CNS.
+		deleteSnapshotTask *object.Task
+		// Name of the CnsVolumeOperationRequest instance.
+		instanceName = "deletesnapshot-" + volumeID + "-" + snapshotID
+		// Local instance of DeleteSnapshot details that needs to be persisted.
+		volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails
+		// error
+		err error
+	)
+
+	if m.idempotencyHandlingEnabled {
+		if m.operationStore == nil {
+			return logger.LogNewError(log, "operation store cannot be nil")
+		}
+
+		volumeOperationDetails, err = m.operationStore.GetRequestDetails(ctx, instanceName)
+		switch {
+		case err == nil:
+			if volumeOperationDetails.OperationDetails != nil {
+				// Validate if previous attempt was successful.
+				if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusSuccess {
+					log.Infof("Snapshot id %q on Volume %q is already deleted on CNS with opId: %q.",
+						snapshotID, volumeID, volumeOperationDetails.OperationDetails.OpID)
+					return nil
+				}
+				// Validate if previous operation is pending.
+				if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
+					volumeOperationDetails.OperationDetails.TaskID != "" {
+					taskMoRef := vim25types.ManagedObjectReference{
+						Type:  "Task",
+						Value: volumeOperationDetails.OperationDetails.TaskID,
+					}
+					deleteSnapshotTask = object.NewTask(m.virtualCenter.Client.Client, taskMoRef)
+				}
+			}
+		case apierrors.IsNotFound(err):
+			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, metav1.Now(),
+				"", "", taskInvocationStatusInProgress, "")
+		default:
+			return err
+		}
+	}
+
+	defer func() {
+		// Persist the operation details before returning. Only success or error
+		// needs to be stored as InProgress details are stored when the task is
+		// created on CNS.
+		if m.idempotencyHandlingEnabled &&
+			volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
+			volumeOperationDetails.OperationDetails.TaskStatus != taskInvocationStatusInProgress {
+			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
+				log.Warnf("failed to store DeleteSnapshot operation details with error: %v", err)
+			}
+		}
+	}()
+
+	if deleteSnapshotTask == nil {
+		deleteSnapshotTask, err = invokeCNSDeleteSnapshot(ctx, m.virtualCenter, volumeID, snapshotID)
+		if err != nil {
+			if cnsvsphere.IsNotFoundError(err) {
+				log.Infof("SnapshotID: %q on volume with volumeID: %q, not found, thus returning success",
+					snapshotID, volumeID)
+				if m.idempotencyHandlingEnabled {
+					volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
+						metav1.Now(), "", "", taskInvocationStatusSuccess, "")
+				}
+				return nil
+			}
+
+			if m.idempotencyHandlingEnabled {
+				volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
+					metav1.Now(), "", "", taskInvocationStatusError, err.Error())
+			}
+
+			return logger.LogNewErrorf(log, "CNS DeleteSnapshot failed from the vCenter %q with err: %v",
+				m.virtualCenter.Config.Host, err)
+		}
+
+		if m.idempotencyHandlingEnabled {
+			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
+				metav1.Now(), deleteSnapshotTask.Reference().Value, "", taskInvocationStatusInProgress, "")
+			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
+				log.Warnf("failed to store DeleteSnapshot operation details with error: %v", err)
+			}
+		}
+	}
+
+	// Get the taskInfo
+	deleteSnapshotsTaskInfo, err := cns.GetTaskInfo(ctx, deleteSnapshotTask)
+	if err != nil || deleteSnapshotsTaskInfo == nil {
+		return logger.LogNewErrorf(log, "Failed to get taskInfo for DeleteSnapshots task from vCenter %q with err: %v",
+			m.virtualCenter.Config.Host, err)
+	}
+	log.Infof("DeleteSnapshot: VolumeID: %q, SnapshotID: %q, opId: %q", volumeID, snapshotID,
+		deleteSnapshotsTaskInfo.ActivationId)
+
+	// Get the taskResult
+	deleteSnapshotsTaskResult, err := cns.GetTaskResult(ctx, deleteSnapshotsTaskInfo)
+	if err != nil || deleteSnapshotsTaskResult == nil {
+		log.Errorf("unable to find the task result for DeleteSnapshots task from vCenter %q. taskID: %q, "+
+			"opId: %q createResults: %+v", m.virtualCenter.Config.Host, deleteSnapshotsTaskInfo.Task.Value,
+			deleteSnapshotsTaskInfo.ActivationId, deleteSnapshotsTaskResult)
+		return err
+	}
+
+	// Handle snapshot operation result
+	deleteSnapshotsOperationRes := deleteSnapshotsTaskResult.GetCnsVolumeOperationResult()
+	if deleteSnapshotsOperationRes.Fault != nil {
+		errMsg := fmt.Sprintf("failed to delete snapshot %s for cns volume %s. fault: %q, opId: %q",
+			snapshotID, volumeID, spew.Sdump(deleteSnapshotsOperationRes.Fault), deleteSnapshotsTaskInfo.ActivationId)
+
+		if m.idempotencyHandlingEnabled {
+			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
+				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, deleteSnapshotTask.Reference().Value,
+				deleteSnapshotsTaskInfo.ActivationId, taskInvocationStatusError, errMsg)
+		}
+
+		return logger.LogNewError(log, errMsg)
+	}
+
+	snapshotDeleteResult := interface{}(deleteSnapshotsTaskResult).(*cnstypes.CnsSnapshotDeleteResult)
+	deletedSnapshotID := snapshotDeleteResult.SnapshotId.Id
+
+	if m.idempotencyHandlingEnabled {
+		// create the volumeOperationDetails object for persistence
+		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
+			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, deleteSnapshotTask.Reference().Value,
+			deleteSnapshotsTaskInfo.ActivationId, taskInvocationStatusSuccess, "")
+	}
+
+	log.Infof("DeleteSnapshot: Snapshot %s deleted successfully. volumeID: %q, opId: %q", deletedSnapshotID,
+		volumeID, deleteSnapshotsTaskInfo.ActivationId)
+
+	return nil
+}
+
+func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string) error {
+	internalDeleteSnapshot := func() error {
+		log := logger.GetLogger(ctx)
+		err := validateManager(ctx, m)
+		if err != nil {
+			return err
+		}
+		// Set up the VC connection
+		err = m.virtualCenter.ConnectCns(ctx)
+		if err != nil {
+			log.Errorf("ConnectCns failed with err: %+v", err)
+			return err
+		}
+
+		return m.deleteSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotID)
+	}
+
+	start := time.Now()
+	err := internalDeleteSnapshot()
+	if err != nil {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteSnapshotOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteSnapshotOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return err
 }

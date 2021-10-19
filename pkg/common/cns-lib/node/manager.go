@@ -21,11 +21,11 @@ import (
 	"errors"
 	"sync"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 
 	clientset "k8s.io/client-go/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
 )
 
 var (
@@ -35,7 +35,7 @@ var (
 
 // Manager provides functionality to manage nodes.
 type Manager interface {
-	// SetKubernetesClient sets kubernetes client for node manager
+	// SetKubernetesClient sets kubernetes client for node manager.
 	SetKubernetesClient(client clientset.Interface)
 	// RegisterNode registers a node given its UUID, name.
 	RegisterNode(ctx context.Context, nodeUUID string, nodeName string) error
@@ -45,11 +45,14 @@ type Manager interface {
 	DiscoverNode(ctx context.Context, nodeUUID string) error
 	// GetNode refreshes and returns the VirtualMachine for a registered node
 	// given its UUID. If datacenter is present, GetNode will search within this
-	// datacenter given its UUID. If not, it will search in all registered datacenters.
+	// datacenter given its UUID. If not, it will search in all registered
+	// datacenters.
 	GetNode(ctx context.Context, nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error)
-	// GetNodeByName refreshes and returns the VirtualMachine for a registered node
-	// given its name.
+	// GetNodeByName refreshes and returns the VirtualMachine for a registered
+	// node given its name.
 	GetNodeByName(ctx context.Context, nodeName string) (*vsphere.VirtualMachine, error)
+	// GetNodeNameByUUID fetches the name of the node given the VM UUID.
+	GetNodeNameByUUID(ctx context.Context, nodeUUID string) (string, error)
 	// GetAllNodes refreshes and returns VirtualMachine for all registered
 	// nodes. If nodes are added or removed concurrently, they may or may not be
 	// reflected in the result of a call to this method.
@@ -87,7 +90,7 @@ type defaultManager struct {
 	nodeVMs sync.Map
 	// node name to node UUI map.
 	nodeNameToUUID sync.Map
-	// k8s client
+	// k8s client.
 	k8sClient clientset.Interface
 }
 
@@ -111,7 +114,8 @@ func (m *defaultManager) RegisterNode(ctx context.Context, nodeUUID string, node
 }
 
 // DiscoverNode discovers a registered node given its UUID from vCenter.
-// If node is not found in the vCenter for the given UUID, for ErrVMNotFound is returned to the caller
+// If node is not found in the vCenter for the given UUID, for ErrVMNotFound
+// is returned to the caller.
 func (m *defaultManager) DiscoverNode(ctx context.Context, nodeUUID string) error {
 	log := logger.GetLogger(ctx)
 	vm, err := vsphere.GetVirtualMachineByUUID(ctx, nodeUUID, false)
@@ -147,9 +151,28 @@ func (m *defaultManager) GetNodeByName(ctx context.Context, nodeName string) (*v
 
 }
 
+// GetNodeNameByUUID fetches the name of the node given the VM UUID.
+func (m *defaultManager) GetNodeNameByUUID(ctx context.Context, nodeUUID string) (string, error) {
+	log := logger.GetLogger(ctx)
+	var nodeName string
+	m.nodeNameToUUID.Range(func(key, value interface{}) bool {
+		if value.(string) == nodeUUID {
+			nodeName = key.(string)
+			log.Debugf("Retrieved node name %q for node UUID %q", nodeName, nodeUUID)
+			return false
+		}
+		return true
+	})
+	if nodeName == "" {
+		return "", logger.LogNewErrorf(log, "failed to find node name for node with UUID: %q", nodeUUID)
+	}
+	return nodeName, nil
+}
+
 // GetNode refreshes and returns the VirtualMachine for a registered node
-// given its UUID
-func (m *defaultManager) GetNode(ctx context.Context, nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error) {
+// given its UUID.
+func (m *defaultManager) GetNode(ctx context.Context,
+	nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
 	vmInf, discovered := m.nodeVMs.Load(nodeUUID)
 	if !discovered {

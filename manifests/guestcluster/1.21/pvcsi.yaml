@@ -133,6 +133,8 @@ spec:
             - "--timeout=300s"
             - "--csi-address=$(ADDRESS)"
             - "--leader-election"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=100"
           imagePullPolicy: "IfNotPresent"
           env:
             - name: ADDRESS
@@ -240,6 +242,8 @@ spec:
             - "--csi-address=$(ADDRESS)"
             - "--leader-election"
             - "--default-fstype=ext4"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=100"
           imagePullPolicy: "IfNotPresent"
           env:
             - name: ADDRESS
@@ -298,20 +302,19 @@ spec:
         app: vsphere-csi-node
         role: vsphere-csi
     spec:
+      hostNetwork: true
+      dnsPolicy: "ClusterFirstWithHostNet"
       serviceAccountName: vsphere-csi-node
       priorityClassName: system-node-critical # Guarantees scheduling for critical system pods
       containers:
       - name: node-driver-registrar
         image: vmware.io/csi-node-driver-registrar:<image_tag>
         imagePullPolicy: "IfNotPresent"
-        lifecycle:
-          preStop:
-            exec:
-              command: ["/bin/sh", "-c", "rm -rf /registration/csi.vsphere.vmware.com-reg.sock /csi/csi.sock"]
         args:
           - "--v=5"
           - "--csi-address=$(ADDRESS)"
           - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+          - "--health-port=9809"
         env:
           - name: ADDRESS
             value: /csi/csi.sock
@@ -322,6 +325,15 @@ spec:
             mountPath: /csi
           - name: registration-dir
             mountPath: /registration
+        ports:
+          - containerPort: 9809
+            name: healthz
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: healthz
+          initialDelaySeconds: 5
+          timeoutSeconds: 5
       - name: vsphere-csi-node
         image: vmware.io/vsphere-csi:<image_tag>
         args:
@@ -420,8 +432,9 @@ data:
   "volume-extend": "true"
   "volume-health": "true"
   "online-volume-extend": "true"
-  "file-volume": "false"
+  "file-volume": "true"
   "csi-sv-feature-states-replication": "false"
+  "block-volume-snapshot": "false"
 kind: ConfigMap
 metadata:
   name: internal-feature-states.csi.vsphere.vmware.com

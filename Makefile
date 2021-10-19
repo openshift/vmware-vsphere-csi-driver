@@ -3,7 +3,6 @@ all: build
 # Get the absolute path and name of the current directory.
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
-GOFLAGS_VENDOR := -mod=vendor
 
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
@@ -57,7 +56,7 @@ deps:
 ##                                VERSIONS                                    ##
 ################################################################################
 # Ensure the version is injected into the binaries via a linker flag.
-export VERSION ?= $(shell git describe --always --dirty)
+export VERSION ?= $(shell git log -1 --format=%h)
 
 .PHONY: version
 version:
@@ -86,14 +85,21 @@ LDFLAGS_CNSCTL := $(LDFLAGS) -X "main.Version=$(VERSION)"
 # The CSI binary.
 CSI_BIN_NAME := vsphere-csi
 CSI_BIN := $(BIN_OUT)/$(CSI_BIN_NAME).$(GOOS)_$(GOARCH)
-build-csi: $(CSI_BIN)
+CSI_BIN_LINUX := $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)
+CSI_BIN_WINDOWS := $(BIN_OUT)/$(CSI_BIN_NAME).windows_$(GOARCH)
+build-csi: $(CSI_BIN) 
+build-csi-windows: $(CSI_BIN_WINDOWS)
 ifndef CSI_BIN_SRCS
 CSI_BIN_SRCS := cmd/$(CSI_BIN_NAME)/main.go go.mod go.sum
 CSI_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./cmd/$(CSI_BIN_NAME) | grep $(MOD_NAME) | sed 's~$(MOD_NAME)~.~'))
 export CSI_BIN_SRCS
 endif
 $(CSI_BIN): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
+	@touch $@
+
+$(CSI_BIN_WINDOWS): $(CSI_BIN_SRCS)
+	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
 	@touch $@
 
 # The cnsctl binary.
@@ -106,7 +112,7 @@ CNSCTL_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' 
 export CNSCTL_BIN_SRCS
 endif
 $(CNSCTL_BIN): $(CNSCTL_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
 	@touch $@
 
 # The Syncer binary.
@@ -130,7 +136,7 @@ ifeq (, $(shell which controller-gen))
 	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
 	cd $$CONTROLLER_GEN_TMP_DIR ;\
 	go mod init tmp ;\
-	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.2.5 ;\
+	go get sigs.k8s.io/controller-tools/cmd/controller-gen@v0.6.2 ;\
 	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
 	}
 CONTROLLER_GEN=$(GOBIN)/controller-gen
@@ -138,12 +144,12 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-$(SYNCER_BIN): $(SYNCER_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
+$(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
 # The default build target.
-build build-bins: $(CSI_BIN) $(SYNCER_BIN) $(CNSCTL_BIN)
+build build-bins: $(CSI_BIN) $(CSI_BIN_WINDOWS) $(SYNCER_BIN) $(CNSCTL_BIN)
 build-with-docker:
 	hack/make.sh
 
@@ -200,9 +206,9 @@ deploy: | $(DOCKER_SOCK)
 .PHONY: clean
 clean:
 	@rm -f Dockerfile*
-	rm -f $(CSI_BIN) vsphere-csi-*.tar.gz vsphere-csi-*.zip \
+	rm -rf $(CSI_BIN) vsphere-csi-*.tar.gz vsphere-csi-*.zip \
 		$(SYNCER_BIN) vsphere-syncer-*.tar.gz vsphere-syncer-*.zip \
-		image-*.tar image-*.d $(DIST_OUT)/* $(BIN_OUT)/*
+		image-*.tar image-*.d $(DIST_OUT)/* $(BIN_OUT)/* .build/windows-driver.tar
 	GO111MODULE=off go clean -i -x . ./cmd/$(CSI_BIN_NAME) ./cmd/$(SYNCER_BIN_NAME)
 
 .PHONY: clean-d
@@ -332,7 +338,7 @@ else
             ifndef KUBECONFIG
                 $(error Requires KUBECONFIG from a deployed testbed to run integration-unit-test)
             else
-		$(eval INTEGRATION_TEST_PKGS += ./pkg/csi/service/vanilla ./pkg/syncer)
+		$(eval INTEGRATION_TEST_PKGS += ./pkg/csi/service/vanilla ./pkg/syncer ./pkg/common/utils)
             endif
         endif
     endif
@@ -396,7 +402,11 @@ images: | $(DOCKER_SOCK)
 ################################################################################
 .PHONY: push-images upload-images
 push-images: | $(DOCKER_SOCK)
+ifndef CSI_REGISTRY
 	hack/release.sh -p
+else 
+	hack/release.sh -p -r ${CSI_REGISTRY}
+endif
 
 ################################################################################
 ##                                  CI IMAGE                                  ##

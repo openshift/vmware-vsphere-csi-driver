@@ -17,24 +17,21 @@ limitations under the License.
 package common
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
 	"strings"
 
-	cnstypes "github.com/vmware/govmomi/cns/types"
-
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
-
-	"github.com/akutz/gofsutil"
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	cnstypes "github.com/vmware/govmomi/cns/types"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
 	"github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/net/context"
-
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	csitypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/types"
 )
 
 const (
@@ -42,7 +39,8 @@ const (
 )
 
 // GetVCenter returns VirtualCenter object from specified Manager object.
-// Before returning VirtualCenter object, vcenter connection is established if session doesn't exist.
+// Before returning VirtualCenter object, vcenter connection is established if
+// session doesn't exist.
 func GetVCenter(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCenter, error) {
 	var err error
 	log := logger.GetLogger(ctx)
@@ -59,13 +57,14 @@ func GetVCenter(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCente
 	return vcenter, nil
 }
 
-// GetUUIDFromProviderID Returns VM UUID from Node's providerID
+// GetUUIDFromProviderID Returns VM UUID from Node's providerID.
 func GetUUIDFromProviderID(providerID string) string {
 	return strings.TrimPrefix(providerID, ProviderPrefix)
 }
 
-// FormatDiskUUID removes any spaces and hyphens in UUID
-// Example UUID input is 42375390-71f9-43a3-a770-56803bcd7baa and output after format is 4237539071f943a3a77056803bcd7baa
+// FormatDiskUUID removes any spaces and hyphens in UUID.
+// Example UUID input is 42375390-71f9-43a3-a770-56803bcd7baa and output after
+// format is 4237539071f943a3a77056803bcd7baa.
 func FormatDiskUUID(uuid string) string {
 	uuidwithNoSpace := strings.Replace(uuid, " ", "", -1)
 	uuidWithNoHypens := strings.Replace(uuidwithNoSpace, "-", "", -1)
@@ -82,7 +81,7 @@ func RoundUpSize(volumeSizeBytes int64, allocationUnitBytes int64) int64 {
 	return roundedUp
 }
 
-// GetLabelsMapFromKeyValue creates a  map object from given parameter
+// GetLabelsMapFromKeyValue creates a  map object from given parameter.
 func GetLabelsMapFromKeyValue(labels []types.KeyValue) map[string]string {
 	labelsMap := make(map[string]string)
 	for _, label := range labels {
@@ -104,9 +103,9 @@ func IsFileVolumeRequest(ctx context.Context, capabilities []*csi.VolumeCapabili
 }
 
 // GetVolumeCapabilityFsType retrieves fstype from VolumeCapability.
-// Defaults to nfs4 for file volume and ext4 for block volume when empty string is observed.
-// This function also ignores default ext4 fstype supplied by external-provisioner when none is
-// specified in the StorageClass
+// Defaults to nfs4 for file volume and ext4 for block volume when empty string
+// is observed. This function also ignores default ext4 fstype supplied by
+// external-provisioner when none is specified in the StorageClass
 func GetVolumeCapabilityFsType(ctx context.Context, capability *csi.VolumeCapability) string {
 	log := logger.GetLogger(ctx)
 	fsType := strings.ToLower(capability.GetMount().GetFsType())
@@ -122,7 +121,8 @@ func GetVolumeCapabilityFsType(ctx context.Context, capability *csi.VolumeCapabi
 	return fsType
 }
 
-// IsVolumeReadOnly checks the access mode in Volume Capability and decides if volume is readonly or not
+// IsVolumeReadOnly checks the access mode in Volume Capability and decides
+// if volume is readonly or not.
 func IsVolumeReadOnly(capability *csi.VolumeCapability) bool {
 	accMode := capability.GetAccessMode().GetMode()
 	ro := false
@@ -133,10 +133,11 @@ func IsVolumeReadOnly(capability *csi.VolumeCapability) bool {
 	return ro
 }
 
-// validateVolumeCapabilities validates the access mode in given volume capabilities in validAccessModes.
-func validateVolumeCapabilities(volCaps []*csi.VolumeCapability, validAccessModes []csi.VolumeCapability_AccessMode, volumeType string) error {
-	// Validate if all capabilities of the volume
-	// are supported.
+// validateVolumeCapabilities validates the access mode in given volume
+// capabilities in validAccessModes.
+func validateVolumeCapabilities(volCaps []*csi.VolumeCapability,
+	validAccessModes []csi.VolumeCapability_AccessMode, volumeType string) error {
+	// Validate if all capabilities of the volume are supported.
 	for _, volCap := range volCaps {
 		found := false
 		for _, validAccessMode := range validAccessModes {
@@ -146,10 +147,12 @@ func validateVolumeCapabilities(volCaps []*csi.VolumeCapability, validAccessMode
 			}
 		}
 		if !found {
-			return fmt.Errorf("%s access mode is not supported for %q volumes", csi.VolumeCapability_AccessMode_Mode_name[int32(volCap.AccessMode.GetMode())], volumeType)
+			return fmt.Errorf("%s access mode is not supported for %q volumes",
+				csi.VolumeCapability_AccessMode_Mode_name[int32(volCap.AccessMode.GetMode())], volumeType)
 		}
 		if volCap.AccessMode.Mode == csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
-			if volCap.GetMount() != nil && (volCap.GetMount().FsType == NfsV4FsType || volCap.GetMount().FsType == NfsFsType) {
+			if volCap.GetMount() != nil && (volCap.GetMount().FsType == NfsV4FsType ||
+				volCap.GetMount().FsType == NfsFsType) {
 				return fmt.Errorf("NFS fstype not supported for ReadWriteOnce volume creation")
 			}
 		}
@@ -157,7 +160,8 @@ func validateVolumeCapabilities(volCaps []*csi.VolumeCapability, validAccessMode
 	return nil
 }
 
-// IsValidVolumeCapabilities helps validate the given volume capabilities based on volume type.
+// IsValidVolumeCapabilities helps validate the given volume capabilities
+// based on volume type.
 func IsValidVolumeCapabilities(ctx context.Context, volCaps []*csi.VolumeCapability) error {
 	if IsFileVolumeRequest(ctx, volCaps) {
 		return validateVolumeCapabilities(volCaps, FileVolumeCaps, FileVolumeType)
@@ -165,41 +169,10 @@ func IsValidVolumeCapabilities(ctx context.Context, volCaps []*csi.VolumeCapabil
 	return validateVolumeCapabilities(volCaps, BlockVolumeCaps, BlockVolumeType)
 }
 
-// IsFileVolumeMount loops through the list of mount points and
-// checks if the target path mount point is a file volume type or not
-// Returns an error if the target path is not found in the mount points
-func IsFileVolumeMount(ctx context.Context, target string, mnts []gofsutil.Info) (bool, error) {
-	log := logger.GetLogger(ctx)
-	for _, m := range mnts {
-		if m.Path == target {
-			if m.Type == NfsFsType || m.Type == NfsV4FsType {
-				log.Debug("IsFileVolumeMount: Found file volume")
-				return true, nil
-			}
-			log.Debug("IsFileVolumeMount: Found block volume")
-			return false, nil
-		}
-	}
-	// Target path mount point not found in list of mounts
-	return false, fmt.Errorf("could not find target path %q in list of mounts", target)
-}
-
-// IsTargetInMounts checks if the given target path is present in list of mount points
-func IsTargetInMounts(ctx context.Context, target string, mnts []gofsutil.Info) bool {
-	log := logger.GetLogger(ctx)
-	for _, m := range mnts {
-		if m.Path == target {
-			log.Debugf("Found target %q in list of mounts", target)
-			return true
-		}
-	}
-	log.Debugf("Target %q not found in list of mounts", target)
-	return false
-}
-
-// ParseStorageClassParams parses the params in the CSI CreateVolumeRequest API call back
-// to StorageClassParams structure.
-func ParseStorageClassParams(ctx context.Context, params map[string]string, csiMigrationFeatureState bool) (*StorageClassParams, error) {
+// ParseStorageClassParams parses the params in the CSI CreateVolumeRequest API
+// call back to StorageClassParams structure.
+func ParseStorageClassParams(ctx context.Context, params map[string]string,
+	csiMigrationFeatureState bool) (*StorageClassParams, error) {
 	log := logger.GetLogger(ctx)
 	scParams := &StorageClassParams{
 		DatastoreURL:      "",
@@ -234,7 +207,7 @@ func ParseStorageClassParams(ctx context.Context, params map[string]string, csiM
 				otherParams[param] = value
 			}
 		}
-		// check otherParams belongs to in-tree migrated Parameters
+		// check otherParams belongs to in-tree migrated Parameters.
 		if scParams.CSIMigration == "true" {
 			for param, value := range otherParams {
 				param = strings.ToLower(param)
@@ -246,7 +219,8 @@ func ParseStorageClassParams(ctx context.Context, params map[string]string, csiM
 					param == ForceProvisioningMigrationParam || param == CacheReservationMigrationParam ||
 					param == DiskstripesMigrationParam || param == ObjectspacereservationMigrationParam ||
 					param == IopslimitMigrationParam {
-					return nil, fmt.Errorf("vSphere CSI driver does not support creating volume using in-tree vSphere volume plugin parameter key:%v, value:%v", param, value)
+					return nil, fmt.Errorf("vSphere CSI driver does not support creating volume using "+
+						"in-tree vSphere volume plugin parameter key:%v, value:%v", param, value)
 				} else {
 					return nil, fmt.Errorf("invalid parameter. key:%v, value:%v", param, value)
 				}
@@ -260,7 +234,8 @@ func ParseStorageClassParams(ctx context.Context, params map[string]string, csiM
 	return scParams, nil
 }
 
-// GetConfigPath returns ConfigPath depending on the environment variable specified and the cluster flavor set
+// GetConfigPath returns ConfigPath depending on the environment variable
+// specified and the cluster flavor set.
 func GetConfigPath(ctx context.Context) string {
 	var cfgPath string
 	clusterFlavor := cnstypes.CnsClusterFlavor(os.Getenv(csitypes.EnvClusterFlavor))
@@ -268,13 +243,13 @@ func GetConfigPath(ctx context.Context) string {
 		clusterFlavor = cnstypes.CnsClusterFlavorVanilla
 	}
 	if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
-		// Config path for Guest Cluster
+		// Config path for Guest Cluster.
 		cfgPath = os.Getenv(cnsconfig.EnvGCConfig)
 		if cfgPath == "" {
 			cfgPath = cnsconfig.DefaultGCConfigPath
 		}
 	} else {
-		// Config path for SuperVisor and Vanilla Cluster
+		// Config path for SuperVisor and Vanilla Cluster.
 		cfgPath = os.Getenv(cnsconfig.EnvVSphereCSIConfig)
 		if cfgPath == "" {
 			cfgPath = cnsconfig.DefaultCloudConfigPath
@@ -283,7 +258,7 @@ func GetConfigPath(ctx context.Context) string {
 	return cfgPath
 }
 
-// GetConfig loads configuration from secret and returns config object
+// GetConfig loads configuration from secret and returns config object.
 func GetConfig(ctx context.Context) (*cnsconfig.Config, error) {
 	var cfg *cnsconfig.Config
 	var err error
@@ -302,7 +277,7 @@ func GetConfig(ctx context.Context) (*cnsconfig.Config, error) {
 	return cfg, err
 }
 
-// InitConfigInfo initializes the ConfigurationInfo struct
+// InitConfigInfo initializes the ConfigurationInfo struct.
 func InitConfigInfo(ctx context.Context) (*cnsconfig.ConfigurationInfo, error) {
 	log := logger.GetLogger(ctx)
 	cfg, err := GetConfig(ctx)
@@ -316,30 +291,37 @@ func InitConfigInfo(ctx context.Context) (*cnsconfig.ConfigurationInfo, error) {
 	return configInfo, nil
 }
 
-// GetK8sCloudOperatorServicePort return the port to connect the K8sCloudOperator gRPC service.
+// GetK8sCloudOperatorServicePort return the port to connect the
+// K8sCloudOperator gRPC service.
 // If environment variable POD_LISTENER_SERVICE_PORT is set and valid,
-// return the interval value read from environment variable
-// otherwise, use the default port
+// return the interval value read from environment variable.
+// Otherwise, use the default port.
 func GetK8sCloudOperatorServicePort(ctx context.Context) int {
 	k8sCloudOperatorServicePort := defaultK8sCloudOperatorServicePort
 	log := logger.GetLogger(ctx)
 	if v := os.Getenv("POD_LISTENER_SERVICE_PORT"); v != "" {
 		if value, err := strconv.Atoi(v); err == nil {
 			if value <= 0 {
-				log.Warnf("Connecting to K8s Cloud Operator Service on port set in env variable POD_LISTENER_SERVICE_PORT %s is equal or less than 0, will use the default port %d", v, defaultK8sCloudOperatorServicePort)
+				log.Warnf("Connecting to K8s Cloud Operator Service on port set in env variable "+
+					"POD_LISTENER_SERVICE_PORT %s is equal or less than 0, will use the default port %d",
+					v, defaultK8sCloudOperatorServicePort)
 			} else {
 				k8sCloudOperatorServicePort = value
 				log.Infof("Connecting to K8s Cloud Operator Service on port %d", k8sCloudOperatorServicePort)
 			}
 		} else {
-			log.Warnf("Connecting to K8s Cloud Operator Service on port set in env variable POD_LISTENER_SERVICE_PORT %s is invalid, will use the default port %d", v, defaultK8sCloudOperatorServicePort)
+			log.Warnf("Connecting to K8s Cloud Operator Service on port set in env variable "+
+				"POD_LISTENER_SERVICE_PORT %s is invalid, will use the default port %d",
+				v, defaultK8sCloudOperatorServicePort)
 		}
 	}
 	return k8sCloudOperatorServicePort
 }
 
-// ConvertVolumeHealthStatus convert the volume health status into accessible/inaccessible status
-func ConvertVolumeHealthStatus(volHealthStatus string) (string, error) {
+// ConvertVolumeHealthStatus convert the volume health status into
+// accessible/inaccessible status.
+func ConvertVolumeHealthStatus(ctx context.Context, volID string, volHealthStatus string) (string, error) {
+	log := logger.GetLogger(ctx)
 	switch volHealthStatus {
 	case string(pbmtypes.PbmHealthStatusForEntityRed):
 		return VolHealthStatusInaccessible, nil
@@ -352,8 +334,40 @@ func ConvertVolumeHealthStatus(volHealthStatus string) (string, error) {
 	default:
 		// NOTE: volHealthStatus is not set by SPBM in this case.
 		// This implies the volume does not exist any more.
-		// Set health annotation to "Inaccessible" so that
-		// the caller can make appropriate reactions based on this status
+		// Set health annotation to "Inaccessible" so that the caller
+		// can make appropriate reactions based on this status.
+		log.Debugf("Volume health is not set for volume: %s", volID)
 		return VolHealthStatusInaccessible, nil
 	}
+}
+
+// ParseCSISnapshotID parses the SnapshotID from CSI RPC such as DeleteSnapshot, CreateVolume from snapshot
+// into a pair of CNS VolumeID and CNS SnapshotID.
+func ParseCSISnapshotID(csiSnapshotID string) (string, string, error) {
+	if csiSnapshotID == "" {
+		return "", "", errors.New("csiSnapshotID from the input is empty")
+	}
+
+	// The expected format of the SnapshotId in the DeleteSnapshotRequest is,
+	// a combination of CNS VolumeID and CNS SnapshotID concatenated by the "+" sign.
+	// That is, a string of "<UUID>+<UUID>". Decompose csiSnapshotID based on the expected format.
+	IDs := strings.Split(csiSnapshotID, VSphereCSISnapshotIdDelimiter)
+	if len(IDs) != 2 {
+		return "", "", fmt.Errorf("unexpected format in csiSnapshotID: %v", csiSnapshotID)
+	}
+
+	cnsVolumeID := IDs[0]
+	cnsSnapshotID := IDs[1]
+
+	return cnsVolumeID, cnsSnapshotID, nil
+}
+
+// Contains check if item exist in list
+func Contains(list []string, item string) bool {
+	for _, x := range list {
+		if x == item {
+			return true
+		}
+	}
+	return false
 }
