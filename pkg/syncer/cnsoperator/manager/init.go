@@ -25,28 +25,27 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 	cnstypes "github.com/vmware/govmomi/cns/types"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
-	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator"
-	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
-	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
-	volumes "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	commonconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis"
-	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/csinodetopology"
-	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/csinodetopology/v1alpha1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/cnsoperator/controller"
+	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator"
+	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/node"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	commonconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis"
+	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology"
+	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology/v1alpha1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/cnsoperator/controller"
 )
 
 var (
@@ -60,7 +59,7 @@ type cnsOperator struct {
 	coCommonInterface commonco.COCommonInterface
 }
 
-// InitCnsOperator initializes the Cns Operator
+// InitCnsOperator initializes the Cns Operator.
 func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 	configInfo *commonconfig.ConfigurationInfo, coInitParams *interface{}) error {
 	log := logger.GetLogger(ctx)
@@ -93,30 +92,26 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	}
 
 	// TODO: Verify leader election for CNS Operator in multi-master mode
-	// Create CRD's for WCP flavor
+	// Create CRD's for WCP flavor.
 	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 		// Create CnsNodeVmAttachment CRD
-		crdKindNodeVMAttachment := reflect.TypeOf(cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment{}).Name()
-		crdNameNodeVMAttachment := cnsoperatorv1alpha1.CnsNodeVMAttachmentPlural + "." + cnsoperatorv1alpha1.SchemeGroupVersion.Group
-		err = k8s.CreateCustomResourceDefinitionFromSpec(ctx, crdNameNodeVMAttachment, cnsoperatorv1alpha1.CnsNodeVMAttachmentSingular, cnsoperatorv1alpha1.CnsNodeVMAttachmentPlural,
-			crdKindNodeVMAttachment, cnsoperatorv1alpha1.SchemeGroupVersion.Group, cnsoperatorv1alpha1.SchemeGroupVersion.Version, apiextensionsv1beta1.NamespaceScoped)
+		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cns.vmware.com_cnsnodevmattachments.yaml")
 		if err != nil {
+			crdNameNodeVMAttachment := cnsoperatorv1alpha1.CnsNodeVMAttachmentPlural +
+				"." + cnsoperatorv1alpha1.SchemeGroupVersion.Group
 			log.Errorf("failed to create %q CRD. Err: %+v", crdNameNodeVMAttachment, err)
 			return err
 		}
 
 		// Create CnsVolumeMetadata CRD
-		crdKindVolumeMetadata := reflect.TypeOf(cnsvolumemetadatav1alpha1.CnsVolumeMetadata{}).Name()
-		crdNameVolumeMetadata := cnsoperatorv1alpha1.CnsVolumeMetadataPlural + "." + cnsoperatorv1alpha1.SchemeGroupVersion.Group
-
-		err = k8s.CreateCustomResourceDefinitionFromSpec(ctx, crdNameVolumeMetadata, cnsoperatorv1alpha1.CnsVolumeMetadataSingular, cnsoperatorv1alpha1.CnsVolumeMetadataPlural,
-			crdKindVolumeMetadata, cnsoperatorv1alpha1.SchemeGroupVersion.Group, cnsoperatorv1alpha1.SchemeGroupVersion.Version, apiextensionsv1beta1.NamespaceScoped)
+		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cns.vmware.com_cnsvolumemetadata.yaml")
 		if err != nil {
+			crdKindVolumeMetadata := reflect.TypeOf(cnsvolumemetadatav1alpha1.CnsVolumeMetadata{}).Name()
 			log.Errorf("failed to create %q CRD. Err: %+v", crdKindVolumeMetadata, err)
 			return err
 		}
 
-		// Create CnsRegisterVolume CRD from manifest
+		// Create CnsRegisterVolume CRD from manifest.
 		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cnsregistervolume_crd.yaml")
 		if err != nil {
 			log.Errorf("Failed to create %q CRD. Err: %+v", cnsoperatorv1alpha1.CnsRegisterVolumePlural, err)
@@ -124,13 +119,15 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 		}
 
 		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.FileVolume) {
-			// Create CnsFileAccessConfig CRD from manifest if file volume feature is enabled
+			// Create CnsFileAccessConfig CRD from manifest if file volume feature
+			// is enabled.
 			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cnsfileaccessconfig_crd.yaml")
 			if err != nil {
 				log.Errorf("Failed to create %q CRD. Err: %+v", cnsoperatorv1alpha1.CnsFileAccessConfigPlural, err)
 				return err
 			}
-			// Create FileVolumeClients CRD from manifest if file volume feature is enabled
+			// Create FileVolumeClients CRD from manifest if file volume feature
+			// is enabled.
 			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cnsfilevolumeclient_crd.yaml")
 			if err != nil {
 				log.Errorf("Failed to create %q CRD. Err: %+v", internalapis.CnsFileVolumeClientPlural, err)
@@ -138,18 +135,19 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			}
 		}
 
-		// Clean up routine to cleanup successful CnsRegisterVolume instances
+		// Clean up routine to cleanup successful CnsRegisterVolume instances.
 		err = watcher(ctx, cnsOperator)
 		if err != nil {
-			log.Error("Failed to watch on config file for changes to CnsRegisterVolumesCleanupIntervalInMin. Error: %+v", err)
+			log.Error("Failed to watch on config file for changes to CnsRegisterVolumesCleanupIntervalInMin. Error: %+v",
+				err)
 			return err
-
 		}
 		go func() {
 			for {
 				ctx, log = logger.GetNewContextWithLogger()
 				log.Infof("Triggering CnsRegisterVolume cleanup routine")
-				cleanUpCnsRegisterVolumeInstances(ctx, restConfig, cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin)
+				cleanUpCnsRegisterVolumeInstances(ctx, restConfig,
+					cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin)
 				log.Infof("Completed CnsRegisterVolume cleanup")
 				for i := 1; i <= cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin; i++ {
 					time.Sleep(time.Duration(1 * time.Minute))
@@ -159,12 +157,17 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
 		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
 			// Create CSINodeTopology CRD.
-			csiNodeTopologyCRDName := csinodetopology.CRDPlural + "." + csinodetopologyv1alpha1.GroupName
-			err := k8s.CreateCustomResourceDefinitionFromSpec(ctx, csiNodeTopologyCRDName, csinodetopology.CRDSingular,
-				csinodetopology.CRDPlural, reflect.TypeOf(csinodetopologyv1alpha1.CSINodeTopology{}).Name(),
-				csinodetopologyv1alpha1.GroupName, csinodetopologyv1alpha1.Version, apiextensionsv1beta1.ClusterScoped)
+			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, "cns.vmware.com_csinodetopologies.yaml")
 			if err != nil {
 				log.Errorf("Failed to create %q CRD. Error: %+v", csinodetopology.CRDSingular, err)
+				return err
+			}
+			// Initialize node manager so that CSINodeTopology controller can
+			// retrieve NodeVM using the NodeID in the spec.
+			nodeMgr := &node.Nodes{}
+			err = nodeMgr.Initialize(ctx)
+			if err != nil {
+				log.Errorf("failed to initialize nodeManager. Error: %+v", err)
 				return err
 			}
 		}
@@ -183,13 +186,17 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 
 	log.Info("Registering Components for Cns Operator")
 
-	// Setup Scheme for all resources for external APIs
+	// Setup Scheme for all resources for external APIs.
 	if err := cnsoperatorv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Errorf("failed to set the scheme for Cns operator. Err: %+v", err)
 		return err
 	}
+	if err = csinodetopologyv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		log.Errorf("failed to add CSINodeTopology to scheme with error: %+v", err)
+		return err
+	}
 
-	// Setup all Controllers
+	// Setup all Controllers.
 	if err := controller.AddToManager(mgr, clusterFlavor, cnsOperator.configInfo, volumeManager); err != nil {
 		log.Errorf("failed to setup the controller for Cns operator. Err: %+v", err)
 		return err
@@ -197,7 +204,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 
 	log.Info("Starting Cns Operator")
 
-	// Start the operator
+	// Start the operator.
 	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
 		log.Errorf("failed to start Cns operator. Err: %+v", err)
 		return err
@@ -205,7 +212,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	return nil
 }
 
-// InitCommonModules initializes the common modules for all flavors
+// InitCommonModules initializes the common modules for all flavors.
 func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 	coInitParams *interface{}) error {
 	ctx = logger.NewContextWithLogger(ctx)
@@ -213,11 +220,14 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 	var coCommonInterface commonco.COCommonInterface
 	var err error
 	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
-		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx, common.Kubernetes, cnstypes.CnsClusterFlavorWorkload, *coInitParams)
+		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx,
+			common.Kubernetes, cnstypes.CnsClusterFlavorWorkload, *coInitParams)
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
-		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx, common.Kubernetes, cnstypes.CnsClusterFlavorVanilla, *coInitParams)
+		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx,
+			common.Kubernetes, cnstypes.CnsClusterFlavorVanilla, *coInitParams)
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
-		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx, common.Kubernetes, cnstypes.CnsClusterFlavorGuest, *coInitParams)
+		coCommonInterface, err = commonco.GetContainerOrchestratorInterface(ctx,
+			common.Kubernetes, cnstypes.CnsClusterFlavorGuest, *coInitParams)
 	}
 	if err != nil {
 		log.Errorf("failed to create CO agnostic interface. Err: %v", err)
@@ -230,7 +240,7 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 			log.Errorf("Failed to create %q CRD. Err: %+v", internalapis.TriggerCsiFullSyncPlural, err)
 			return err
 		}
-		// Get a config to talk to the apiserver
+		// Get a config to talk to the apiserver.
 		restConfig, err := config.GetConfig()
 		if err != nil {
 			log.Errorf("failed to get Kubernetes config. Err: %+v", err)
@@ -241,31 +251,36 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 			log.Errorf("Failed to create CnsOperator client. Err: %+v", err)
 			return err
 		}
-		// Check if TriggerCsiFullSync instance is present
-		// If not present, create the TriggerCsiFullSync instance with name "csifullsync"
+		// Check if TriggerCsiFullSync instance is present. If not present,
+		// create the TriggerCsiFullSync instance with name "csifullsync".
 		// If present, update the TriggerCsiFullSync.Status.InProgress to false if
-		// a full sync is already running
+		// a full sync is already running.
 		triggerCsiFullSyncInstance := &triggercsifullsyncv1alpha1.TriggerCsiFullSync{}
 		key := k8stypes.NamespacedName{Namespace: "", Name: common.TriggerCsiFullSyncCRName}
 		if err := cnsOperatorClient.Get(ctx, key, triggerCsiFullSyncInstance); err != nil {
 			if apierrors.IsNotFound(err) {
 				newtriggerCsiFullSyncInstance := triggercsifullsyncv1alpha1.CreateTriggerCsiFullSyncInstance()
 				if err := cnsOperatorClient.Create(ctx, newtriggerCsiFullSyncInstance); err != nil {
-					log.Errorf("Failed to create TriggerCsiFullSync instance: %q. Error: %v", common.TriggerCsiFullSyncCRName, err)
+					log.Errorf("Failed to create TriggerCsiFullSync instance: %q. Error: %v",
+						common.TriggerCsiFullSyncCRName, err)
 					return err
 				}
-				log.Infof("Created the a new instance of %q TriggerCsiFullSync instance as it was not found.", common.TriggerCsiFullSyncCRName)
+				log.Infof("Created the a new instance of %q TriggerCsiFullSync instance as it was not found.",
+					common.TriggerCsiFullSyncCRName)
 			} else {
-				log.Errorf("Failed to get TriggerCsiFullSync instance: %q. Error: %v", common.TriggerCsiFullSyncCRName, err)
+				log.Errorf("Failed to get TriggerCsiFullSync instance: %q. Error: %v",
+					common.TriggerCsiFullSyncCRName, err)
 				return err
 			}
 		}
 		if triggerCsiFullSyncInstance.Status.InProgress {
-			log.Infof("Found %q instance with InProgress set to true on syncer startup. Resetting InProgress field to false as no full sync is currently running",
+			log.Infof("Found %q instance with InProgress set to true on syncer startup. "+
+				"Resetting InProgress field to false as no full sync is currently running",
 				common.TriggerCsiFullSyncCRName)
 			triggerCsiFullSyncInstance.Status.InProgress = false
 			if err := cnsOperatorClient.Update(ctx, triggerCsiFullSyncInstance); err != nil {
-				log.Errorf("Failed to update TriggerCsiFullSync instance: %q with Status.InProgress set to false. Error: %v", common.TriggerCsiFullSyncCRName, err)
+				log.Errorf("Failed to update TriggerCsiFullSync instance: %q with Status.InProgress set to false. "+
+					"Error: %v", common.TriggerCsiFullSyncCRName, err)
 				return err
 			}
 		}
@@ -273,7 +288,8 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 	return nil
 }
 
-// watcher watches on the vsphere.conf file mounted as secret within the syncer container
+// watcher watches on the vsphere.conf file mounted as secret within the syncer
+// container.
 func watcher(ctx context.Context, cnsOperator *cnsOperator) error {
 	log := logger.GetLogger(ctx)
 	cfgPath := common.GetConfigPath(ctx)
@@ -318,8 +334,8 @@ func watcher(ctx context.Context, cnsOperator *cnsOperator) error {
 	return err
 }
 
-//reloadConfiguration reloads configuration from the secret, and cnsOperator
-//with the latest configInfo
+// reloadConfiguration reloads configuration from the secret, and cnsOperator
+// with the latest configInfo.
 func reloadConfiguration(ctx context.Context, cnsOperator *cnsOperator) error {
 	log := logger.GetLogger(ctx)
 	cfg, err := common.GetConfig(ctx)
@@ -328,6 +344,7 @@ func reloadConfiguration(ctx context.Context, cnsOperator *cnsOperator) error {
 		return err
 	}
 	cnsOperator.configInfo = &commonconfig.ConfigurationInfo{Cfg: cfg}
-	log.Infof("Reloaded the value for CnsRegisterVolumesCleanupIntervalInMin to %d", cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin)
+	log.Infof("Reloaded the value for CnsRegisterVolumesCleanupIntervalInMin to %d",
+		cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin)
 	return nil
 }

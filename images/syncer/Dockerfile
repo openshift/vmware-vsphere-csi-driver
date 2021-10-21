@@ -14,7 +14,7 @@
 ##                               BUILD ARGS                                   ##
 ################################################################################
 # This build arg allows the specification of a custom Golang image.
-ARG GOLANG_IMAGE=golang:1.15
+ARG GOLANG_IMAGE=golang:1.16
 
 # This build arg allows the specification of a custom base image.
 ARG BASE_IMAGE=gcr.io/cloud-provider-vsphere/extra/csi-driver-base:latest
@@ -41,23 +41,43 @@ ENV CGO_ENABLED=0
 
 ENV GOPROXY ${GOPROXY:-https://proxy.golang.org}
 
-RUN go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/pkg/syncer.Version=${VERSION}" -o vsphere-syncer ./cmd/syncer
+RUN go build -a -ldflags="-w -s -extldflags=static -X sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer.Version=${VERSION}" -o vsphere-syncer ./cmd/syncer
 
 ################################################################################
 ##                               MAIN STAGE                                   ##
 ################################################################################
 FROM ${BASE_IMAGE}
 
+# This build arg is the git commit to embed in the CSI binary
+ARG GIT_COMMIT
+
+# This label will be overridden from driver base image
+LABEL git_commit=$GIT_COMMIT
+
 COPY --from=builder /build/vsphere-syncer /bin/vsphere-syncer
 
 RUN mkdir -p config
 
-ADD pkg/apis/cnsoperator/config/cnsregistervolume_crd.yaml /config/
+ADD pkg/apis/cnsoperator/config/cns.vmware.com_cnsnodevmattachments.yaml /config/
+
+ADD pkg/apis/cnsoperator/config/cns.vmware.com_cnsvolumemetadata.yaml /config/
 
 ADD pkg/apis/cnsoperator/config/cnsfileaccessconfig_crd.yaml /config/
+
+ADD pkg/apis/cnsoperator/config/cnsregistervolume_crd.yaml /config/
+
+ADD pkg/apis/storagepool/config/cns.vmware.com_storagepools.yaml /config/
 
 ADD pkg/internalapis/cnsoperator/config/cnsfilevolumeclient_crd.yaml /config/
 
 ADD pkg/internalapis/cnsoperator/config/triggercsifullsync_crd.yaml /config/
+
+ADD pkg/internalapis/cnsvolumeoperationrequest/config/cns.vmware.com_cnsvolumeoperationrequests.yaml /config/
+
+ADD pkg/internalapis/csinodetopology/config/cns.vmware.com_csinodetopologies.yaml /config/
+
+ADD pkg/internalapis/featurestates/config/cns.vmware.com_cnscsisvfeaturestates.yaml /config/
+
+ADD pkg/apis/migration/config/cns.vmware.com_cnsvspherevolumemigrations.yaml /config/
 
 ENTRYPOINT ["/bin/vsphere-syncer"]

@@ -24,8 +24,8 @@ import (
 	stroagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 var (
@@ -44,14 +44,15 @@ var (
 
 const (
 	volumeExpansionErrorMessage = "AllowVolumeExpansion can not be set to true on the in-tree vSphere StorageClass"
-	migrationParamErrorMessage  = "Invalid StorageClass Parameters. Migration specific parameters should not be used in the StorageClass"
+	migrationParamErrorMessage  = "Invalid StorageClass Parameters. " +
+		"Migration specific parameters should not be used in the StorageClass"
 )
 
-// validateStorageClass helps validate AdmissionReview requests for StroageClass
+// validateStorageClass helps validate AdmissionReview requests for StroageClass.
 func validateStorageClass(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
 	if containerOrchestratorUtility != nil && !containerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIMigration) {
-		// if CSI migration is disabled and webhook is running
-		// skip validation for StorageClass
+		// If CSI migration is disabled and webhook is running,
+		// skip validation for StorageClass.
 		return &admissionv1.AdmissionResponse{
 			Allowed: true,
 		}
@@ -74,7 +75,7 @@ func validateStorageClass(ctx context.Context, ar *admissionv1.AdmissionReview) 
 			}
 		}
 		log.Infof("Validating StorageClass: %q", sc.Name)
-		// AllowVolumeExpansion check for kubernetes.io/vsphere-volume provisioner
+		// AllowVolumeExpansion check for kubernetes.io/vsphere-volume provisioner.
 		if sc.Provisioner == "kubernetes.io/vsphere-volume" {
 			if sc.AllowVolumeExpansion != nil && *sc.AllowVolumeExpansion {
 				allowed = false
@@ -83,7 +84,7 @@ func validateStorageClass(ctx context.Context, ar *admissionv1.AdmissionReview) 
 				}
 			}
 		} else if sc.Provisioner == "csi.vsphere.vmware.com" {
-			// Migration parameters check for csi.vsphere.vmware.com provisioner
+			// Migration parameters check for csi.vsphere.vmware.com provisioner.
 			for param := range sc.Parameters {
 				if unSupportedParameters.Has(param) {
 					allowed = false

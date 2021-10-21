@@ -18,7 +18,6 @@ package common
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -26,9 +25,9 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 // ValidateCreateVolumeRequest is the helper function to validate
@@ -100,9 +99,32 @@ func ValidateControllerUnpublishVolumeRequest(ctx context.Context, req *csi.Cont
 	return nil
 }
 
-// CheckAPI checks if specified version is 6.7.3 or higher.
-func CheckAPI(version string) error {
-	items := strings.Split(version, ".")
+// CheckSnapshotSupport internally checks if the vCenter version is 7.0.3
+func CheckSnapshotSupport(ctx context.Context, manager *Manager) bool {
+	log := logger.GetLogger(ctx)
+	vc, err := GetVCenter(ctx, manager)
+	if err != nil {
+		log.Errorf("failed to get vCenter while checking for Snapshot support on vCenter. err=%v", err)
+		return false
+	}
+	currentVcVersion := vc.Client.ServiceContent.About.ApiVersion
+	err = CheckAPI(currentVcVersion, SnapshotSupportedVCenterMajor, SnapshotSupportedVCenterMinor,
+		SnapshotSupportedVCenterPatch)
+	if err != nil {
+		log.Errorf("checkAPI failed for snapshot support on vCenter API version: %s, err=%v", currentVcVersion, err)
+		return false
+	}
+	// vCenter version supported.
+	log.Infof("vCenter API version: %s supports CNS snapshots.", currentVcVersion)
+	return true
+}
+
+// CheckAPI checks if specified version against the specified minimum support version.
+func CheckAPI(versionToCheck string,
+	minSupportedVCenterMajor int,
+	minSupportedVCenterMinor int,
+	minSupportedVCenterPatch int) error {
+	items := strings.Split(versionToCheck, ".")
 	if len(items) < 2 || len(items) > 4 {
 		return fmt.Errorf("invalid API Version format")
 	}
@@ -115,14 +137,15 @@ func CheckAPI(version string) error {
 		return fmt.Errorf("invalid Minor Version value")
 	}
 
-	if major < MinSupportedVCenterMajor || (major == MinSupportedVCenterMajor && minor < MinSupportedVCenterMinor) {
-		return fmt.Errorf("the minimum supported vCenter is 6.7.3")
+	if major < minSupportedVCenterMajor || (major == minSupportedVCenterMajor && minor < minSupportedVCenterMinor) {
+		return fmt.Errorf("the minimum supported vCenter is %d.%d.%d",
+			minSupportedVCenterMajor, minSupportedVCenterMinor, minSupportedVCenterPatch)
 	}
 
-	if major == MinSupportedVCenterMajor && minor == MinSupportedVCenterMinor {
+	if major == minSupportedVCenterMajor && minor == minSupportedVCenterMinor {
 		if len(items) >= 3 {
 			patch, err := strconv.Atoi(items[2])
-			if err != nil || patch < MinSupportedVCenterPatch {
+			if err != nil || patch < minSupportedVCenterPatch {
 				return fmt.Errorf("invalid patch version value")
 			}
 		}
@@ -142,23 +165,20 @@ func UseVslmAPIs(ctx context.Context, aboutInfo vim25types.AboutInfo) (bool, err
 	// Convert version string to int, e.g. "6.7.3" to 673, "7.0.0.0" to 700.
 	vSphereVersionInt, err := strconv.Atoi(apiVersion[0:3])
 	if err != nil {
-		msg := fmt.Sprintf("Error while converting ApiVersion %q to integer, err %+v", apiVersion, err)
-		log.Errorf(msg)
-		return false, errors.New(msg)
+		return false, logger.LogNewErrorf(log,
+			"Error while converting ApiVersion %q to integer, err %+v", apiVersion, err)
 	}
 	vSphere67u3VersionStr := strings.Join(strings.Split(VSphere67u3Version, "."), "")
 	vSphere67u3VersionInt, err := strconv.Atoi(vSphere67u3VersionStr[0:3])
 	if err != nil {
-		msg := fmt.Sprintf("Error while converting VSphere67u3Version %q to integer, err %+v", VSphere67u3Version, err)
-		log.Errorf(msg)
-		return false, errors.New(msg)
+		return false, logger.LogNewErrorf(log,
+			"Error while converting VSphere67u3Version %q to integer, err %+v", VSphere67u3Version, err)
 	}
 	vSphere7VersionStr := strings.Join(strings.Split(VSphere7Version, "."), "")
 	vSphere7VersionInt, err := strconv.Atoi(vSphere7VersionStr[0:3])
 	if err != nil {
-		msg := fmt.Sprintf("Error while converting VSphere7Version %q to integer, err %+v", VSphere7Version, err)
-		log.Errorf(msg)
-		return false, errors.New(msg)
+		return false, logger.LogNewErrorf(log,
+			"Error while converting VSphere7Version %q to integer, err %+v", VSphere7Version, err)
 	}
 	// Check if the current vSphere version is between 6.7.3 and 7.0.0.
 	if vSphereVersionInt > vSphere67u3VersionInt && vSphereVersionInt <= vSphere7VersionInt {
@@ -184,16 +204,13 @@ func UseVslmAPIs(ctx context.Context, aboutInfo vim25types.AboutInfo) (bool, err
 			if vcBuild >= VSphere67u3lBuildInfo {
 				return true, nil
 			}
-			msg := fmt.Sprintf(
+			return false, logger.LogNewErrorf(log,
 				"Found vCenter version :%q. The minimum version for CSI migration is vCenter Server 6.7 Update 3l",
 				aboutInfo.ApiVersion)
-			log.Errorf(msg)
-			return false, errors.New(msg)
 		}
 		if err != nil {
-			msg := fmt.Sprintf("Error while converting VC Build info %q to integer, err %+v", aboutInfo.Build, err)
-			log.Errorf(msg)
-			return false, errors.New(msg)
+			return false, logger.LogNewErrorf(log,
+				"Error while converting VC Build info %q to integer, err %+v", aboutInfo.Build, err)
 		}
 	}
 	// For all other versions.

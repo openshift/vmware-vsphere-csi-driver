@@ -24,42 +24,46 @@ import (
 	"os"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/prometheus"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/prometheus"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
 
 	"github.com/kubernetes-csi/csi-lib-utils/leaderelection"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	k8s "sigs.k8s.io/vsphere-csi-driver/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/admissionhandler"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/cnsoperator/manager"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/k8scloudoperator"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/syncer/storagepool"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/admissionhandler"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/cnsoperator/manager"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/k8scloudoperator"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/storagepool"
 )
 
-// OperationModeWebHookServer starts container for webhook server
+// OperationModeWebHookServer starts container for webhook server.
 const operationModeWebHookServer = "WEBHOOK_SERVER"
 
-// OperationModeWebHookServer starts container for metadata sync
+// OperationModeWebHookServer starts container for metadata sync.
 const operationModeMetaDataSync = "METADATA_SYNC"
 
 var (
 	enableLeaderElection    = flag.Bool("leader-election", false, "Enable leader election.")
-	leaderElectionNamespace = flag.String("leader-election-namespace", "", "Namespace where the leader election resource lives. Defaults to the pod namespace if not set.")
-	printVersion            = flag.Bool("version", false, "Print syncer version and exit")
-	operationMode           = flag.String("operation-mode", operationModeMetaDataSync, "specify operation mode METADATA_SYNC or WEBHOOK_SERVER")
+	leaderElectionNamespace = flag.String("leader-election-namespace", "",
+		"Namespace where the leader election resource lives. Defaults to the pod namespace if not set.")
+	printVersion  = flag.Bool("version", false, "Print syncer version and exit")
+	operationMode = flag.String("operation-mode", operationModeMetaDataSync,
+		"specify operation mode METADATA_SYNC or WEBHOOK_SERVER")
 
-	supervisorFSSName      = flag.String("supervisor-fss-name", "", "Name of the feature state switch configmap in supervisor cluster")
-	supervisorFSSNamespace = flag.String("supervisor-fss-namespace", "", "Namespace of the feature state switch configmap in supervisor cluster")
-	internalFSSName        = flag.String("fss-name", "", "Name of the feature state switch configmap")
-	internalFSSNamespace   = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
+	supervisorFSSName = flag.String("supervisor-fss-name", "",
+		"Name of the feature state switch configmap in supervisor cluster")
+	supervisorFSSNamespace = flag.String("supervisor-fss-namespace", "",
+		"Namespace of the feature state switch configmap in supervisor cluster")
+	internalFSSName      = flag.String("fss-name", "", "Name of the feature state switch configmap")
+	internalFSSNamespace = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
 )
 
-// main for vsphere syncer
+// main for vsphere syncer.
 func main() {
 	flag.Parse()
 	if *printVersion {
@@ -71,7 +75,7 @@ func main() {
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Infof("Version : %s", syncer.Version)
 
-	// Set CO agnostic init params
+	// Set CO agnostic init params.
 	clusterFlavor, err := config.GetClusterFlavor(ctx)
 	if err != nil {
 		log.Errorf("Failed retrieving cluster flavor. Error: %v", err)
@@ -88,17 +92,13 @@ func main() {
 	} else if *operationMode == operationModeMetaDataSync {
 		log.Infof("Starting container with operation mode: %v", operationModeMetaDataSync)
 		var err error
-		configInfo, err := common.InitConfigInfo(ctx)
-		if err != nil {
-			log.Errorf("failed to initialize the configInfo. Err: %+v", err)
-			os.Exit(1)
-		}
+
 		// run will be executed if this instance is elected as the leader
-		// or if leader election is not enabled
+		// or if leader election is not enabled.
 		var run func(ctx context.Context)
 
-		// Initialize K8sCloudOperator for every instance of vsphere-syncer in the Supervisor
-		// Cluster, independent of whether leader election is enabled.
+		// Initialize K8sCloudOperator for every instance of vsphere-syncer in the
+		// Supervisor Cluster, independent of whether leader election is enabled.
 		// K8sCloudOperator should run on every node where csi controller can run.
 		if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 			go func() {
@@ -122,8 +122,9 @@ func main() {
 			}
 		}()
 
-		// Initialize syncer components that are dependant on the outcome of leader election, if enabled.
-		run = initSyncerComponents(ctx, clusterFlavor, configInfo, &syncer.COInitParams)
+		// Initialize syncer components that are dependant on the outcome of
+		// leader election, if enabled.
+		run = initSyncerComponents(ctx, clusterFlavor, &syncer.COInitParams)
 
 		if !*enableLeaderElection {
 			run(context.TODO())
@@ -148,17 +149,25 @@ func main() {
 	}
 }
 
-// initSyncerComponents initializes syncer components that are dependant on the leader election algorithm.
-// This function is only called by the leader instance of vsphere-syncer, if enabled.
-// TODO: Change name from initSyncerComponents to init<Name>Components where <Name> will be the name of this container
-func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, configInfo *config.ConfigurationInfo, coInitParams *interface{}) func(ctx context.Context) {
+// initSyncerComponents initializes syncer components that are dependant on
+// the leader election algorithm. This function is only called by the leader
+// instance of vsphere-syncer, if enabled.
+// TODO: Change name from initSyncerComponents to init<Name>Components where
+// <Name> will be the name of this container.
+func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
+	coInitParams *interface{}) func(ctx context.Context) {
 	return func(ctx context.Context) {
 		log := logger.GetLogger(ctx)
+		configInfo, err := common.InitConfigInfo(ctx)
+		if err != nil {
+			log.Errorf("failed to initialize the configInfo. Err: %+v", err)
+			os.Exit(1)
+		}
 		if err := manager.InitCommonModules(ctx, clusterFlavor, coInitParams); err != nil {
 			log.Errorf("Error initializing common modules for all flavors. Error: %+v", err)
 			os.Exit(1)
 		}
-		// Initialize CNS Operator for Supervisor clusters
+		// Initialize CNS Operator for Supervisor clusters.
 		if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 			go func() {
 				if err := storagepool.InitStoragePoolService(ctx, configInfo, coInitParams); err != nil {

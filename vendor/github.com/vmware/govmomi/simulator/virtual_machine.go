@@ -196,6 +196,10 @@ func (vm *VirtualMachine) event() types.VmEvent {
 	}
 }
 
+func (vm *VirtualMachine) hostInMM(ctx *Context) bool {
+	return ctx.Map.Get(*vm.Runtime.Host).(*HostSystem).Runtime.InMaintenanceMode
+}
+
 func (vm *VirtualMachine) apply(spec *types.VirtualMachineConfigSpec) {
 	if spec.Files == nil {
 		spec.Files = new(types.VirtualMachineFileInfo)
@@ -1110,6 +1114,17 @@ func (vm *VirtualMachine) configureDevice(ctx *Context, devices object.VirtualDe
 				Connected:      true,
 				DeviceConfigId: c.Key,
 			})
+
+			if c.ResourceAllocation == nil {
+				c.ResourceAllocation = &types.VirtualEthernetCardResourceAllocation{
+					Reservation: types.NewInt64(0),
+					Share: types.SharesInfo{
+						Shares: 50,
+						Level:  "normal",
+					},
+					Limit: types.NewInt64(-1),
+				}
+			}
 		}
 	case *types.VirtualDisk:
 		summary = fmt.Sprintf("%s KB", numberToString(x.CapacityInKB, ','))
@@ -1429,6 +1444,10 @@ func (c *powerVMTask) Run(task *Task) (types.AnyType, types.BaseMethodFault) {
 		}
 	}
 
+	if c.VirtualMachine.hostInMM(c.ctx) {
+		return nil, new(types.InvalidState)
+	}
+
 	var boot types.AnyType
 	if c.state == types.VirtualMachinePowerStatePoweredOn {
 		boot = time.Now()
@@ -1701,8 +1720,15 @@ func (vm *VirtualMachine) CloneVMTask(ctx *Context, req *types.CloneVM_Task) soa
 			pool = vm.ResourcePool
 		}
 	}
+
+	destHost := vm.Runtime.Host
+
+	if req.Spec.Location.Host != nil {
+		destHost = req.Spec.Location.Host
+	}
+
 	folder, _ := asFolderMO(Map.Get(req.Folder))
-	host := Map.Get(*vm.Runtime.Host).(*HostSystem)
+	host := Map.Get(*destHost).(*HostSystem)
 	event := vm.event()
 
 	ctx.postEvent(&types.VmBeingClonedEvent{
@@ -1775,7 +1801,7 @@ func (vm *VirtualMachine) CloneVMTask(ctx *Context, req *types.CloneVM_Task) soa
 			This:   folder.Self,
 			Config: config,
 			Pool:   *pool,
-			Host:   vm.Runtime.Host,
+			Host:   destHost,
 		})
 
 		ctask := Map.Get(res.(*methods.CreateVM_TaskBody).Res.Returnval).(*Task)
@@ -1881,10 +1907,15 @@ func (vm *VirtualMachine) customize(ctx *Context) {
 		hostname = customizeName(vm, c.UserData.ComputerName)
 	}
 
+	cards := object.VirtualDeviceList(vm.Config.Hardware.Device).SelectByType((*types.VirtualEthernetCard)(nil))
+
 	for i, s := range vm.imc.NicSettingMap {
 		nic := &vm.Guest.Net[i]
 		if s.MacAddress != "" {
-			nic.MacAddress = s.MacAddress
+			nic.MacAddress = strings.ToLower(s.MacAddress) // MacAddress in guest will always be lowercase
+			card := cards[i].(types.BaseVirtualEthernetCard).GetVirtualEthernetCard()
+			card.MacAddress = s.MacAddress // MacAddress in Virtual NIC can be any case
+			card.AddressType = string(types.VirtualEthernetCardMacTypeManual)
 		}
 		if nic.DnsConfig == nil {
 			nic.DnsConfig = new(types.NetDnsConfigInfo)
@@ -1937,6 +1968,10 @@ func (vm *VirtualMachine) customize(ctx *Context) {
 
 func (vm *VirtualMachine) CustomizeVMTask(ctx *Context, req *types.CustomizeVM_Task) soap.HasFault {
 	task := CreateTask(vm, "customizeVm", func(t *Task) (types.AnyType, types.BaseMethodFault) {
+		if vm.hostInMM(ctx) {
+			return nil, new(types.InvalidState)
+		}
+
 		if vm.Runtime.PowerState == types.VirtualMachinePowerStatePoweredOn {
 			return nil, &types.InvalidPowerState{
 				RequestedState: types.VirtualMachinePowerStatePoweredOff,

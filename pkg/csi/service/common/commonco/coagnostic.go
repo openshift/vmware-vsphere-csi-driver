@@ -21,33 +21,42 @@ import (
 	"fmt"
 
 	cnstypes "github.com/vmware/govmomi/cns/types"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/volume"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco/k8sorchestrator"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/k8sorchestrator"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 // ContainerOrchestratorUtility represents the singleton instance of
-// container orchestrator interface
+// container orchestrator interface.
 var ContainerOrchestratorUtility COCommonInterface
 
-// COCommonInterface provides functionality to define
-// container orchestrator related implementation to read resources/objects
+// COCommonInterface provides functionality to define container orchestrator
+// related implementation to read resources/objects.
 type COCommonInterface interface {
-	// Check if feature state switch is enabled for the given feature indicated by featureName
+	// Check if feature state switch is enabled for the given feature indicated
+	// by featureName.
 	IsFSSEnabled(ctx context.Context, featureName string) bool
-	// Check if the passed volume can be fake attached
+	// Check if the passed volume can be fake attached.
 	IsFakeAttachAllowed(ctx context.Context, volumeID string, volumeManager cnsvolume.Manager) (bool, error)
-	// Mark the volume as fake attached
+	// Mark the volume as fake attached.
 	MarkFakeAttached(ctx context.Context, volumeID string) error
 	// Check if the volume was fake attached, and unmark it as not fake attached.
 	ClearFakeAttached(ctx context.Context, volumeID string) error
+	// InitTopologyServiceInController initializes the necessary resources
+	// required for topology related functionality in the controller.
+	InitTopologyServiceInController(ctx context.Context) (types.ControllerTopologyService, error)
+	// InitTopologyServiceInNode initializes the necessary resources
+	// required for topology related functionality in the nodes.
+	InitTopologyServiceInNode(ctx context.Context) (types.NodeTopologyService, error)
 }
 
-// GetContainerOrchestratorInterface returns orchestrator object
-// for a given container orchestrator type
-func GetContainerOrchestratorInterface(ctx context.Context, orchestratorType int, clusterFlavor cnstypes.CnsClusterFlavor, params interface{}) (COCommonInterface, error) {
+// GetContainerOrchestratorInterface returns orchestrator object for a given
+// container orchestrator type.
+func GetContainerOrchestratorInterface(ctx context.Context, orchestratorType int,
+	clusterFlavor cnstypes.CnsClusterFlavor, params interface{}) (COCommonInterface, error) {
 	log := logger.GetLogger(ctx)
 	switch orchestratorType {
 	case common.Kubernetes:
@@ -58,7 +67,7 @@ func GetContainerOrchestratorInterface(ctx context.Context, orchestratorType int
 		}
 		return k8sOrchestratorInstance, nil
 	default:
-		// If type is invalid, return an error
+		// If type is invalid, return an error.
 		return nil, fmt.Errorf("invalid orchestrator type")
 	}
 }

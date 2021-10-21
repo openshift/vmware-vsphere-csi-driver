@@ -41,6 +41,12 @@ const (
 	PrometheusDetachVolumeOpType = "detach-volume"
 	// PrometheusExpandVolumeOpType represents the ExpandVolume operation.
 	PrometheusExpandVolumeOpType = "expand-volume"
+	// PrometheusCreateSnapshotOpType represents CreateSnapshot operation.
+	PrometheusCreateSnapshotOpType = "create-snapshot"
+	// PrometheusDeleteSnapshotOpType represents DeleteSnapshot operation.
+	PrometheusDeleteSnapshotOpType = "delete-snapshot"
+	// PrometheusListSnapshotsOpType represents the ListSnapshots operation.
+	PrometheusListSnapshotsOpType = "list-snapshot"
 
 	// CNS operation types
 
@@ -66,6 +72,12 @@ const (
 	PrometheusCnsRelocateVolumeOpType = "relocate-volume"
 	// PrometheusCnsConfigureVolumeACLOpType represents the ConfigureVolumeAcl operation.
 	PrometheusCnsConfigureVolumeACLOpType = "configure-volume-acl"
+	// PrometheusQuerySnapshotsOpType represents QuerySnapshots operation.
+	PrometheusQuerySnapshotsOpType = "query-snapshots"
+	// PrometheusCnsCreateSnapshotOpType represents CreateSnapshot operation.
+	PrometheusCnsCreateSnapshotOpType = "create-snapshot"
+	// PrometheusCnsDeleteSnapshotOpType represents DeleteSnapshot operation.
+	PrometheusCnsDeleteSnapshotOpType = "delete-snapshot"
 
 	// PrometheusPassStatus represents a successful API run.
 	PrometheusPassStatus = "pass"

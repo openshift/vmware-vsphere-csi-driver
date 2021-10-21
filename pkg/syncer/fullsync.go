@@ -26,11 +26,10 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/utils"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 // CsiFullSync reconciles volume metadata on a vanilla k8s cluster with volume
@@ -99,15 +98,14 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) erro
 			metadataSyncer.configInfo.Cfg.Global.ClusterID,
 		},
 	}
-	queryResult, err := utils.QueryAllVolumeUtil(ctx, metadataSyncer.volumeManager, queryFilter,
-		cnstypes.CnsQuerySelection{}, metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.AsyncQueryVolume))
+	queryAllResult, err := metadataSyncer.volumeManager.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
 	if err != nil {
-		log.Errorf("PVCUpdated: QueryVolume failed with err=%+v", err.Error())
+		log.Errorf("FullSync: QueryVolume failed with err=%+v", err.Error())
 		return err
 	}
 
 	volumeToCnsEntityMetadataMap, volumeToK8sEntityMetadataMap, volumeClusterDistributionMap, err :=
-		fullSyncConstructVolumeMaps(ctx, k8sPVs, queryResult.Volumes, pvToPVCMap,
+		fullSyncConstructVolumeMaps(ctx, k8sPVs, queryAllResult.Volumes, pvToPVCMap,
 			pvcToPodMap, metadataSyncer, migrationFeatureStateForFullSync)
 	if err != nil {
 		log.Errorf("FullSync: fullSyncGetEntityMetadata failed with err %+v", err)
@@ -129,7 +127,7 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer) erro
 	createSpecArray, updateSpecArray := fullSyncGetVolumeSpecs(ctx, vcenter.Client.Version, k8sPVs,
 		volumeToCnsEntityMetadataMap, volumeToK8sEntityMetadataMap, volumeClusterDistributionMap,
 		containerCluster, metadataSyncer, migrationFeatureStateForFullSync)
-	volToBeDeleted, err := getVolumesToBeDeleted(ctx, queryResult.Volumes, k8sPVMap, metadataSyncer,
+	volToBeDeleted, err := getVolumesToBeDeleted(ctx, queryAllResult.Volumes, k8sPVMap, metadataSyncer,
 		migrationFeatureStateForFullSync)
 	if err != nil {
 		log.Errorf("FullSync: failed to get list of volumes to be deleted with err %+v", err)
@@ -202,7 +200,7 @@ func fullSyncCreateVolumes(ctx context.Context, createSpecArray []cnstypes.CnsVo
 		if _, existsInK8s := currentK8sPVMap[volumeID]; existsInK8s {
 			log.Debugf("FullSync: Calling CreateVolume for volume id: %q with createSpec %+v",
 				volumeID, spew.Sdump(createSpec))
-			_, err := metadataSyncer.volumeManager.CreateVolume(ctx, &createSpec)
+			_, _, err := metadataSyncer.volumeManager.CreateVolume(ctx, &createSpec)
 			if err != nil {
 				log.Warnf("FullSync: Failed to create volume with the spec: %+v. Err: %+v", spew.Sdump(createSpec), err)
 				continue
@@ -287,7 +285,7 @@ func fullSyncDeleteVolumes(ctx context.Context, volumeIDDeleteArray []cnstypes.C
 			if !inUsebyOtherK8SCluster {
 				log.Infof("FullSync: fullSyncDeleteVolumes: Calling DeleteVolume for volume %v with delete disk %v",
 					volume.VolumeId.Id, deleteDisk)
-				err := metadataSyncer.volumeManager.DeleteVolume(ctx, volume.VolumeId.Id, deleteDisk)
+				_, err := metadataSyncer.volumeManager.DeleteVolume(ctx, volume.VolumeId.Id, deleteDisk)
 				if err != nil {
 					log.Warnf("FullSync: fullSyncDeleteVolumes: Failed to delete volume %s with error %+v",
 						volume.VolumeId.Id, err)

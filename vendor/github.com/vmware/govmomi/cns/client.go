@@ -190,11 +190,11 @@ func (c *Client) QueryAllVolume(ctx context.Context, queryFilter cnstypes.CnsQue
 }
 
 // QueryVolumeAsync calls the CNS QueryAsync API and return a task, from which we can extract CnsQueryResult
-func (c *Client) QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter, querySelection cnstypes.CnsQuerySelection) (*object.Task, error) {
+func (c *Client) QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter, querySelection *cnstypes.CnsQuerySelection) (*object.Task, error) {
 	req := cnstypes.CnsQueryAsync{
 		This:      CnsVolumeManagerInstance,
 		Filter:    queryFilter,
-		Selection: &querySelection,
+		Selection: querySelection,
 	}
 	res, err := methods.CnsQueryAsync(ctx, c, &req)
 	if err != nil {
@@ -229,7 +229,7 @@ func (c *Client) ConfigureVolumeACLs(ctx context.Context, aclConfigSpecs ...cnst
 	return object.NewTask(c.vim25Client, res.Returnval), nil
 }
 
-// Cns Snapshot API client
+// CreateSnapshots calls the CNS CreateSnapshots API
 
 func (c *Client) CreateSnapshots(ctx context.Context, snapshotCreateSpecList []cnstypes.CnsSnapshotCreateSpec) (*object.Task, error) {
 	req := cnstypes.CnsCreateSnapshots{
@@ -244,13 +244,26 @@ func (c *Client) CreateSnapshots(ctx context.Context, snapshotCreateSpecList []c
 	return object.NewTask(c.vim25Client, res.Returnval), nil
 }
 
-// DeleteSnapshot calls the CNS Snapshot API.
+// DeleteSnapshots calls the CNS DeleteSnapshots API
 func (c *Client) DeleteSnapshots(ctx context.Context, snapshotDeleteSpecList []cnstypes.CnsSnapshotDeleteSpec) (*object.Task, error) {
 	req := cnstypes.CnsDeleteSnapshots{
 		This:                CnsVolumeManagerInstance,
 		SnapshotDeleteSpecs: snapshotDeleteSpecList,
 	}
 	res, err := methods.CnsDeleteSnapshots(ctx, c, &req)
+	if err != nil {
+		return nil, err
+	}
+	return object.NewTask(c.vim25Client, res.Returnval), nil
+}
+
+// QuerySnapshots calls the CNS QuerySnapshots API
+func (c *Client) QuerySnapshots(ctx context.Context, snapshotQueryFilter cnstypes.CnsSnapshotQueryFilter) (*object.Task, error) {
+	req := cnstypes.CnsQuerySnapshots{
+		This:                CnsVolumeManagerInstance,
+		SnapshotQueryFilter: snapshotQueryFilter,
+	}
+	res, err := methods.CnsQuerySnapshots(ctx, c, &req)
 	if err != nil {
 		return nil, err
 	}

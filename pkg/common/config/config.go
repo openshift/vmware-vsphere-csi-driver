@@ -31,7 +31,7 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 const (
@@ -76,6 +76,10 @@ const (
 	// interval after which stale CnsVSphereVolumeMigration CRs will be cleaned up.
 	// Current default value is set to 24 hours.
 	DefaultCnsVolumeOperationRequestCleanupIntervalInMin = 1440
+	// DefaultGlobalMaxSnapshotsPerBlockVolume is the default maximum number of block volume snapshots per volume.
+	DefaultGlobalMaxSnapshotsPerBlockVolume = 3
+	// MaxNumberOfTopologyCategories is the max number of topology domains/categories allowed.
+	MaxNumberOfTopologyCategories = 5
 )
 
 // Errors
@@ -181,6 +185,30 @@ func FromEnv(ctx context.Context, cfg *Config) error {
 	}
 	if v := os.Getenv("VSPHERE_LABEL_ZONE"); v != "" {
 		cfg.Labels.Zone = v
+	}
+	if v := os.Getenv("GLOBAL_MAX_SNAPSHOTS_PER_BLOCK_VOLUME"); v != "" {
+		maxSnaps, err := strconv.Atoi(v)
+		if err != nil {
+			log.Errorf("failed to parse GLOBAL_MAX_SNAPSHOTS_PER_BLOCK_VOLUME: %s", err)
+		} else {
+			cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume = maxSnaps
+		}
+	}
+	if v := os.Getenv("GRANULAR_MAX_SNAPSHOTS_PER_BLOCK_VOLUME_VSAN"); v != "" {
+		maxSnaps, err := strconv.Atoi(v)
+		if err != nil {
+			log.Errorf("failed to parse GRANULAR_MAX_SNAPSHOTS_PER_BLOCK_VOLUME_VSAN: %s", err)
+		} else {
+			cfg.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVSAN = maxSnaps
+		}
+	}
+	if v := os.Getenv("GRANULAR_MAX_SNAPSHOTS_PER_BLOCK_VOLUME_VVOL"); v != "" {
+		maxSnaps, err := strconv.Atoi(v)
+		if err != nil {
+			log.Errorf("failed to parse GRANULAR_MAX_SNAPSHOTS_PER_BLOCK_VOLUME_VVOL: %s", err)
+		} else {
+			cfg.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVVOL = maxSnaps
+		}
 	}
 	// Build VirtualCenter from ENVs.
 	for _, e := range os.Environ() {
@@ -341,6 +369,27 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 		cfg.Global.CnsVolumeOperationRequestCleanupIntervalInMin =
 			DefaultCnsVolumeOperationRequestCleanupIntervalInMin
 	}
+	if cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume == 0 {
+		cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume = DefaultGlobalMaxSnapshotsPerBlockVolume
+	}
+
+	// Labels section validation - the customer can either provide topology
+	// domain info using zone,region parameters or by using the topologyCategories
+	// parameter. Specifying all the 3 parameters is not allowed.
+	if strings.TrimSpace(cfg.Labels.TopologyCategories) != "" &&
+		(strings.TrimSpace(cfg.Labels.Zone) != "" || strings.TrimSpace(cfg.Labels.Region) != "") {
+		return logger.LogNewErrorf(log,
+			"zone and region parameters should be skipped when topologyCategories is specified.")
+	}
+
+	// Validate length of topologyCategories in Labels section
+	if strings.TrimSpace(cfg.Labels.TopologyCategories) != "" {
+		if len(strings.Split(cfg.Labels.TopologyCategories, ",")) > MaxNumberOfTopologyCategories {
+			return logger.LogNewErrorf(log, "maximum limit of topology categories exceeded. Only %d allowed.",
+				MaxNumberOfTopologyCategories)
+		}
+	}
+
 	return nil
 }
 
@@ -370,7 +419,7 @@ func GetCnsconfig(ctx context.Context, cfgPath string) (*Config, error) {
 	var cfg *Config
 	// Read in the vsphere.conf if it exists.
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		log.Infof("Could not stat %s, reading config params from env", cfgPath)
+		log.Infof("Could not stat %s (file not found), reading config params from env", cfgPath)
 		// Config from Env var only.
 		cfg = &Config{}
 		if fromEnvErr := FromEnv(ctx, cfg); fromEnvErr != nil {

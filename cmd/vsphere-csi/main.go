@@ -24,22 +24,24 @@ import (
 
 	"github.com/rexray/gocsi"
 
-	csiconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/provider"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
+	csiconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/provider"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	csitypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/types"
 )
 
 var (
 	printVersion = flag.Bool("version", false, "Print driver version and exit")
 
-	supervisorFSSName      = flag.String("supervisor-fss-name", "", "Name of the feature state switch configmap in supervisor cluster")
-	supervisorFSSNamespace = flag.String("supervisor-fss-namespace", "", "Namespace of the feature state switch configmap in supervisor cluster")
-	internalFSSName        = flag.String("fss-name", "", "Name of the feature state switch configmap")
-	internalFSSNamespace   = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
-	useGocsi               = flag.Bool("use-gocsi", true, "Flag to specify to use gocsi or not")
+	supervisorFSSName = flag.String("supervisor-fss-name", "",
+		"Name of the feature state switch configmap in supervisor cluster")
+	supervisorFSSNamespace = flag.String("supervisor-fss-namespace", "",
+		"Namespace of the feature state switch configmap in supervisor cluster")
+	internalFSSName      = flag.String("fss-name", "", "Name of the feature state switch configmap")
+	internalFSSNamespace = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
+	useGocsi             = flag.Bool("use-gocsi", true, "Flag to specify to use gocsi or not")
 )
 
 // main is ignored when this package is built as a go plug-in.
@@ -54,7 +56,7 @@ func main() {
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Infof("Version : %s", service.Version)
 
-	// Set CO Init params
+	// Set CO Init params.
 	clusterFlavor, err := csiconfig.GetClusterFlavor(ctx)
 	if err != nil {
 		log.Errorf("Failed retrieving cluster flavor. Error: %v", err)

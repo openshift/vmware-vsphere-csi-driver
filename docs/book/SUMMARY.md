@@ -2,6 +2,7 @@
 
 * [Overview](overview.md)
 * Releases
+  * [v2.3.0](releases/v2.3.0.md)
   * [v2.2.1](releases/v2.2.1.md)
   * [v2.2.0](releases/v2.2.0.md)
   * [v2.1.1](releases/v2.1.1.md)
@@ -20,8 +21,9 @@
   * [Upgrade](driver-deployment/upgrade.md)
   * [Deployment with Zones](driver-deployment/deploying_csi_with_zones.md)
 * Features
-  * [Block Volume](features/block_volume.md)
-  * [File Volume](features/file_volume.md)
+  * [Single-Access Filesystem Volume](features/single_access_filesystem_volume.md)
+  * [Multi-Access Filesystem Volume](features/multi_access_filesystem_volume.md)
+  * [Single-Access Block Volume](features/raw_block_volume.md)
   * [Volume Expansion](features/volume_expansion.md)
   * [Volume Topology](features/volume_topology.md)
   * [vSphere CSI Migration](features/vsphere_csi_migration.md)

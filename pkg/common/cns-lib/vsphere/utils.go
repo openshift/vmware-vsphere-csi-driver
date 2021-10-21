@@ -11,10 +11,7 @@ import (
 	"strconv"
 	"strings"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-
 	"github.com/davecgh/go-spew/spew"
-
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/sts"
@@ -24,7 +21,8 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
-	"sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 const (
@@ -136,7 +134,7 @@ func CreateCnsKuberenetesEntityReference(entityType string, entityName string,
 }
 
 // GetVirtualCenterConfig returns VirtualCenterConfig Object created using
-// vSphere Configuration specified in the arguement.
+// vSphere Configuration specified in the argument.
 func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCenterConfig, error) {
 	log := logger.GetLogger(ctx)
 	var err error
@@ -199,11 +197,10 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 	for idx := range vcConfig.TargetvSANFileShareDatastoreURLs {
 		vcConfig.TargetvSANFileShareDatastoreURLs[idx] = strings.TrimSpace(vcConfig.TargetvSANFileShareDatastoreURLs[idx])
 		if vcConfig.TargetvSANFileShareDatastoreURLs[idx] == "" {
-			return nil, errors.New("invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
+			return nil, logger.LogNewError(log, "invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
 		}
 		if !strings.HasPrefix(vcConfig.TargetvSANFileShareDatastoreURLs[idx], "ds:///vmfs/volumes/vsan:") {
-			err = errors.New("non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
-			return nil, err
+			return nil, logger.LogNewError(log, "non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
 		}
 	}
 	return vcConfig, nil
@@ -434,9 +431,7 @@ func IsvSphereVersion70U3orAbove(ctx context.Context, aboutInfo types.AboutInfo)
 	if len(version) >= 3 {
 		vSphereVersionInt, err := strconv.Atoi(version[0:3])
 		if err != nil {
-			msg := fmt.Sprintf("error while converting version %q to integer, err %+v", version, err)
-			log.Errorf(msg)
-			return false, errors.New(msg)
+			return false, logger.LogNewErrorf(log, "error while converting version %q to integer, err %+v", version, err)
 		}
 		// Check if the current vSphere version is 7.0.3 or higher.
 		if vSphereVersionInt >= VSphere70u3Version {

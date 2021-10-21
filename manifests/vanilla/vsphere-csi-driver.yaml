@@ -50,6 +50,24 @@ rules:
   - apiGroups: ["storage.k8s.io"]
     resources: ["volumeattachments/status"]
     verbs: ["patch"]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["cnsvolumeoperationrequests"]
+    verbs: ["create", "get", "list", "update", "delete"]
+  - apiGroups: [ "snapshot.storage.k8s.io" ]
+    resources: [ "volumesnapshots" ]
+    verbs: [ "get", "list" ]
+  - apiGroups: [ "snapshot.storage.k8s.io" ]
+    resources: [ "volumesnapshotclasses" ]
+    verbs: [ "watch", "get", "list" ]
+  - apiGroups: [ "snapshot.storage.k8s.io" ]
+    resources: [ "volumesnapshotcontents" ]
+    verbs: [ "create", "get", "list", "watch", "update", "delete" ]
+  - apiGroups: [ "snapshot.storage.k8s.io" ]
+    resources: [ "volumesnapshotcontents/status" ]
+    verbs: [ "update", "patch" ]
+  - apiGroups: [ "cns.vmware.com" ]
+    resources: [ "csinodetopologies" ]
+    verbs: ["get", "update", "watch", "list"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -69,6 +87,31 @@ apiVersion: v1
 metadata:
   name: vsphere-csi-node
   namespace: vmware-system-csi
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vsphere-csi-node-cluster-role
+rules:
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["csinodetopologies"]
+    verbs: ["create", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get"]
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: vsphere-csi-node-cluster-role-binding
+subjects:
+  - kind: ServiceAccount
+    name: vsphere-csi-node
+    namespace: vmware-system-csi
+roleRef:
+  kind: ClusterRole
+  name: vsphere-csi-node-cluster-role
+  apiGroup: rbac.authorization.k8s.io
 ---
 kind: Role
 apiVersion: rbac.authorization.k8s.io/v1
@@ -96,17 +139,39 @@ roleRef:
 ---
 apiVersion: v1
 data:
-  "csi-migration": "true"
+  "csi-migration": "false"
   "csi-auth-check": "true"
   "online-volume-extend": "true"
   "trigger-csi-fullsync": "false"
-  "async-query-volume": "false"
+  "async-query-volume": "true"
   "improved-csi-idempotency": "false"
   "improved-volume-topology": "false"
+  "block-volume-snapshot": "false"
+  "csi-windows-support": "false"
 kind: ConfigMap
 metadata:
   name: internal-feature-states.csi.vsphere.vmware.com
   namespace: vmware-system-csi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vsphere-csi-controller
+  namespace: vmware-system-csi
+  labels:
+    app: vsphere-csi-controller
+spec:
+  ports:
+    - name: ctlr
+      port: 2112
+      targetPort: 2112
+      protocol: TCP
+    - name: syncer
+      port: 2113
+      targetPort: 2113
+      protocol: TCP
+  selector:
+    app: vsphere-csi-controller
 ---
 kind: Deployment
 apiVersion: apps/v1
@@ -114,7 +179,12 @@ metadata:
   name: vsphere-csi-controller
   namespace: vmware-system-csi
 spec:
-  replicas: 1
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 0
   selector:
     matchLabels:
       app: vsphere-csi-controller
@@ -124,6 +194,16 @@ spec:
         app: vsphere-csi-controller
         role: vsphere-csi
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: "app"
+                    operator: In
+                    values:
+                      - vsphere-csi-controller
+              topologyKey: "kubernetes.io/hostname"
       serviceAccountName: vsphere-csi-controller
       nodeSelector:
         node-role.kubernetes.io/master: ""
@@ -144,7 +224,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: csi-attacher
-          image: k8s.gcr.io/sig-storage/csi-attacher:v3.2.0
+          image: k8s.gcr.io/sig-storage/csi-attacher:v3.3.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -159,7 +239,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: csi-resizer
-          image: quay.io/k8scsi/csi-resizer:v1.1.0
+          image: k8s.gcr.io/sig-storage/csi-resizer:v1.3.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -175,10 +255,11 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.3.0-rc.3
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.4.0-rc.1
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
+            - "--use-gocsi=false"
           imagePullPolicy: "Always"
           env:
             - name: CSI_ENDPOINT
@@ -223,7 +304,7 @@ spec:
             periodSeconds: 5
             failureThreshold: 3
         - name: liveness-probe
-          image: quay.io/k8scsi/livenessprobe:v2.2.0
+          image: k8s.gcr.io/sig-storage/livenessprobe:v2.4.0
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
@@ -231,7 +312,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: vsphere-syncer
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.3.0-rc.3
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.4.0-rc.1
           args:
             - "--leader-election"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
@@ -261,7 +342,7 @@ spec:
               name: vsphere-config-volume
               readOnly: true
         - name: csi-provisioner
-          image: k8s.gcr.io/sig-storage/csi-provisioner:v2.2.0
+          image: k8s.gcr.io/sig-storage/csi-provisioner:v3.0.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -305,16 +386,18 @@ spec:
         app: vsphere-csi-node
         role: vsphere-csi
     spec:
+      nodeSelector:
+        kubernetes.io/os: linux
       serviceAccountName: vsphere-csi-node
-      dnsPolicy: "Default"
+      hostNetwork: true
+      dnsPolicy: "ClusterFirstWithHostNet"
       containers:
         - name: node-driver-registrar
-          image: quay.io/k8scsi/csi-node-driver-registrar:v2.1.0
+          image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
             - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
-            - "--health-port=9809"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -325,20 +408,19 @@ spec:
               mountPath: /csi
             - name: registration-dir
               mountPath: /registration
-          ports:
-            - containerPort: 9809
-              name: healthz
           livenessProbe:
-            httpGet:
-              path: /healthz
-              port: healthz
-            initialDelaySeconds: 5
-            timeoutSeconds: 5
+            exec:
+              command:
+              - /csi-node-driver-registrar
+              - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.vsphere.vmware.com/csi.sock
+              - --mode=kubelet-registration-probe
+            initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.3.0-rc.3
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.4.0-rc.1
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
+            - "--use-gocsi=false"
           imagePullPolicy: "Always"
           env:
             - name: NODE_NAME
@@ -364,6 +446,8 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            - name: NODEGETINFO_WATCH_TIMEOUT_MINUTES
+              value: "1"
           securityContext:
             privileged: true
             capabilities:
@@ -400,7 +484,7 @@ spec:
             periodSeconds: 5
             failureThreshold: 3
         - name: liveness-probe
-          image: quay.io/k8scsi/livenessprobe:v2.2.0
+          image: k8s.gcr.io/sig-storage/livenessprobe:v2.4.0
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
@@ -441,22 +525,166 @@ spec:
         - effect: NoSchedule
           operator: Exists
 ---
-apiVersion: v1
-kind: Service
+kind: DaemonSet
+apiVersion: apps/v1
 metadata:
-  name: vsphere-csi-controller
+  name: vsphere-csi-node-windows
   namespace: vmware-system-csi
-  labels:
-    app: vsphere-csi-controller
 spec:
-  ports:
-    - name: ctlr
-      port: 2112
-      targetPort: 2112
-      protocol: TCP
-    - name: syncer
-      port: 2113
-      targetPort: 2113
-      protocol: TCP
   selector:
-    app: vsphere-csi-controller
+    matchLabels:
+      app: vsphere-csi-node-windows
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+  template:
+    metadata:
+      labels:
+        app: vsphere-csi-node-windows
+        role: vsphere-csi-windows
+    spec:
+      nodeSelector:
+        kubernetes.io/os: windows
+      serviceAccountName: vsphere-csi-node
+      containers:
+        - name: node-driver-registrar
+          image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.3.0
+          args:
+            - "--v=5"
+            - "--csi-address=$(ADDRESS)"
+            - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
+            - "--health-port=9809"
+          env:
+            - name: ADDRESS
+              value: 'unix://C:\\csi\\csi.sock'
+            - name: DRIVER_REG_SOCK_PATH
+              value: 'C:\\var\\lib\\kubelet\\plugins\\csi.vsphere.vmware.com\\csi.sock'
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+          livenessProbe:
+            livenessProbe:
+            exec:
+              command:
+              - /csi-node-driver-registrar.exe
+              - --kubelet-registration-path=C:\\var\\lib\\kubelet\\plugins\\csi.vsphere.vmware.com\\csi.sock
+              - --mode=kubelet-registration-probe
+            initialDelaySeconds: 3
+        - name: vsphere-csi-node
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v2.4.0-rc.1
+          args:
+            - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
+            - "--fss-namespace=$(CSI_NAMESPACE)"
+          imagePullPolicy: "Always"
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  apiVersion: v1
+                  fieldPath: spec.nodeName          
+            - name: CSI_ENDPOINT
+              value: 'unix://C:\\csi\\csi.sock'
+            - name: MAX_VOLUMES_PER_NODE
+              value: "0" # Maximum number of volumes that controller can publish to the node. If value is not set or zero Kubernetes decide how many volumes can be published by the controller to the node.
+            - name: X_CSI_MODE
+              value: node
+            - name: X_CSI_SPEC_REQ_VALIDATION
+              value: 'false'
+            - name: X_CSI_SPEC_DISABLE_LEN_CHECK
+              value: "true"
+            # needed only for topology aware setups
+            #- name: VSPHERE_CSI_CONFIG
+            #  value: "/etc/cloud/csi-vsphere.conf" # here csi-vsphere.conf is the name of the file used for creating secret using "--from-file" flag
+            - name: LOGGER_LEVEL
+              value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
+            - name: X_CSI_LOG_LEVEL
+              value: DEBUG
+            - name: CSI_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: NODEGETINFO_WATCH_TIMEOUT_MINUTES
+              value: "1"
+          securityContext:
+            privileged: true
+            capabilities:
+              add: ["SYS_ADMIN"]
+            allowPrivilegeEscalation: true
+          volumeMounts:
+            # needed only for topology aware setups
+            #- name: vsphere-config-volume
+            #  mountPath: /etc/cloud
+            #  readOnly: true
+            - name: plugin-dir
+              mountPath: 'C:\csi'
+            - name: pods-mount-dir
+              mountPath: 'C:\var\lib\kubelet'   
+            - name: csi-proxy-volume-v1
+              mountPath: \\.\pipe\csi-proxy-volume-v1
+            - name: csi-proxy-filesystem-v1
+              mountPath: \\.\pipe\csi-proxy-filesystem-v1
+            - name: csi-proxy-disk-v1
+              mountPath: \\.\pipe\csi-proxy-disk-v1    
+            - name: csi-proxy-system-v1alpha1
+              mountPath: \\.\pipe\csi-proxy-system-v1alpha1
+          ports:
+            - name: healthz
+              containerPort: 9808
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: healthz
+            initialDelaySeconds: 10
+            timeoutSeconds: 5
+            periodSeconds: 5
+            failureThreshold: 3
+        - name: liveness-probe
+          image: k8s.gcr.io/sig-storage/livenessprobe:v2.4.0
+          args:
+            - "--v=4"
+            - "--csi-address=/csi/csi.sock"
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+      volumes:
+        # needed only for topology aware setups
+        #- name: vsphere-config-volume
+        #  secret:
+        #    secretName: vsphere-config-secret
+        - name: registration-dir
+          hostPath:
+            path: 'C:\var\lib\kubelet\plugins_registry\'
+            type: Directory
+        - name: plugin-dir
+          hostPath:
+            path: 'C:\var\lib\kubelet\plugins\csi.vsphere.vmware.com\'
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: \var\lib\kubelet
+            type: Directory
+        - name: csi-proxy-disk-v1
+          hostPath:
+            path: \\.\pipe\csi-proxy-disk-v1
+            type: ''
+        - name: csi-proxy-volume-v1
+          hostPath:
+            path: \\.\pipe\csi-proxy-volume-v1
+            type: ''
+        - name: csi-proxy-filesystem-v1
+          hostPath:
+            path: \\.\pipe\csi-proxy-filesystem-v1
+            type: ''
+        - name: csi-proxy-system-v1alpha1
+          hostPath:
+            path: \\.\pipe\csi-proxy-system-v1alpha1
+            type: ''
+      tolerations:
+        - effect: NoExecute
+          operator: Exists
+        - effect: NoSchedule
+          operator: Exists

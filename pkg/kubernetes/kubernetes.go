@@ -27,7 +27,8 @@ import (
 	"time"
 
 	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
-	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	v1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -46,14 +47,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	apiutils "sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/cnsoperator"
-	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/apis/migration/v1alpha1"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/pkg/csi/types"
-	internalapis "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis"
-	cnsvolumeoperationrequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
+	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator"
+	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration/v1alpha1"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/types"
+	internalapis "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis"
+	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology/v1alpha1"
 )
 
 const (
@@ -100,6 +103,17 @@ func NewClient(ctx context.Context) (clientset.Interface, error) {
 		return nil, err
 	}
 	return clientset.NewForConfig(config)
+}
+
+// NewSnapshotterClient creates a new external-snapshotter client based on a service account.
+func NewSnapshotterClient(ctx context.Context) (snapshotterClientSet.Interface, error) {
+	log := logger.GetLogger(ctx)
+	config, err := GetKubeConfig(ctx)
+	if err != nil {
+		log.Errorf("Failed to get KubeConfig. err: %v", err)
+		return nil, err
+	}
+	return snapshotterClientSet.NewForConfig(config)
 }
 
 // GetRestClientConfigForSupervisor returns restclient config for given
@@ -174,9 +188,14 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
 		}
-		err = cnsvolumeoperationrequestv1alpha1.AddToScheme(scheme)
+		err = cnsvolumeoprequestv1alpha1.AddToScheme(scheme)
 		if err != nil {
 			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		err = csinodetopologyv1alpha1.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add CSINodeTopology to scheme with error: %+v", err)
 			return nil, err
 		}
 	}
@@ -192,7 +211,8 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 
 // NewCnsFileAccessConfigWatcher creates a new ListWatch for VirtualMachines
 // given rest client config.
-func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Config, namespace string) (*cache.ListWatch, error) {
+func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Config,
+	namespace string) (*cache.ListWatch, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 
@@ -217,7 +237,8 @@ func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Confi
 
 // NewVirtualMachineWatcher creates a new ListWatch for VirtualMachines given
 // rest client config.
-func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config, namespace string) (*cache.ListWatch, error) {
+func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
+	namespace string) (*cache.ListWatch, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 
@@ -240,7 +261,34 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config, na
 	return cache.NewListWatchFromClient(client, virtualMachineKind, namespace, fields.Everything()), nil
 }
 
-// CreateKubernetesClientFromConfig creaates a newk8s client from given kubeConfig file.
+// NewCSINodeTopologyWatcher creates a new ListWatch for CSINodeTopology objects
+// given rest client config.
+func NewCSINodeTopologyWatcher(ctx context.Context, config *restclient.Config) (*cache.ListWatch, error) {
+	var err error
+	log := logger.GetLogger(ctx)
+
+	scheme := runtime.NewScheme()
+	err = csinodetopologyv1alpha1.AddToScheme(scheme)
+	if err != nil {
+		log.Errorf("failed to add to scheme with err: %+v", err)
+		return nil, err
+	}
+	gvk := schema.GroupVersionKind{
+		Group:   csinodetopologyv1alpha1.GroupName,
+		Version: csinodetopologyv1alpha1.Version,
+		Kind:    csiNodeTopologyKind,
+	}
+
+	client, err := apiutils.RESTClientForGVK(gvk, false, config, serializer.NewCodecFactory(scheme))
+	if err != nil {
+		log.Errorf("failed to create RESTClient for %s CR with err: %+v", csiNodeTopologyKind, err)
+		return nil, err
+	}
+	return cache.NewListWatchFromClient(client, csiNodeTopologyKind, v1.NamespaceAll, fields.Everything()), nil
+}
+
+// CreateKubernetesClientFromConfig creaates a newk8s client from given
+// kubeConfig file.
 func CreateKubernetesClientFromConfig(kubeConfigPath string) (clientset.Interface, error) {
 
 	cfg, err := clientcmd.BuildConfigFromFlags("", kubeConfigPath)
@@ -288,7 +336,8 @@ func getClientThroughput(ctx context.Context, isSupervisorClient bool) (float32,
 	}
 
 	if v := os.Getenv(envClientQPS); v != "" {
-		if value, err := strconv.ParseFloat(v, 32); err != nil || float32(value) < minClientQPS || float32(value) > maxClientQPS {
+		value, err := strconv.ParseFloat(v, 32)
+		if err != nil || float32(value) < minClientQPS || float32(value) > maxClientQPS {
 			log.Warnf("Invalid value set for env variable %s: %v. Using default value.", envClientQPS, v)
 		} else {
 			qps = float32(value)
@@ -308,21 +357,21 @@ func getClientThroughput(ctx context.Context, isSupervisorClient bool) (float32,
 // CreateCustomResourceDefinitionFromSpec creates the custom resource definition
 // from given spec. If there is error, function will do the clean up.
 func CreateCustomResourceDefinitionFromSpec(ctx context.Context, crdName string, crdSingular string, crdPlural string,
-	crdKind string, crdGroup string, crdVersion string, crdScope apiextensionsv1beta1.ResourceScope) error {
-	crdSpec := &apiextensionsv1beta1.CustomResourceDefinition{
+	crdKind string, crdGroup string, crdVersion string, crdScope apiextensionsv1.ResourceScope) error {
+	crdSpec := &apiextensionsv1.CustomResourceDefinition{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: crdName,
 		},
-		Spec: apiextensionsv1beta1.CustomResourceDefinitionSpec{
+		Spec: apiextensionsv1.CustomResourceDefinitionSpec{
 			Group: crdGroup,
-			Versions: []apiextensionsv1beta1.CustomResourceDefinitionVersion{
+			Versions: []apiextensionsv1.CustomResourceDefinitionVersion{
 				{
 					Name:    crdVersion,
 					Served:  true,
 					Storage: true,
 				}},
 			Scope: crdScope,
-			Names: apiextensionsv1beta1.CustomResourceDefinitionNames{
+			Names: apiextensionsv1.CustomResourceDefinitionNames{
 				Plural:   crdPlural,
 				Singular: crdSingular,
 				Kind:     crdKind,
@@ -347,7 +396,7 @@ func CreateCustomResourceDefinitionFromManifest(ctx context.Context, fileName st
 
 // createCustomResourceDefinition takes a custom resource definition spec and
 // creates it on the API server.
-func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1beta1.CustomResourceDefinition) error {
+func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1.CustomResourceDefinition) error {
 	log := logger.GetLogger(ctx)
 	// Get a config to talk to the apiserver.
 	cfg, err := GetKubeConfig(ctx)
@@ -362,9 +411,11 @@ func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1
 	}
 
 	crdName := newCrd.ObjectMeta.Name
-	crd, err := apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
+	crd, err := apiextensionsClientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx,
+		crdName, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Create(ctx, newCrd, metav1.CreateOptions{})
+		_, err = apiextensionsClientSet.ApiextensionsV1().CustomResourceDefinitions().Create(ctx,
+			newCrd, metav1.CreateOptions{})
 		if err != nil {
 			log.Errorf("Failed to create %q CRD with err: %+v", crdName, err)
 			return err
@@ -374,7 +425,8 @@ func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1
 		// Update the existing CRD with new CRD.
 		crd.Spec = newCrd.Spec
 		crd.Status = newCrd.Status
-		_, err = apiextensionsClientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Update(ctx, crd, metav1.UpdateOptions{})
+		_, err = apiextensionsClientSet.ApiextensionsV1().CustomResourceDefinitions().Update(ctx,
+			crd, metav1.UpdateOptions{})
 		if err != nil {
 			log.Errorf("Failed to update %q CRD with err: %+v", crdName, err)
 			return err
@@ -395,19 +447,19 @@ func waitForCustomResourceToBeEstablished(ctx context.Context,
 	clientSet apiextensionsclientset.Interface, crdName string) error {
 	log := logger.GetLogger(ctx)
 	err := wait.Poll(pollTime, timeout, func() (bool, error) {
-		crd, err := clientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
+		crd, err := clientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
 		if err != nil {
 			log.Errorf("Failed to get %q CRD with err: %+v", crdName, err)
 			return false, err
 		}
 		for _, cond := range crd.Status.Conditions {
 			switch cond.Type {
-			case apiextensionsv1beta1.Established:
-				if cond.Status == apiextensionsv1beta1.ConditionTrue {
+			case apiextensionsv1.Established:
+				if cond.Status == apiextensionsv1.ConditionTrue {
 					return true, err
 				}
-			case apiextensionsv1beta1.NamesAccepted:
-				if cond.Status == apiextensionsv1beta1.ConditionFalse {
+			case apiextensionsv1.NamesAccepted:
+				if cond.Status == apiextensionsv1.ConditionFalse {
 					log.Debugf("Name conflict while waiting for %q CRD creation", cond.Reason)
 				}
 			}
@@ -418,7 +470,8 @@ func waitForCustomResourceToBeEstablished(ctx context.Context,
 	// If there is an error, delete the object to keep it clean.
 	if err != nil {
 		log.Infof("Cleanup %q CRD because the CRD created was not successfully established. Err: %+v", crdName, err)
-		deleteErr := clientSet.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(ctx, crdName, *metav1.NewDeleteOptions(0))
+		deleteErr := clientSet.ApiextensionsV1().CustomResourceDefinitions().Delete(ctx,
+			crdName, *metav1.NewDeleteOptions(0))
 		if deleteErr != nil {
 			log.Errorf("Failed to delete %q CRD with err: %+v", crdName, deleteErr)
 		}
@@ -427,8 +480,8 @@ func waitForCustomResourceToBeEstablished(ctx context.Context,
 }
 
 // getCRDFromManifest reads a .json/yaml file and returns the CRD in it.
-func getCRDFromManifest(ctx context.Context, fileName string) (*apiextensionsv1beta1.CustomResourceDefinition, error) {
-	var crd apiextensionsv1beta1.CustomResourceDefinition
+func getCRDFromManifest(ctx context.Context, fileName string) (*apiextensionsv1.CustomResourceDefinition, error) {
+	var crd apiextensionsv1.CustomResourceDefinition
 	log := logger.GetLogger(ctx)
 
 	fullPath := filepath.Join(manifestPath, fileName)

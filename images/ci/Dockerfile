@@ -17,7 +17,7 @@
 ################################################################################
 # The golang image is used to create the project's module and build caches
 # and is also the image on which this image is based.
-ARG GOLANG_IMAGE=golang:1.15
+ARG GOLANG_IMAGE=golang:1.16
 
 ################################################################################
 ##                            GO MOD CACHE STAGE                              ##
@@ -158,5 +158,5 @@ RUN  mkdir -p /home/prow/go/pkg && ln -s /go/pkg/mod /home/prow/go/pkg/mod
 # Copy the sources into the project's traditional Gopath location in the
 # image. It's possible to bind mount up-to-date sources over the ones in
 # the image when the latter is run as a container.
-WORKDIR /go/src/sigs.k8s.io/vsphere-csi-driver/
+WORKDIR /go/src/sigs.k8s.io/vsphere-csi-driver/v2/
 COPY . ./

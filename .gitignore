@@ -8,10 +8,11 @@ coverage_report.out
 /pkg/csi/service/vanilla/test_vsphere.conf
 /pkg/csi/service/wcp/test_vsphere.conf
 /pkg/syncer/test_vsphere.conf
+/pkg/common/utils/test_vsphere.conf
 
 # Ignore the build output.
 /.build
-
+/.build/windows-driver
 # Ingore project specific setting files created by Intellij IDE and VS Code
 /.idea
 /.vscode
