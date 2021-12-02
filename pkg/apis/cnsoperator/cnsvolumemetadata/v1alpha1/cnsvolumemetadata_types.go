@@ -132,8 +132,6 @@ const (
 	CnsOperatorEntityTypePOD = CnsOperatorEntityType(cnstypes.CnsKubernetesEntityTypePOD)
 )
 
-// CnsOperatorEntityReference defines the type for entityreference
-// parameter in cnsvolumemetadata API.
 type CnsOperatorEntityReference cnstypes.CnsKubernetesEntityReference
 
 // CreateCnsVolumeMetadataSpec returns a cnsvolumemetadata object from the
