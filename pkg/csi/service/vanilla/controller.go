@@ -882,7 +882,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 				// Error is already wrapped in CSI error code.
 				return nil, csifault.CSIInternalFault, err
 			}
-			req.VolumeId, err = volumeMigrationService.GetVolumeID(ctx, &migration.VolumeSpec{VolumePath: req.VolumeId})
+			req.VolumeId, err = volumeMigrationService.GetVolumeID(ctx, &migration.VolumeSpec{VolumePath: req.VolumeId}, false)
 			if err != nil {
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to get VolumeID from volumeMigrationService for volumePath: %q", volumePath)
@@ -1021,7 +1021,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 					return nil, csifault.CSIInternalFault, err
 				}
 				req.VolumeId, err = volumeMigrationService.GetVolumeID(ctx,
-					&migration.VolumeSpec{VolumePath: volumePath, StoragePolicyName: storagePolicyName})
+					&migration.VolumeSpec{VolumePath: volumePath, StoragePolicyName: storagePolicyName}, false)
 				if err != nil {
 					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 						"failed to get VolumeID from volumeMigrationService for volumePath: %q", volumePath)
@@ -1138,7 +1138,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 				// Error is already wrapped in CSI error code.
 				return nil, csifault.CSIInternalFault, err
 			}
-			req.VolumeId, err = volumeMigrationService.GetVolumeID(ctx, &migration.VolumeSpec{VolumePath: volumePath})
+			req.VolumeId, err = volumeMigrationService.GetVolumeID(ctx, &migration.VolumeSpec{VolumePath: volumePath}, false)
 			if err != nil {
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to get VolumeID from volumeMigrationService for volumePath: %q", volumePath)
@@ -1189,17 +1189,6 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 	if strings.Contains(req.VolumeId, ".vmdk") {
 		return nil, logger.LogNewErrorCodef(log, codes.Unimplemented,
 			"cannot expand migrated vSphere volume. :%q", req.VolumeId)
-	}
-
-	isExtendSupported, err := c.manager.VcenterManager.IsExtendVolumeSupported(ctx, c.manager.VcenterConfig.Host)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to verify if extend volume is supported or not. Error: %+v", err)
-	}
-	if !isExtendSupported {
-		return nil, logger.LogNewErrorCode(log, codes.Internal,
-			"volume Expansion is not supported in this vSphere release. "+
-				"Upgrade to vSphere 7.0 for offline expansion and vSphere 7.0U2 for online expansion support.")
 	}
 
 	isOnlineExpansionSupported, err := c.manager.VcenterManager.IsOnlineExtendVolumeSupported(ctx,
