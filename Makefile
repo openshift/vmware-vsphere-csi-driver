@@ -98,7 +98,7 @@ CSI_BIN_NAME := vsphere-csi
 CSI_BIN := $(BIN_OUT)/$(CSI_BIN_NAME).$(GOOS)_$(GOARCH)
 CSI_BIN_LINUX := $(BIN_OUT)/$(CSI_BIN_NAME).linux_$(GOARCH)
 CSI_BIN_WINDOWS := $(BIN_OUT)/$(CSI_BIN_NAME).windows_$(GOARCH)
-build-csi: $(CSI_BIN) 
+build-csi: $(CSI_BIN)
 build-csi-windows: $(CSI_BIN_WINDOWS)
 ifndef CSI_BIN_SRCS
 CSI_BIN_SRCS := cmd/$(CSI_BIN_NAME)/main.go go.mod go.sum
@@ -415,7 +415,7 @@ images: | $(DOCKER_SOCK)
 push-images: | $(DOCKER_SOCK)
 ifndef CSI_REGISTRY
 	hack/release.sh -p
-else 
+else
 	hack/release.sh -p -r ${CSI_REGISTRY}
 endif
 
