@@ -40,6 +40,7 @@ import (
 	pbmsim "github.com/vmware/govmomi/pbm/simulator"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/simulator"
+	"github.com/vmware/govmomi/simulator/vpx"
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -47,12 +48,14 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	testclient "k8s.io/client-go/kubernetes/fake"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/unittestcommon"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
 )
 
@@ -81,6 +84,8 @@ type controllerTest struct {
 	controller *controller
 	config     *config.Config
 	vcenter    *cnsvsphere.VirtualCenter
+	// Add a VolumeOperationRequest interface to set up certain test scenario
+	operationStore cnsvolumeoperationrequest.VolumeOperationRequest
 }
 
 // configFromSim starts a vcsim instance and returns config for use against the
@@ -96,6 +101,13 @@ func configFromSim() (*config.Config, func()) {
 func configFromSimWithTLS(tlsConfig *tls.Config, insecureAllowed bool) (*config.Config, func()) {
 	cfg := &config.Config{}
 	model := simulator.VPX()
+	// Currently the simulated vc has a version of 6.5.0, modifying service content to 7.0.3
+	// TODO: update in govmomi
+	serviceContent := vpx.ServiceContent
+	serviceContent.About.Version = "7.0.3"
+	serviceContent.About.ApiVersion = "7.0"
+	model.ServiceContent = serviceContent
+
 	defer model.Remove()
 
 	err := model.Create()
@@ -158,7 +170,7 @@ func configFromEnvOrSim() (*config.Config, func()) {
 	return cfg, func() {}
 }
 
-func (f *FakeNodeManager) Initialize(ctx context.Context) error {
+func (f *FakeNodeManager) Initialize(ctx context.Context, useNodeUuid bool) error {
 	return nil
 }
 
@@ -206,7 +218,8 @@ func (f *FakeNodeManager) GetSharedDatastoresInK8SCluster(ctx context.Context) (
 			Datastore: &cnsvsphere.Datastore{
 				Datastore:  object.NewDatastore(nil, sharedDatastoreManagedObject.Reference()),
 				Datacenter: nil},
-			Info: sharedDatastoreManagedObject.Info.GetDatastoreInfo(),
+			Info:         sharedDatastoreManagedObject.Info.GetDatastoreInfo(),
+			CustomValues: []types.BaseCustomFieldValue{},
 		},
 	}, nil
 }
@@ -215,7 +228,7 @@ func (f *FakeNodeManager) GetNodeByName(ctx context.Context, nodeName string) (*
 	var vm *cnsvsphere.VirtualMachine
 	var t *testing.T
 	if v := os.Getenv("VSPHERE_DATACENTER"); v != "" {
-		nodeUUID, err := k8s.GetNodeVMUUID(ctx, f.k8sClient, nodeName)
+		nodeUUID, err := k8s.GetNodeUUID(ctx, f.k8sClient, nodeName, false)
 		if err != nil {
 			t.Errorf("failed to get providerId from node: %q. Err: %v", nodeName, err)
 			return nil, err
@@ -236,6 +249,26 @@ func (f *FakeNodeManager) GetNodeByName(ctx context.Context, nodeName string) (*
 
 func (f *FakeNodeManager) GetNodeNameByUUID(ctx context.Context, nodeUUID string) (string, error) {
 	return "", nil
+}
+
+func (f *FakeNodeManager) GetNodeByUuid(ctx context.Context, nodeUuid string) (*cnsvsphere.VirtualMachine, error) {
+	var vm *cnsvsphere.VirtualMachine
+	var t *testing.T
+	if v := os.Getenv("VSPHERE_DATACENTER"); v != "" {
+		var err error
+		vm, err = cnsvsphere.GetVirtualMachineByUUID(ctx, nodeUuid, false)
+		if err != nil {
+			t.Errorf("Couldn't find VM instance with nodeUUID %s, failed to "+
+				"discover with err: %v", nodeUuid, err)
+			return nil, err
+		}
+	} else {
+		obj := simulator.Map.Any("VirtualMachine").(*simulator.VirtualMachine)
+		vm = &cnsvsphere.VirtualMachine{
+			VirtualMachine: object.NewVirtualMachine(f.client, obj.Reference()),
+		}
+	}
+	return vm, nil
 }
 
 func (f *FakeNodeManager) GetAllNodes(ctx context.Context) ([]*cnsvsphere.VirtualMachine, error) {
@@ -341,9 +374,10 @@ func getControllerTest(t *testing.T) *controllerTest {
 			t.Fatalf("Failed to create co agnostic interface. err=%v", err)
 		}
 		controllerTestInstance = &controllerTest{
-			controller: c,
-			config:     config,
-			vcenter:    vcenter,
+			controller:     c,
+			config:         config,
+			vcenter:        vcenter,
+			operationStore: fakeOpStore,
 		}
 	})
 	return controllerTestInstance
@@ -2006,5 +2040,114 @@ func TestExpandVolumeWithSnapshots(t *testing.T) {
 
 	if len(queryResult.Volumes) != 0 {
 		t.Fatalf("Volume should not exist after deletion with ID: %s", volID)
+	}
+}
+
+func TestDeleteBlockVolumeSnapshotWithManagedObjectNotFound(t *testing.T) {
+	ct := getControllerTest(t)
+
+	// Create.
+	params := make(map[string]string)
+	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
+		params[common.AttributeDatastoreURL] = v
+	}
+	capabilities := []*csi.VolumeCapability{
+		{
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER,
+			},
+		},
+	}
+
+	reqCreate := &csi.CreateVolumeRequest{
+		Name: testVolumeName + "-" + uuid.New().String(),
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: 1 * common.GbInBytes,
+		},
+		Parameters:         params,
+		VolumeCapabilities: capabilities,
+	}
+
+	respCreate, err := ct.controller.CreateVolume(ctx, reqCreate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	volID := respCreate.Volume.VolumeId
+
+	// Verify the volume has been created.
+	queryFilter := cnstypes.CnsQueryFilter{
+		VolumeIds: []cnstypes.CnsVolumeId{
+			{
+				Id: volID,
+			},
+		},
+	}
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(queryResult.Volumes) != 1 && queryResult.Volumes[0].VolumeId.Id != volID {
+		t.Fatalf("failed to find the newly created volume with ID: %s", volID)
+	}
+
+	// QueryAll.
+	queryFilter = cnstypes.CnsQueryFilter{
+		VolumeIds: []cnstypes.CnsVolumeId{
+			{
+				Id: volID,
+			},
+		},
+	}
+	querySelection := cnstypes.CnsQuerySelection{}
+	queryResult, err = ct.vcenter.CnsClient.QueryAllVolume(ctx, queryFilter, querySelection)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(queryResult.Volumes) != 1 && queryResult.Volumes[0].VolumeId.Id != volID {
+		t.Fatalf("failed to find the newly created volume with ID: %s", volID)
+	}
+
+	defer func() {
+		// Delete volume.
+		reqDelete := &csi.DeleteVolumeRequest{
+			VolumeId: volID,
+		}
+		_, err = ct.controller.DeleteVolume(ctx, reqDelete)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify the volume has been deleted.
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if len(queryResult.Volumes) != 0 {
+			t.Fatalf("volume should not exist after deletion with ID: %s", volID)
+		}
+	}()
+
+	// set up a scenario for testing DeleteSnapshot, where the DeleteSnapshot task is removed in vSphere
+	snapshotID := uuid.New().String()
+	taskID := "non-existent-task-id" // use a task id that must be non-existent
+	instanceName := "deletesnapshot-" + volID + "-" + snapshotID
+	operationInstance := cnsvolumeoperationrequest.CreateVolumeOperationRequestDetails(
+		instanceName, "", "", 0, metav1.Now(),
+		taskID, "", cnsvolumeoperationrequest.TaskInvocationStatusInProgress, "")
+	_ = ct.operationStore.StoreRequestDetails(ctx, operationInstance)
+
+	//logger.SetLoggerLevel(logger.DevelopmentLogLevel) // enable debug level log
+
+	// Delete the snapshot
+	reqDeleteSnapshot := &csi.DeleteSnapshotRequest{
+		SnapshotId: volID + common.VSphereCSISnapshotIdDelimiter + snapshotID,
+	}
+
+	_, err = ct.controller.DeleteSnapshot(ctx, reqDeleteSnapshot)
+	if err != nil {
+		t.Fatalf("Unexpected error is thrown in DeleteSnapshot with error: %v", err)
 	}
 }

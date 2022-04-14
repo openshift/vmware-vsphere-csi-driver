@@ -29,7 +29,6 @@ import (
 	"github.com/vmware/govmomi/object"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -37,7 +36,6 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
 )
 
 // Steps
@@ -142,8 +140,10 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By(fmt.Sprintf("Waiting for claim %s to be in bound phase", pvc.Name))
@@ -175,7 +175,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		var vmUUID string
 		var exists bool
 		if vanillaCluster {
-			vmUUID = getNodeUUID(client, pod.Spec.NodeName)
+			vmUUID = getNodeUUID(ctx, client, pod.Spec.NodeName)
 		} else if supervisorCluster {
 			annotations := pod.Annotations
 			vmUUID, exists = annotations[vmUUIDLabel]
@@ -230,7 +230,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 			pv.Spec.CSI.VolumeHandle, pod.Spec.NodeName))
 
 		if vanillaCluster {
-			vmUUID = getNodeUUID(client, pod.Spec.NodeName)
+			vmUUID = getNodeUUID(ctx, client, pod.Spec.NodeName)
 		} else if supervisorCluster {
 			annotations := pod.Annotations
 			vmUUID, exists = annotations[vmUUIDLabel]
@@ -310,7 +310,6 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		var volumeFiles []string
 
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 
 		// Get a config to talk to the apiserver.
@@ -327,24 +326,9 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		ginkgo.By("Get the Profile ID")
 		ginkgo.By(fmt.Sprintf("storagePolicyName: %s", storagePolicyName))
 		profileID := e2eVSphere.GetSpbmPolicyID(storagePolicyName)
-		log.Infof("Profile ID :%s", profileID)
+		framework.Logf("Profile ID :%s", profileID)
 		scParameters := make(map[string]string)
 		scParameters["storagePolicyID"] = profileID
-
-		err = client.StorageV1().StorageClasses().Delete(ctx, storagePolicyName, metav1.DeleteOptions{})
-		if !apierrors.IsNotFound(err) {
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		}
-
-		storageclass, err := createStorageClass(client, scParameters, nil, "", "", false, storagePolicyName)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		log.Infof("storageclass Name :%s", storageclass.GetName())
-
-		defer func() {
-			log.Infof("Delete storage class")
-			err = client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, metav1.DeleteOptions{})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		}()
 
 		ginkgo.By("Create FCD with valid storage policy.")
 		fcdID, err := e2eVSphere.createFCDwithValidProfileID(ctx, "staticfcd"+curtimeinstring,
@@ -363,7 +347,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		framework.ExpectNoError(waitForCNSRegisterVolumeToGetCreated(ctx,
 			restConfig, namespace, cnsRegisterVolume, poll, pollTimeout))
 		cnsRegisterVolumeName := cnsRegisterVolume.GetName()
-		log.Infof("cnsRegisterVolumeName : %s", cnsRegisterVolumeName)
+		framework.Logf("cnsRegisterVolumeName : %s", cnsRegisterVolumeName)
 
 		ginkgo.By("verify created PV, PVC and check the bidirectional referance")
 		pvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})

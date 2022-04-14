@@ -3,12 +3,15 @@ apiVersion: storage.k8s.io/v1
 metadata:
   name: example-vanilla-rwo-filesystem-sc
 provisioner: csi.vsphere.vmware.com
+parameters:
+  datastoreurl: "ds:///vmfs/volumes/vsan:52cdfa80721ff516-ea1e993113acfc77/"  # Optional Parameter
+  storagepolicyname: "vSAN Default Storage Policy"  # Optional Parameter
 allowedTopologies:
   - matchLabelExpressions:
-      - key: failure-domain.beta.kubernetes.io/zone
+      - key: topology.kubernetes.io/zone
         values:
-          - k8s-zone-us-east
-          - k8s-zone-us-west
-      - key: failure-domain.beta.kubernetes.io/region
+          - us-west-WA
+          - us-west-CA
+      - key: topology.kubernetes.io/region
         values:
-          - k8s-region-us
+          - us-west

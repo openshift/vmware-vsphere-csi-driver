@@ -8,10 +8,57 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// VGPUDevice contains the configuration corresponding to a vGPU device.
+type VGPUDevice struct {
+	ProfileName string `json:"profileName"`
+}
+
+// DynamicDirectPathIODevice contains the configuration corresponding to a Dynamic DirectPath I/O device.
+type DynamicDirectPathIODevice struct {
+	VendorID    int    `json:"vendorID"`
+	DeviceID    int    `json:"deviceID"`
+	// +optional
+	CustomLabel string `json:"customLabel,omitempty"`
+}
+
+// InstanceStorage provides information used to configure instance
+// storage volumes for a VirtualMachine.
+type InstanceStorage struct {
+	// StorageClass refers to the name of a StorageClass resource used to
+	// provide the storage for the configured instance storage volumes.
+	// The value of this field has no relationship to or bearing on the field
+	// virtualMachine.spec.storageClass. Please note the referred StorageClass
+	// must be available in the same namespace as the VirtualMachineClass that
+	// uses it for configuring instance storage.
+	StorageClass string `json:"storageClass,omitempty"`
+
+	// Volumes describes instance storage volumes created for a VirtualMachine
+	// instance that use this VirtualMachineClass.
+	Volumes []InstanceStorageVolume `json:"volumes,omitempty"`
+}
+
+// InstanceStorageVolume contains information required to create an
+// instance storage volume on a VirtualMachine.
+type InstanceStorageVolume struct {
+	Size resource.Quantity `json:"size"`
+}
+
+// VirtualDevices contains information about the virtual devices associated with a VirtualMachineClass.
+type VirtualDevices struct {
+	// +optional
+	VGPUDevices                []VGPUDevice                `json:"vgpuDevices,omitempty" patchStrategy:"merge" patchMergeKey:"profileName"`
+	// +optional
+	DynamicDirectPathIODevices []DynamicDirectPathIODevice `json:"dynamicDirectPathIODevices,omitempty"`
+}
+
 // VirtualMachineClassHardware describes a virtual hardware resource specification.
 type VirtualMachineClassHardware struct {
-	Cpus   int64             `json:"cpus,omitempty"`
-	Memory resource.Quantity `json:"memory,omitempty"`
+	Cpus    int64             `json:"cpus,omitempty"`
+	Memory  resource.Quantity `json:"memory,omitempty"`
+	// +optional
+	Devices VirtualDevices    `json:"devices,omitempty"`
+	// +optional
+	InstanceStorage InstanceStorage `json:"instanceStorage,omitempty"`
 }
 
 // VirtualMachineResourceSpec describes a virtual hardware policy specification.
@@ -43,6 +90,11 @@ type VirtualMachineClassSpec struct {
 	// policy.  The configuration specified in this field is used to customize various policies related to
 	// infrastructure resource consumption.
 	Policies VirtualMachineClassPolicies `json:"policies,omitempty"`
+
+	// Description describes the configuration of the VirtualMachineClass which is not related to virtual hardware
+	// or infrastructure policy. This field is used to address remaining specs about this VirtualMachineClass.
+	// +optional
+	Description string `json:"description,omitempty"`
 }
 
 // VirtualMachineClassStatus defines the observed state of VirtualMachineClass.  VirtualMachineClasses are immutable,
@@ -50,12 +102,15 @@ type VirtualMachineClassSpec struct {
 type VirtualMachineClassStatus struct {
 }
 
-// +genclient
-// +genclient:nonNamespaced
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=vmclass
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="CPU",type="string",JSONPath=".spec.hardware.cpus"
+// +kubebuilder:printcolumn:name="Memory",type="string",JSONPath=".spec.hardware.memory"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="VGPUDevicesProfileNames",type="string",priority=1,JSONPath=".spec.hardware.devices.vgpuDevices[*].profileName"
+// +kubebuilder:printcolumn:name="PassthroughDeviceIDs",type="string",priority=1,JSONPath=".spec.hardware.devices.dynamicDirectPathIODevices[*].deviceID"
 
 // VirtualMachineClass is the Schema for the virtualmachineclasses API.
 // A VirtualMachineClass represents the desired specification and the observed status of a VirtualMachineClass

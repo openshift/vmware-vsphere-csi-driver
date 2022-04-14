@@ -29,6 +29,9 @@ const (
 	// PrometheusUnknownVolumeType is used in situation when the volume type could not be found.
 	PrometheusUnknownVolumeType = "unknown"
 
+	// PrometheusUnknownNamespace is used when namespace isn't set by sidecars for a volume operation.
+	PrometheusUnknownNamespace = "unknown"
+
 	// CSI operation types
 
 	// PrometheusCreateVolumeOpType represents the CreateVolume operation.
@@ -78,6 +81,10 @@ const (
 	PrometheusCnsCreateSnapshotOpType = "create-snapshot"
 	// PrometheusCnsDeleteSnapshotOpType represents DeleteSnapshot operation.
 	PrometheusCnsDeleteSnapshotOpType = "delete-snapshot"
+	// PrometheusAccessibleVolumes represents accessible volumes.
+	PrometheusAccessibleVolumes = "accessible-volumes"
+	// PrometheusInaccessibleVolumes represents inaccessible volumes.
+	PrometheusInaccessibleVolumes = "inaccessible-volumes"
 
 	// PrometheusPassStatus represents a successful API run.
 	PrometheusPassStatus = "pass"
@@ -111,7 +118,7 @@ var (
 		// Possible voltype - "unknown", "block", "file"
 		// Possible optype - "create-volume", "delete-volume", "attach-volume", "detach-volume", "expand-volume"
 		// Possible status - "pass", "fail"
-		[]string{"voltype", "optype", "status"})
+		[]string{"voltype", "optype", "status", "namespace"})
 
 	// CnsControlOpsHistVec is a histogram vector metric to observe various control
 	// operations on CNS. Note that this captures the time taken by CNS into a bucket
@@ -127,4 +134,24 @@ var (
 		// Possible optype - "create-volume", "delete-volume", "attach-volume", "detach-volume", "expand-volume", etc
 		// Possible status - "pass", "fail"
 		[]string{"optype", "status"})
+
+	// VolumeHealthGaugeVec is a gauge metric to observe the number of accessible and inaccessible volumes.
+	VolumeHealthGaugeVec = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "vsphere_volume_health_gauge",
+		Help: "Gauge for total number of accessible and inaccessible volumes",
+	},
+		// Possible volume_health_type - "accessible-volumes", "inaccessible-volumes"
+		[]string{"volume_health_type"})
+
+	// FullSyncOpsHistVec is a histogram vector metric to observe CSI Full Sync.
+	FullSyncOpsHistVec = promauto.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "vsphere_full_sync_ops_histogram",
+		Help: "Histogram vector for CSI Full Sync operations.",
+		// Creating more buckets for operations that takes few seconds and less buckets
+		// for those that are taking a long time. A Full Sync operation taking a long time is
+		// unexpected and we don't have to be accurate(just approximation is fine).
+		Buckets: []float64{1, 2, 3, 4, 5, 7, 10, 12, 15, 18, 20, 25, 30, 60, 120, 180, 300},
+	},
+		// Possible status - "pass", "fail"
+		[]string{"status"})
 )

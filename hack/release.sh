@@ -41,10 +41,20 @@ PUSH=
 LATEST=
 CSI_IMAGE_NAME=
 SYNCER_IMAGE_NAME=
-VERSION=$(git describe --dirty --always 2>/dev/null)
+if [[ "$(git rev-parse --abbrev-ref HEAD)" =~ "master" ]]; then
+  VERSION="$(git log -1 --format=%h)"
+else
+  VERSION="$(git describe --always 2>/dev/null)"
+fi
+GIT_COMMIT="$(git log -1 --format=%H)"
 GCR_KEY_FILE="${GCR_KEY_FILE:-}"
 GOPROXY="${GOPROXY:-https://proxy.golang.org}"
 BUILD_RELEASE_TYPE="${BUILD_RELEASE_TYPE:-}"
+
+# CUSTOM_REPO_FOR_GOLANG can be used to pass custom repository for golang builder image.
+# Please ensure it ends with a '/'.
+# Example: CUSTOM_REPO_FOR_GOLANG=harbor-repo.vmware.com/dockerhub-proxy-cache/library/
+GOLANG_IMAGE=${CUSTOM_REPO_FOR_GOLANG:-}golang:1.16
 
 ARCH=amd64
 OSVERSION=1809
@@ -126,7 +136,8 @@ function build_driver_images_windows() {
    --build-arg "VERSION=${VERSION}" \
    --build-arg "OSVERSION=${OSVERSION}" \
    --build-arg "GOPROXY=${GOPROXY}" \
-   --build-arg "GIT_COMMIT=${VERSION}" \
+   --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
+   --build-arg "GOLANG_IMAGE=${GOLANG_IMAGE}" \
    .
    docker buildx rm vsphere-csi-builder-win || echo "builder instance not found, safe to proceed"
 }
@@ -143,7 +154,8 @@ function build_driver_images_linux() {
    --build-arg ARCH=amd64 \
    --build-arg "VERSION=${VERSION}" \
    --build-arg "GOPROXY=${GOPROXY}" \
-   --build-arg "GIT_COMMIT=${VERSION}" \
+   --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
+   --build-arg "GOLANG_IMAGE=${GOLANG_IMAGE}" \
    .
 }
 
@@ -154,7 +166,8 @@ function build_syncer_image_linux() {
       -t "${SYNCER_IMAGE_NAME}":"${VERSION}" \
       --build-arg "VERSION=${VERSION}" \
       --build-arg "GOPROXY=${GOPROXY}" \
-      --build-arg "GIT_COMMIT=${VERSION}" \
+      --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
+      --build-arg "GOLANG_IMAGE=${GOLANG_IMAGE}" \
   .
 
   if [ "${LATEST}" ]; then

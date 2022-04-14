@@ -32,7 +32,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
-
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/prometheus"
 
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
@@ -62,6 +61,9 @@ var (
 
 var getCandidateDatastores = cnsvsphere.GetCandidateDatastoresInCluster
 
+// Contains list of clusterComputeResourceMoIds on which supervisor cluster is deployed.
+var clusterComputeResourceMoIds = make([]string, 0)
+
 type controller struct {
 	manager *common.Manager
 	authMgr common.AuthorizationService
@@ -77,6 +79,24 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Infof("Initializing WCP CSI controller")
 	var err error
+
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+		clusterComputeResourceMoIds, err = common.GetClusterComputeResourceMoIds(ctx)
+		if err != nil {
+			log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
+			return err
+		}
+		if len(clusterComputeResourceMoIds) > 0 {
+			if config.Global.SupervisorID != "" {
+				// Use new SupervisorID for Volume Metadata when AvailabilityZone CR is present and
+				// config.Global.SupervisorID is not empty string
+				config.Global.ClusterID = config.Global.SupervisorID
+			} else {
+				return logger.LogNewError(log, "supervisor-id is not set in the vsphere-config-secret")
+			}
+		}
+	}
+
 	// Get VirtualCenterManager instance and validate version.
 	vcenterconfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, config)
 	if err != nil {
@@ -298,6 +318,17 @@ func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error 
 		}
 	}
 	if cfg != nil {
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+			if len(clusterComputeResourceMoIds) > 0 {
+				if cfg.Global.SupervisorID != "" {
+					// Use new SupervisorID for Volume Metadata when AvailabilityZone CR is present and
+					// config.Global.SupervisorID is not empty string
+					cfg.Global.ClusterID = cfg.Global.SupervisorID
+				} else {
+					return logger.LogNewError(log, "supervisor-id is not set in the vsphere-config-secret")
+				}
+			}
+		}
 		c.manager.CnsConfig = cfg
 		log.Debugf("Updated manager.CnsConfig")
 	}
@@ -393,15 +424,25 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to get vCenter from Manager. Error: %v", err)
 	}
-	sharedDatastores, vsanDirectDatastores, err := getCandidateDatastores(ctx, vc, c.manager.CnsConfig.Global.ClusterID)
+	// TODO: TKGS-HA -update getCandidateDatastores to handle case
+	// when c.manager.CnsConfig.Global.ClusterID  is replaced with new SupervisorID for stretched supervisor cluster
+	// revisit this code in the next PR to use all clusterComputeResourceMoIds
+	var sharedDatastores []*cnsvsphere.DatastoreInfo
+	var vsanDirectDatastores []*cnsvsphere.DatastoreInfo
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) && len(clusterComputeResourceMoIds) > 0 {
+		sharedDatastores, vsanDirectDatastores, err = getCandidateDatastores(ctx, vc, clusterComputeResourceMoIds[0])
+	} else {
+		sharedDatastores, vsanDirectDatastores, err = getCandidateDatastores(ctx, vc, c.manager.CnsConfig.Global.ClusterID)
+	}
 	if err != nil {
 		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed finding candidate datastores to place volume. Error: %v", err)
 	}
 
+	filterSuspendedDatastores := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CnsMgrSuspendCreateVolume)
 	candidateDatastores := append(sharedDatastores, vsanDirectDatastores...)
 	volumeInfo, faultType, err := common.CreateBlockVolumeUtil(ctx, cnstypes.CnsClusterFlavorWorkload,
-		c.manager, &createVolumeSpec, candidateDatastores)
+		c.manager, &createVolumeSpec, candidateDatastores, filterSuspendedDatastores)
 	if err != nil {
 		return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to create volume. Error: %+v", err)
@@ -489,8 +530,9 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 		return nil, csifault.CSIInternalFault, logger.LogNewErrorCode(log, codes.Internal,
 			"no datastores found to create file volume")
 	}
+	filterSuspendedDatastores := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CnsMgrSuspendCreateVolume)
 	volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorWorkload,
-		c.manager, &createVolumeSpec, filteredDatastores)
+		c.manager, &createVolumeSpec, filteredDatastores, filterSuspendedDatastores)
 	if err != nil {
 		return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to create volume. Error: %+v", err)
@@ -515,11 +557,11 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	*csi.CreateVolumeResponse, error) {
 
 	start := time.Now()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	createVolumeInternal := func() (
 		*csi.CreateVolumeResponse, string, error) {
-		ctx = logger.NewContextWithLogger(ctx)
-		log := logger.GetLogger(ctx)
 		log.Infof("CreateVolume: called with args %+v", *req)
 		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
@@ -553,14 +595,21 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		return c.createBlockVolume(ctx, req)
 	}
 	resp, faultType, err := createVolumeInternal()
-	log := logger.GetLogger(ctx)
 	log.Debugf("createVolumeInternal: returns fault %q", faultType)
+
+	namespace := common.GetNamespaceFromContext(ctx)
+	if namespace == prometheus.PrometheusUnknownNamespace {
+		log.Warnf("Namespace not set in context metadata. Setting it as unknown in Prometheus.")
+	} else {
+		log.Debugf("Namespace from context metadata: %s", namespace)
+	}
+
 	if err != nil {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusCreateVolumeOpType,
-			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusFailStatus, namespace).Observe(time.Since(start).Seconds())
 	} else {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusCreateVolumeOpType,
-			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusPassStatus, namespace).Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }
@@ -570,12 +619,12 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	*csi.DeleteVolumeResponse, error) {
 
 	start := time.Now()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
 	volumeType := prometheus.PrometheusUnknownVolumeType
 
 	deleteVolumeInternal := func() (
 		*csi.DeleteVolumeResponse, string, error) {
-		ctx = logger.NewContextWithLogger(ctx)
-		log := logger.GetLogger(ctx)
 		log.Infof("DeleteVolume: called with args: %+v", *req)
 		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
@@ -600,14 +649,21 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 		return &csi.DeleteVolumeResponse{}, "", nil
 	}
 	resp, faultType, err := deleteVolumeInternal()
-	log := logger.GetLogger(ctx)
 	log.Debugf("deleteVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
+
+	namespace := common.GetNamespaceFromContext(ctx)
+	if namespace == prometheus.PrometheusUnknownNamespace {
+		log.Warnf("Namespace not set in context metadata. Setting it as unknown in Prometheus.")
+	} else {
+		log.Debugf("Namespace from context metadata: %s", namespace)
+	}
+
 	if err != nil {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDeleteVolumeOpType,
-			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusFailStatus, namespace).Observe(time.Since(start).Seconds())
 	} else {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDeleteVolumeOpType,
-			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusPassStatus, namespace).Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }
@@ -617,12 +673,12 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (
 	*csi.ControllerPublishVolumeResponse, error) {
 	start := time.Now()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
 	volumeType := prometheus.PrometheusUnknownVolumeType
 
 	controllerPublishVolumeInternal := func() (
 		*csi.ControllerPublishVolumeResponse, string, error) {
-		ctx = logger.NewContextWithLogger(ctx)
-		log := logger.GetLogger(ctx)
 		log.Infof("ControllerPublishVolume: called with args %+v", *req)
 		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
@@ -730,14 +786,21 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		return resp, "", nil
 	}
 	resp, faultType, err := controllerPublishVolumeInternal()
-	log := logger.GetLogger(ctx)
 	log.Debugf("controllerPublishVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
+
+	namespace := common.GetNamespaceFromContext(ctx)
+	if namespace == prometheus.PrometheusUnknownNamespace {
+		log.Warnf("Namespace not set in context metadata. Setting it as unknown in Prometheus.")
+	} else {
+		log.Debugf("Namespace from context metadata: %s", namespace)
+	}
+
 	if err != nil {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusAttachVolumeOpType,
-			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusFailStatus, namespace).Observe(time.Since(start).Seconds())
 	} else {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusAttachVolumeOpType,
-			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusPassStatus, namespace).Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }
@@ -747,11 +810,11 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (
 	*csi.ControllerUnpublishVolumeResponse, error) {
 	start := time.Now()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	controllerUnpublishVolumeInternal := func() (
 		*csi.ControllerUnpublishVolumeResponse, string, error) {
-		ctx = logger.NewContextWithLogger(ctx)
-		log := logger.GetLogger(ctx)
 		log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
 		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
@@ -779,14 +842,21 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 		return &csi.ControllerUnpublishVolumeResponse{}, "", nil
 	}
 	resp, faultType, err := controllerUnpublishVolumeInternal()
-	log := logger.GetLogger(ctx)
 	log.Debugf("controllerUnpublishVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
+
+	namespace := common.GetNamespaceFromContext(ctx)
+	if namespace == prometheus.PrometheusUnknownNamespace {
+		log.Warnf("Namespace not set in context metadata. Setting it as unknown in Prometheus.")
+	} else {
+		log.Debugf("Namespace from context metadata: %s", namespace)
+	}
+
 	if err != nil {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDetachVolumeOpType,
-			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusFailStatus, namespace).Observe(time.Since(start).Seconds())
 	} else {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusDetachVolumeOpType,
-			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusPassStatus, namespace).Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }
@@ -874,11 +944,11 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (
 	*csi.ControllerExpandVolumeResponse, error) {
 	start := time.Now()
+	ctx = logger.NewContextWithLogger(ctx)
+	log := logger.GetLogger(ctx)
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	controllerExpandVolumeInternal := func() (
 		*csi.ControllerExpandVolumeResponse, string, error) {
-		ctx = logger.NewContextWithLogger(ctx)
-		log := logger.GetLogger(ctx)
 		if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.VolumeExtend) {
 			return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCode(log, codes.Unimplemented,
 				"expandVolume feature is disabled on the cluster")
@@ -903,8 +973,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
 		var faultType string
 		faultType, err = common.ExpandVolumeUtil(ctx, c.manager, volumeID, volSizeMB,
-			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AsyncQueryVolume),
-			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIVolumeManagerIdempotency))
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AsyncQueryVolume))
 		if err != nil {
 			return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to expand volume: %+q to size: %d err %+v", volumeID, volSizeMB, err)
@@ -928,14 +997,21 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		return resp, "", nil
 	}
 	resp, faultType, err := controllerExpandVolumeInternal()
-	log := logger.GetLogger(ctx)
 	log.Debugf("controllerExpandVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
+
+	namespace := common.GetNamespaceFromContext(ctx)
+	if namespace == prometheus.PrometheusUnknownNamespace {
+		log.Warnf("Namespace not set in context metadata. Setting it as unknown in Prometheus.")
+	} else {
+		log.Debugf("Namespace from context metadata: %s", namespace)
+	}
+
 	if err != nil {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusExpandVolumeOpType,
-			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusFailStatus, namespace).Observe(time.Since(start).Seconds())
 	} else {
 		prometheus.CsiControlOpsHistVec.WithLabelValues(volumeType, prometheus.PrometheusExpandVolumeOpType,
-			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+			prometheus.PrometheusPassStatus, namespace).Observe(time.Since(start).Seconds())
 	}
 	return resp, err
 }

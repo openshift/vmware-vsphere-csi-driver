@@ -43,6 +43,8 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 // Tests to verify Full Sync.
@@ -240,8 +242,11 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+
 		}()
 
 		ginkgo.By(fmt.Sprintf("Waiting for claim %s to be in bound phase", pvc.Name))
@@ -327,8 +332,10 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		}
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By(fmt.Sprintf("Waiting for claim %s to be in bound phase", pvc.Name))
@@ -737,8 +744,15 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 			pandoraSyncWaitTime, fcdID))
 		time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
 
+		ginkgo.By("Get controller replica count before scaling down")
+		deployment, err := client.AppsV1().Deployments(csiControllerNamespace).Get(ctx,
+			vSphereCSIControllerPodNamePrefix, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		replica_before_scale_down := *deployment.Spec.Replicas
+		framework.Logf("Replica before scale down %d", replica_before_scale_down)
+
 		ginkgo.By("Scaling down the csi driver to zero replica")
-		deployment := updateDeploymentReplica(client, 0, vSphereCSIControllerPodNamePrefix, csiControllerNamespace)
+		deployment = updateDeploymentReplica(client, 0, vSphereCSIControllerPodNamePrefix, csiControllerNamespace)
 		ginkgo.By(fmt.Sprintf("Successfully scaled down the csi driver deployment:%s to zero replicas", deployment.Name))
 
 		ginkgo.By(fmt.Sprintf("Creating the PV with the fcdID %s", fcdID))
@@ -749,7 +763,8 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Scaling up the csi driver to one replica")
-		deployment = updateDeploymentReplica(client, 1, vSphereCSIControllerPodNamePrefix, csiControllerNamespace)
+		deployment = updateDeploymentReplica(client, replica_before_scale_down,
+			vSphereCSIControllerPodNamePrefix, csiControllerNamespace)
 		ginkgo.By(fmt.Sprintf("Successfully scaled up the csi driver deployment:%s to one replica", deployment.Name))
 
 		ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow full sync finish", fullSyncWaitTime))
@@ -798,8 +813,11 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		volHandle, pvc, pv, storageclass := createSCwithVolumeExpansionTrueAndDynamicPVC(
 			f, client, "", storagePolicyName, namespace)
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+
 			if pvc != nil {
 				err = fpv.DeletePersistentVolumeClaim(client, pvc.Name, namespace)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -810,7 +828,7 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		}()
 
 		ginkgo.By("create a pod pod1, using pvc1")
-		pod, _ := createPODandVerifyVolumeMount(f, client, namespace, pvc, volHandle)
+		pod, _ := createPODandVerifyVolumeMount(ctx, f, client, namespace, pvc, volHandle)
 		defer func() {
 			err := fpod.DeletePodWithWait(client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -879,7 +897,7 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		pod2, err = client.CoreV1().Pods(namespace).Get(ctx, pod2.Name, metav1.GetOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if vanillaCluster {
-			vmUUID = getNodeUUID(client, pod2.Spec.NodeName)
+			vmUUID = getNodeUUID(ctx, client, pod2.Spec.NodeName)
 		} else if guestCluster {
 			vmUUID, err = getVMUUIDFromNodeName(pod2.Spec.NodeName)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())

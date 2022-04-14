@@ -1,4 +1,4 @@
-// Copyright (c) 2018 VMware, Inc. All Rights Reserved.
+// Copyright (c) 2018-2021 VMware, Inc. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -41,6 +41,20 @@ type VirtualMachineImageOSInfo struct {
 	Type string `json:"type,omitempty"`
 }
 
+// OvfProperty describes information related to a user configurable property element that is supported by
+// VirtualMachineImage and can be customized during VirtualMachine creation.
+type OvfProperty struct {
+	// Key describes the key of the ovf property.
+	Key string `json:"key"`
+
+	// Type describes the type of the ovf property.
+	Type string `json:"type"`
+
+	// Default describes the default value of the ovf key.
+	// +optional
+	Default *string `json:"default,omitempty"`
+}
+
 // VirtualMachineImageSpec defines the desired state of VirtualMachineImage
 type VirtualMachineImageSpec struct {
 	// Type describes the type of the VirtualMachineImage. Currently, the only supported image is "OVF"
@@ -51,6 +65,12 @@ type VirtualMachineImageSpec struct {
 	// +optional
 	ImageSourceType string `json:"imageSourceType,omitempty"`
 
+	// ImageID is a unique identifier exposed by the provider of this VirtualMachineImage.
+	ImageID string `json:"imageID"`
+
+	// ProviderRef is a reference to a content provider object that describes a provider.
+	ProviderRef ContentProviderReference `json:"providerRef"`
+
 	// ProductInfo describes the attributes of the VirtualMachineImage relating to the product contained in the
 	// image.
 	// +optional
@@ -60,30 +80,66 @@ type VirtualMachineImageSpec struct {
 	// image.
 	// +optional
 	OSInfo VirtualMachineImageOSInfo `json:"osInfo,omitempty"`
+
+	// OVFEnv describes the user configurable customization parameters of the VirtualMachineImage.
+	// +optional
+	OVFEnv map[string]OvfProperty `json:"ovfEnv,omitempty"`
+
+	// HardwareVersion describes the virtual hardware version of the image
+	// +optional
+	HardwareVersion int32 `json:"hwVersion,omitempty"`
 }
 
 // VirtualMachineImageStatus defines the observed state of VirtualMachineImage
 type VirtualMachineImageStatus struct {
-	Uuid       string `json:"uuid,omitempty"`
+	// Deprecated
+	Uuid string `json:"uuid,omitempty"`
+
+	// Deprecated
 	InternalId string `json:"internalId"`
+
+	// Deprecated
 	PowerState string `json:"powerState,omitempty"`
+
+	// ImageName describes the display name of this VirtualMachineImage.
+	// +optional
+	ImageName string `json:"imageName,omitempty"`
+
+	// ImageSupported indicates whether the VirtualMachineImage is supported by VMService.
+	// A VirtualMachineImage is supported by VMService if the following conditions are true:
+	// - VirtualMachineImageV1Alpha1CompatibleCondition
+	// +optional
+	ImageSupported *bool `json:"imageSupported,omitempty"`
+
+	// Conditions describes the current condition information of the VirtualMachineImage object. e.g. if the OS type
+	// is supported or image is supported by VMService
+	// +optional
+	Conditions []Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 }
 
-// +genclient
-// +genclient:nonNamespaced
+func (vmImage *VirtualMachineImage) GetConditions() Conditions {
+	return vmImage.Status.Conditions
+}
+
+func (vmImage *VirtualMachineImage) SetConditions(conditions Conditions) {
+	vmImage.Status.Conditions = conditions
+}
+
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=vmimage
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="ContentSourceName",type="string",JSONPath=".spec.providerRef.name"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.productInfo.version"
 // +kubebuilder:printcolumn:name="OsType",type="string",JSONPath=".spec.osInfo.type"
+// +kubebuilder:printcolumn:name="Format",type="string",JSONPath=".spec.type"
+// +kubebuilder:printcolumn:name="ImageSupported",type="boolean",priority=1,JSONPath=".status.imageSupported"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // VirtualMachineImage is the Schema for the virtualmachineimages API
 // A VirtualMachineImage represents a VirtualMachine image (e.g. VM template) that can be used as the base image
 // for creating a VirtualMachine instance.  The VirtualMachineImage is a required field of the VirtualMachine
-// spec.  Currently, VirtualMachineImages are immutable to end users.  They are created and managed by a
-// VirtualMachineImage controller whose role is to discover available images in the backing infrastructure provider
-// that should be surfaced as consumable VirtualMachineImage resources.
+// spec.  Currently, VirtualMachineImages are immutable to end users.
 type VirtualMachineImage struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

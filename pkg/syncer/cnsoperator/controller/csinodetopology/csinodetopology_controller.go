@@ -23,10 +23,11 @@ import (
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
+
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -40,6 +41,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/node"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
@@ -69,8 +71,8 @@ var (
 func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	configInfo *cnsconfig.ConfigurationInfo, volumeManager volumes.Manager) error {
 	ctx, log := logger.GetNewContextWithLogger()
-	if clusterFlavor != cnstypes.CnsClusterFlavorVanilla {
-		log.Debug("Not initializing the CSINodetopology Controller as it is not a Vanilla CSI deployment")
+	if clusterFlavor != cnstypes.CnsClusterFlavorVanilla && clusterFlavor != cnstypes.CnsClusterFlavorGuest {
+		log.Debug("Not initializing the CSINodetopology Controller as it is not a Vanilla or Guest CSI deployment")
 		return nil
 	}
 
@@ -80,12 +82,42 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		log.Errorf("failed to create CO agnostic interface. Err: %v", err)
 		return err
 	}
-	if !coCommonInterface.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
-		log.Infof("Not initializing the CSINodetopology Controller as %s FSS is disabled",
-			common.ImprovedVolumeTopology)
+
+	if clusterFlavor == cnstypes.CnsClusterFlavorVanilla &&
+		!coCommonInterface.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
+		log.Infof("Not initializing the CSINodetopology Controller as %s FSS is disabled in %s",
+			common.ImprovedVolumeTopology, cnstypes.CnsClusterFlavorVanilla)
 		return nil
 	}
 
+	if clusterFlavor == cnstypes.CnsClusterFlavorGuest && !coCommonInterface.IsFSSEnabled(ctx, common.TKGsHA) {
+		log.Infof("Not initializing the CSINodetopology Controller as %s FSS is disabled in %s",
+			common.TKGsHA, cnstypes.CnsClusterFlavorGuest)
+		return nil
+	}
+
+	enableTKGsHAinGuest := clusterFlavor == cnstypes.CnsClusterFlavorGuest &&
+		coCommonInterface.IsFSSEnabled(ctx, common.TKGsHA)
+	var vmOperatorClient client.Client
+	var supervisorNamespace string
+	if enableTKGsHAinGuest {
+		log.Infof("The %s FSS is enabled in %s", common.TKGsHA, cnstypes.CnsClusterFlavorGuest)
+		restClientConfigForSupervisor :=
+			k8s.GetRestClientConfigForSupervisor(ctx, configInfo.Cfg.GC.Endpoint, configInfo.Cfg.GC.Port)
+		vmOperatorClient, err = k8s.NewClientForGroup(ctx, restClientConfigForSupervisor, vmoperatortypes.GroupName)
+		if err != nil {
+			log.Errorf("failed to create vmOperatorClient. Error: %+v", err)
+			return err
+		}
+
+		supervisorNamespace, err = cnsconfig.GetSupervisorNamespace(ctx)
+		if err != nil {
+			log.Errorf("failed to get supervisor namespace. Error: %+v", err)
+			return err
+		}
+	}
+
+	useNodeUuid := coCommonInterface.IsFSSEnabled(ctx, common.UseCSINodeId)
 	// Initialize kubernetes client.
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -102,14 +134,18 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	)
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme,
 		corev1.EventSource{Component: csinodetopologyv1alpha1.GroupName})
-	return add(mgr, newReconciler(mgr, configInfo, recorder))
+	return add(mgr, newReconciler(mgr, configInfo, recorder, useNodeUuid,
+		enableTKGsHAinGuest, vmOperatorClient, supervisorNamespace))
 }
 
 // newReconciler returns a new `reconcile.Reconciler`.
-func newReconciler(mgr manager.Manager, configInfo *cnsconfig.ConfigurationInfo,
-	recorder record.EventRecorder) reconcile.Reconciler {
+func newReconciler(mgr manager.Manager, configInfo *cnsconfig.ConfigurationInfo, recorder record.EventRecorder,
+	useNodeUuid bool, enableTKGsHAinGuest bool, vmOperatorClient client.Client,
+	supervisorNamespace string) reconcile.Reconciler {
 	return &ReconcileCSINodeTopology{client: mgr.GetClient(), scheme: mgr.GetScheme(),
-		configInfo: configInfo, recorder: recorder}
+		configInfo: configInfo, recorder: recorder,
+		useNodeUuid: useNodeUuid, enableTKGsHAinGuest: enableTKGsHAinGuest,
+		vmOperatorClient: vmOperatorClient, supervisorNamespace: supervisorNamespace}
 }
 
 // add adds a new Controller to mgr with r as the `reconcile.Reconciler`.
@@ -168,10 +204,14 @@ var _ reconcile.Reconciler = &ReconcileCSINodeTopology{}
 type ReconcileCSINodeTopology struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver.
-	client     client.Client
-	scheme     *runtime.Scheme
-	configInfo *cnsconfig.ConfigurationInfo
-	recorder   record.EventRecorder
+	client              client.Client
+	scheme              *runtime.Scheme
+	configInfo          *cnsconfig.ConfigurationInfo
+	recorder            record.EventRecorder
+	useNodeUuid         bool
+	enableTKGsHAinGuest bool
+	vmOperatorClient    client.Client
+	supervisorNamespace string
 }
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
@@ -179,7 +219,17 @@ type ReconcileCSINodeTopology struct {
 // Note: The Controller will requeue the Request to be processed again if the
 // returned error is non-nil or Result.Requeue is true, otherwise upon
 // completion it will remove the work from the queue.
-func (r *ReconcileCSINodeTopology) Reconcile(ctx context.Context, request reconcile.Request) (reconcile.Result, error) {
+func (r *ReconcileCSINodeTopology) Reconcile(ctx context.Context, request reconcile.Request) (
+	reconcile.Result, error) {
+	if r.enableTKGsHAinGuest {
+		return r.reconcileForGuest(ctx, request)
+	} else {
+		return r.reconcileForVanilla(ctx, request)
+	}
+}
+
+func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, request reconcile.Request) (
+	reconcile.Result, error) {
 	log := logger.GetLogger(ctx)
 
 	// Fetch the CSINodeTopology instance.
@@ -206,9 +256,27 @@ func (r *ReconcileCSINodeTopology) Reconcile(ctx context.Context, request reconc
 	backOffDurationMapMutex.Unlock()
 
 	// Get NodeVM instance.
-	nodeID := instance.Spec.NodeID
+	var nodeID string
 	nodeManager := node.GetManager(ctx)
-	nodeVM, err := nodeManager.GetNodeByName(ctx, nodeID)
+	var nodeVM *cnsvsphere.VirtualMachine
+
+	clusterFlavor, err := cnsconfig.GetClusterFlavor(ctx)
+	if err != nil {
+		log.Errorf("failed to get cluster flavor. Error: %+v", err)
+		return reconcile.Result{RequeueAfter: timeout}, nil
+	}
+
+	if r.useNodeUuid && clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
+		nodeID = instance.Spec.NodeUUID
+		if nodeID != "" {
+			nodeVM, err = nodeManager.GetNode(ctx, nodeID, nil)
+		} else {
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+	} else {
+		nodeID = instance.Spec.NodeID
+		nodeVM, err = nodeManager.GetNodeByName(ctx, nodeID)
+	}
 	if err != nil {
 		if err == node.ErrNodeNotFound {
 			log.Warnf("Node %q is not yet registered in the node manager. Error: %+v", nodeID, err)
@@ -264,8 +332,97 @@ func (r *ReconcileCSINodeTopology) Reconcile(ctx context.Context, request reconc
 	backOffDurationMapMutex.Lock()
 	delete(backOffDuration, instance.Name)
 	backOffDurationMapMutex.Unlock()
-	log.Infof("Successfully updated topology labels for nodeVM %q", instance.Name, nodeID)
+	log.Infof("Successfully updated topology labels for nodeVM %q", instance.Name)
 	return reconcile.Result{}, nil
+}
+
+func (r *ReconcileCSINodeTopology) reconcileForGuest(ctx context.Context, request reconcile.Request) (
+	reconcile.Result, error) {
+	log := logger.GetLogger(ctx)
+	log.Infof("Start reconciling the CSINodeTopology request %s in %s", request.Name, cnstypes.CnsClusterFlavorGuest)
+
+	// Fetch the CSINodeTopology instance.
+	instance := &csinodetopologyv1alpha1.CSINodeTopology{}
+	err := r.client.Get(ctx, request.NamespacedName, instance)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Infof("CSINodeTopology resource with name %q not found. Ignoring since object must have "+
+				"been deleted.", request.Name)
+			return reconcile.Result{}, nil
+		}
+		log.Errorf("Failed to fetch the CSINodeTopology instance with name: %q. Error: %+v", request.Name, err)
+		// Error reading the object - return with err.
+		return reconcile.Result{}, err
+	}
+
+	// Initialize backOffDuration for the instance, if required.
+	var timeout time.Duration
+	func() {
+		backOffDurationMapMutex.Lock()
+		defer backOffDurationMapMutex.Unlock()
+		if _, exists := backOffDuration[instance.Name]; !exists {
+			backOffDuration[instance.Name] = time.Second
+		}
+		timeout = backOffDuration[instance.Name]
+	}()
+
+	// Fetch topology labels for guest worker node backed by vmop VM.
+	topologyLabels, err := getNodeTopologyInfoForGuest(ctx, instance, r.vmOperatorClient, r.supervisorNamespace)
+	if err != nil {
+		msg := fmt.Sprintf("failed to fetch topology information for the worker node %q. Error: %v",
+			instance.Name, err)
+		log.Error(msg)
+		_ = updateCRStatus(ctx, r, instance, csinodetopologyv1alpha1.CSINodeTopologyError, msg)
+		return reconcile.Result{RequeueAfter: timeout}, nil
+	}
+
+	// Update CSINodeTopology instance.
+	instance.Status.TopologyLabels = topologyLabels
+	if err := updateCRStatus(ctx, r, instance, csinodetopologyv1alpha1.CSINodeTopologySuccess,
+		fmt.Sprintf("Topology labels successfully updated for the worker node %q", instance.Name)); err != nil {
+		return reconcile.Result{RequeueAfter: timeout}, nil
+	}
+
+	// On successful event, remove instance from backOffDuration.
+	func() {
+		backOffDurationMapMutex.Lock()
+		defer backOffDurationMapMutex.Unlock()
+		delete(backOffDuration, instance.Name)
+	}()
+
+	log.Infof("Successfully updated topology labels for worker %q in %s",
+		instance.Name, cnstypes.CnsClusterFlavorGuest)
+	return reconcile.Result{}, nil
+}
+
+func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv1alpha1.CSINodeTopology,
+	vmOperatorClient client.Client, supervisorNamespace string) ([]csinodetopologyv1alpha1.TopologyLabel, error) {
+	log := logger.GetLogger(ctx)
+
+	virtualMachine := &vmoperatortypes.VirtualMachine{}
+	vmKey := types.NamespacedName{
+		Namespace: supervisorNamespace,
+		Name:      instance.Name, // use the nodeName as the VM key
+	}
+
+	var err error
+	if err = vmOperatorClient.Get(ctx, vmKey, virtualMachine); err != nil {
+		return nil, logger.LogNewErrorf(log,
+			"failed to get VirtualMachines for the node: %q. Error: %+v", instance.Name, err)
+	}
+
+	var topologyLabels []csinodetopologyv1alpha1.TopologyLabel
+	if virtualMachine.Status.Zone != "" {
+		topologyLabels = make([]csinodetopologyv1alpha1.TopologyLabel, 0)
+		topologyLabels = append(topologyLabels,
+			csinodetopologyv1alpha1.TopologyLabel{
+				Key:   corev1.LabelZoneFailureDomainStable,
+				Value: virtualMachine.Status.Zone,
+			},
+		)
+	}
+
+	return topologyLabels, nil
 }
 
 func updateCRStatus(ctx context.Context, r *ReconcileCSINodeTopology, instance *csinodetopologyv1alpha1.CSINodeTopology,
@@ -325,80 +482,54 @@ func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine,
 		}
 	}()
 
-	// Create a map of topologyCategories with category as key and value as empty string.
+	// Create a map of TopologyCategories with category as key and value as empty string.
 	var isZoneRegion bool
+	topologyCategoriesMap := make(map[string]string)
+
 	zoneCat := strings.TrimSpace(cfg.Labels.Zone)
 	regionCat := strings.TrimSpace(cfg.Labels.Region)
-	topologyCategories := make(map[string]string)
 	if strings.TrimSpace(cfg.Labels.TopologyCategories) != "" {
 		categories := strings.Split(cfg.Labels.TopologyCategories, ",")
 		for _, cat := range categories {
-			topologyCategories[strings.TrimSpace(cat)] = ""
+			topologyCategoriesMap[strings.TrimSpace(cat)] = ""
 		}
 	} else if zoneCat != "" && regionCat != "" {
 		isZoneRegion = true
-		topologyCategories[zoneCat] = ""
-		topologyCategories[regionCat] = ""
+		topologyCategoriesMap[zoneCat] = ""
+		topologyCategoriesMap[regionCat] = ""
 	}
 
-	// Populate topology labels for NodeVM corresponding to each category in topologyCategories map.
-	err = nodeVM.GetTopologyLabels(ctx, tagManager, topologyCategories)
+	// Populate topology labels for NodeVM corresponding to each category in topologyCategoriesMap map.
+	err = nodeVM.GetTopologyLabels(ctx, tagManager, topologyCategoriesMap)
 	if err != nil {
 		log.Errorf("failed to get accessibleTopology for nodeVM: %v, Error: %v", nodeVM.Reference(), err)
 		return nil, err
 	}
-	log.Infof("NodeVM %q belongs to topology: %+v", nodeVM.Reference(), topologyCategories)
+	log.Infof("NodeVM %q belongs to topology: %+v", nodeVM.Reference(), topologyCategoriesMap)
 	topologyLabels := make([]csinodetopologyv1alpha1.TopologyLabel, 0)
+	// When zone and region parameters are used in vSphere config,
+	// read the TopologyCategory for labels.
 	if isZoneRegion {
-		// Create the kubernetes client.
-		k8sClient, err := k8s.NewClient(ctx)
-		if err != nil {
-			log.Errorf("failed to create K8s client. Error: %v", err)
-			return nil, err
+		var zoneLabel, regionLabel string
+		// Read zone label, default to standard beta labels if not mentioned.
+		zoneInfo, exists := cfg.TopologyCategory[zoneCat]
+		if exists {
+			zoneLabel = zoneInfo.Label
+		} else {
+			log.Infof("No label information for zone provided in the vSphere config secret, "+
+				"defaulting to standard topology beta label - %q", corev1.LabelFailureDomainBetaZone)
+			zoneLabel = corev1.LabelFailureDomainBetaZone
 		}
-
-		// In order to keep backward compatibility, we will discover existing topology labels
-		// on nodes in the cluster. Few examples on how the discovery works:
-		// Node    Topology label
-		// N1      topology.kubernetes.io/XYZ
-		// N2      topology.kubernetes.io/XYZ
-		// After the cluster is up and running, N1 and N2 will have topology labels of the
-		// form `topology.kubernetes.io/XYZ`
-		//
-		// Node    Topology label
-		// N1      failure-domain.beta.kubernetes.io/XYZ
-		// N2      No label
-		// After the cluster is up and running, N1 and N2 will have topology labels of the
-		// form `failure-domain.beta.kubernetes.io/XYZ`
-		//
-		// Node    Topology label
-		// N1      failure-domain.beta.kubernetes.io/XYZ
-		// N2      topology.kubernetes.io/XYZ
-		// The nodes in the cluster will remain in CrashLoopBackOff state till the customer
-		// intervenes to have a uniform label across all nodes in the cluster.
-		//
-		// Node    Topology label
-		// N1      No label
-		// N2      No label
-		// After the cluster is up and running, N1 and N2 will have topology labels of the
-		// form `topology.csi.vmware.com/XYZ`
-		nodeList, err := k8sClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return nil, logger.LogNewErrorf(log, "failed to list nodes in the cluster. Error: %+v", err)
+		// Read region label, default to standard beta labels if not mentioned.
+		regionInfo, exists := cfg.TopologyCategory[regionCat]
+		if exists {
+			regionLabel = regionInfo.Label
+		} else {
+			log.Infof("No label information for region provided in the vSphere config secret, "+
+				"defaulting to standard topology beta label - %q", corev1.LabelFailureDomainBetaRegion)
+			regionLabel = corev1.LabelFailureDomainBetaRegion
 		}
-		zoneLabel, regionLabel, err := findExistingTopologyLabels(ctx, nodeList.Items)
-		if err != nil {
-			return nil, logger.LogNewErrorf(log, "failed to discover existing topology labels "+
-				"on the nodes in the cluster. Error: %+v", err)
-		}
-		if zoneLabel == "" && regionLabel == "" {
-			log.Infof("Did not find any existing standard topology labels on the nodes in the " +
-				"cluster, using VMware CSI topology labels instead.")
-			zoneLabel = common.TopologyLabelsDomain + "/" + zoneCat
-			regionLabel = common.TopologyLabelsDomain + "/" + regionCat
-		}
-
-		for key, val := range topologyCategories {
+		for key, val := range topologyCategoriesMap {
 			switch key {
 			case zoneCat:
 				topologyLabels = append(topologyLabels,
@@ -411,47 +542,10 @@ func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine,
 	} else {
 		// Prefix user-defined topology labels with TopologyLabelsDomain name to distinctly
 		// identify the topology labels on the kubernetes node object added by our driver.
-		for key, val := range topologyCategories {
+		for key, val := range topologyCategoriesMap {
 			topologyLabels = append(topologyLabels,
 				csinodetopologyv1alpha1.TopologyLabel{Key: common.TopologyLabelsDomain + "/" + key, Value: val})
 		}
 	}
 	return topologyLabels, nil
-}
-
-// findExistingTopologyLabels figures out if the given list of nodes were already participating
-// in a topology setup. If yes, it will discover if the nodes use the standard topology beta
-// labels or the GA labels and return those. However, if the cluster has a mix of nodes with beta
-// and GA labels, it will error out and request the customer to fix the environment before proceeding
-// further. If no topology labels were found on all nodes, it will return empty strings.
-func findExistingTopologyLabels(ctx context.Context, nodeList []corev1.Node) (string, string, error) {
-	log := logger.GetLogger(ctx)
-	labelMap := map[string]bool{
-		"beta": false,
-		"GA":   false,
-	}
-	for _, k8sNode := range nodeList {
-		if k8sNode.Labels[corev1.LabelTopologyZone] != "" || k8sNode.Labels[corev1.LabelTopologyRegion] != "" {
-			labelMap["GA"] = true
-		}
-		if k8sNode.Labels[corev1.LabelFailureDomainBetaZone] != "" ||
-			k8sNode.Labels[corev1.LabelFailureDomainBetaRegion] != "" {
-			labelMap["beta"] = true
-		}
-		if labelMap["GA"] && labelMap["beta"] {
-			return "", "", logger.LogNewErrorf(log, "found conflicting topology labels on certain node(s) in "+
-				"the cluster. Nodes in the cluster should either have the standard topology beta labels "+
-				"starting with \"failure-domain.beta.kubernetes.io\" or standard topology GA labels starting with "+
-				"\"topology.kubernetes.io\".")
-		}
-	}
-	switch {
-	case labelMap["GA"]:
-		log.Infof("Found standard topology GA labels on the existing nodes in the cluster.")
-		return corev1.LabelTopologyZone, corev1.LabelTopologyRegion, nil
-	case labelMap["beta"]:
-		log.Infof("Found standard topology beta labels on the existing nodes in the cluster.")
-		return corev1.LabelFailureDomainBetaZone, corev1.LabelFailureDomainBetaRegion, nil
-	}
-	return "", "", nil
 }

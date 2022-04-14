@@ -85,7 +85,7 @@ func fullSyncGetInlineMigratedVolumesInfo(ctx context.Context,
 			if migrationFeatureState && volume.VsphereVolume != nil {
 				volumeHandle, err := volumeMigrationService.GetVolumeID(ctx,
 					&migration.VolumeSpec{VolumePath: volume.VsphereVolume.VolumePath,
-						StoragePolicyName: volume.VsphereVolume.StoragePolicyName})
+						StoragePolicyName: volume.VsphereVolume.StoragePolicyName}, true)
 				if err != nil {
 					log.Warnf(
 						"FullSync: Failed to get VolumeID from volumeMigrationService for volumePath: %s with error %+v",
@@ -230,15 +230,17 @@ func isValidvSphereVolumeClaim(ctx context.Context, pvcMetadata metav1.ObjectMet
 	// Checking if the migrated-to annotation is found in the PVC metadata.
 	if annotation, annMigratedToFound := pvcMetadata.Annotations[common.AnnMigratedTo]; annMigratedToFound {
 		if annotation == csitypes.Name &&
-			pvcMetadata.Annotations[common.AnnStorageProvisioner] == common.InTreePluginName {
+			(pvcMetadata.Annotations[common.AnnBetaStorageProvisioner] == common.InTreePluginName ||
+				pvcMetadata.Annotations[common.AnnStorageProvisioner] == common.InTreePluginName) {
 			log.Debugf("%v annotation found with value %q for PVC: %q",
 				common.AnnMigratedTo, csitypes.Name, pvcMetadata.Name)
 			return true
 		}
 	} else { // Checking if the PVC was provisioned by CSI.
-		if pvcMetadata.Annotations[common.AnnStorageProvisioner] == csitypes.Name {
-			log.Debugf("%v annotation found with value %q for PVC: %q",
-				common.AnnStorageProvisioner, csitypes.Name, pvcMetadata.Name)
+		if pvcMetadata.Annotations[common.AnnBetaStorageProvisioner] == csitypes.Name ||
+			pvcMetadata.Annotations[common.AnnStorageProvisioner] == csitypes.Name {
+			log.Debugf("%v or %v annotation found with value %q for PVC: %q",
+				common.AnnBetaStorageProvisioner, common.AnnStorageProvisioner, csitypes.Name, pvcMetadata.Name)
 			return true
 		}
 	}

@@ -65,6 +65,9 @@ var (
 
 	// MetadataSyncer instance for the syncer container.
 	MetadataSyncer *metadataSyncInformer
+
+	// Contains list of clusterComputeResourceMoIds on which supervisor cluster is deployed.
+	clusterComputeResourceMoIds = make([]string, 0)
 )
 
 // newInformer returns uninitialized metadataSyncInformer.
@@ -123,6 +126,29 @@ func getVolumeHealthIntervalInMin(ctx context.Context) int {
 	return volumeHealthIntervalInMin
 }
 
+// getPVtoBackingDiskObjectIdIntervalInMin returns pv to backingdiskobjectid interval.
+func getPVtoBackingDiskObjectIdIntervalInMin(ctx context.Context) int {
+	log := logger.GetLogger(ctx)
+	pvtoBackingDiskObjectIdIntervalInMin := defaultPVtoBackingDiskObjectIdIntervalInMin
+	if v := os.Getenv("PV_TO_BACKINGDISKOBJECTID_INTERVAL_MINUTES"); v != "" {
+		if value, err := strconv.Atoi(v); err == nil {
+			if value <= 0 {
+				log.Warnf("PVtoBackingDiskObjectId: PVtoBackingDiskObjectId interval set in env variable "+
+					"PV_TO_BACKINGDISKOBJECTID_INTERVAL_MINUTES %s is equal or less than 0, will use the "+
+					"default interval", v)
+			} else {
+				pvtoBackingDiskObjectIdIntervalInMin = value
+				log.Infof("PVtoBackingDiskObjectId: PVtoBackingDiskObjectId interval is set to %d minutes",
+					pvtoBackingDiskObjectIdIntervalInMin)
+			}
+		} else {
+			log.Warnf("PVtoBackingDiskObjectId: PVtoBackingDiskObjectId interval set in env variable "+
+				"PV_TO_BACKINGDISKOBJECTID_INTERVAL_MINUTES %s is invalid, will use the default interval", v)
+		}
+	}
+	return pvtoBackingDiskObjectIdIntervalInMin
+}
+
 // InitMetadataSyncer initializes the Metadata Sync Informer.
 func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 	configInfo *cnsconfig.ConfigurationInfo) error {
@@ -131,7 +157,6 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 	log.Infof("Initializing MetadataSyncer")
 	metadataSyncer := newInformer()
 	MetadataSyncer = metadataSyncer
-	metadataSyncer.configInfo = configInfo
 
 	// Create the kubernetes client from config.
 	k8sClient, err := k8s.NewClient(ctx)
@@ -148,6 +173,27 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		return err
 	}
 	metadataSyncer.clusterFlavor = clusterFlavor
+
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+			clusterComputeResourceMoIds, err = common.GetClusterComputeResourceMoIds(ctx)
+			if err != nil {
+				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
+				return err
+			}
+			if len(clusterComputeResourceMoIds) > 0 {
+				if configInfo.Cfg.Global.SupervisorID != "" {
+					// Use new SupervisorID for Volume Metadata when AvailabilityZone CR is present and
+					// config.Global.SupervisorID is not empty string
+					configInfo.Cfg.Global.ClusterID = configInfo.Cfg.Global.SupervisorID
+				} else {
+					return logger.LogNewError(log, "supervisor-id is not set in the vsphere-config-secret")
+				}
+			}
+		}
+	}
+	metadataSyncer.configInfo = configInfo
+
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		// Initialize client to supervisor cluster, if metadata syncer is being
 		// initialized for guest clusters.
@@ -385,6 +431,32 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		}()
 	}
 
+	// Trigger get pv to backingDiskObjectId mapping on vanilla cluster
+	pvToBackingDiskObjectIdFSSEnabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx,
+		common.PVtoBackingDiskObjectIdMapping)
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorVanilla && pvToBackingDiskObjectIdFSSEnabled {
+		pvToBackingDiskObjectIdMappingTicker := time.NewTicker(time.Duration(
+			getPVtoBackingDiskObjectIdIntervalInMin(ctx)) * time.Minute)
+		defer pvToBackingDiskObjectIdMappingTicker.Stop()
+
+		var pvToBackingDiskObjectIdSupportCheck bool
+		vCenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, configInfo, false)
+		if err != nil {
+			return err
+		}
+		pvToBackingDiskObjectIdSupportCheck = common.CheckPVtoBackingDiskObjectIdSupport(ctx, vCenter)
+
+		if pvToBackingDiskObjectIdSupportCheck {
+			go func() {
+				for ; true; <-pvToBackingDiskObjectIdMappingTicker.C {
+					ctx, log = logger.GetNewContextWithLogger()
+					log.Info("get pv to backingDiskObjectId mapping is triggered")
+					csiGetPVtoBackingDiskObjectIdMapping(ctx, k8sClient, metadataSyncer)
+				}
+			}()
+		}
+	}
+
 	volumeHealthTicker := time.NewTicker(time.Duration(getVolumeHealthIntervalInMin(ctx)) * time.Minute)
 	defer volumeHealthTicker.Stop()
 
@@ -541,6 +613,19 @@ func ReloadConfiguration(metadataSyncer *metadataSyncInformer, reconnectToVCFrom
 			metadataSyncer.host = newVCConfig.Host
 		}
 		if cfg != nil {
+			if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+					if len(clusterComputeResourceMoIds) > 0 {
+						if cfg.Global.SupervisorID != "" {
+							// Use new SupervisorID for Volume Metadata when AvailabilityZone CR is present and
+							// config.Global.SupervisorID is not empty string
+							cfg.Global.ClusterID = cfg.Global.SupervisorID
+						} else {
+							return logger.LogNewError(log, "supervisor-id is not set in the vsphere-config-secret")
+						}
+					}
+				}
+			}
 			metadataSyncer.configInfo = &cnsconfig.ConfigurationInfo{Cfg: cfg}
 			log.Infof("updated metadataSyncer.configInfo")
 		}
@@ -880,7 +965,7 @@ func csiPVCUpdated(ctx context.Context, pvc *v1.PersistentVolumeClaim,
 		}
 		migrationVolumeSpec := &migration.VolumeSpec{VolumePath: pv.Spec.VsphereVolume.VolumePath,
 			StoragePolicyName: pv.Spec.VsphereVolume.StoragePolicyName}
-		volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec)
+		volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec, true)
 		if err != nil {
 			log.Errorf("PVC Updated: Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 				"with error %+v", migrationVolumeSpec, err)
@@ -983,7 +1068,7 @@ func csiPVCDeleted(ctx context.Context, pvc *v1.PersistentVolumeClaim,
 		}
 		migrationVolumeSpec := &migration.VolumeSpec{VolumePath: pv.Spec.VsphereVolume.VolumePath,
 			StoragePolicyName: pv.Spec.VsphereVolume.StoragePolicyName}
-		volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec)
+		volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec, true)
 		if err != nil {
 			log.Errorf("PVC Deleted: Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 				"with error %+v", migrationVolumeSpec, err)
@@ -1036,7 +1121,7 @@ func csiPVUpdated(ctx context.Context, newPv *v1.PersistentVolume, oldPv *v1.Per
 		}
 		volumeHandle, err = volumeMigrationService.GetVolumeID(ctx,
 			&migration.VolumeSpec{VolumePath: newPv.Spec.VsphereVolume.VolumePath,
-				StoragePolicyName: newPv.Spec.VsphereVolume.StoragePolicyName})
+				StoragePolicyName: newPv.Spec.VsphereVolume.StoragePolicyName}, true)
 		if err != nil {
 			log.Errorf("PVUpdated: Failed to get VolumeID from volumeMigrationService for volumePath: %s with error %+v",
 				newPv.Spec.VsphereVolume.VolumePath, err)
@@ -1230,7 +1315,7 @@ func csiPVDeleted(ctx context.Context, pv *v1.PersistentVolume, metadataSyncer *
 			}
 			migrationVolumeSpec := &migration.VolumeSpec{VolumePath: pv.Spec.VsphereVolume.VolumePath,
 				StoragePolicyName: pv.Spec.VsphereVolume.StoragePolicyName}
-			volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec)
+			volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec, true)
 			if err != nil {
 				log.Errorf("PVDeleted: Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 					"with error %+v", migrationVolumeSpec, err)
@@ -1295,7 +1380,7 @@ func csiUpdatePod(ctx context.Context, pod *v1.Pod, metadataSyncer *metadataSync
 					}
 					migrationVolumeSpec := &migration.VolumeSpec{VolumePath: pv.Spec.VsphereVolume.VolumePath,
 						StoragePolicyName: pv.Spec.VsphereVolume.StoragePolicyName}
-					volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec)
+					volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec, true)
 					if err != nil {
 						log.Errorf("Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 							"with error %+v", migrationVolumeSpec, err)
@@ -1330,7 +1415,7 @@ func csiUpdatePod(ctx context.Context, pod *v1.Pod, metadataSyncer *metadataSync
 						return
 					}
 					migrationVolumeSpec := &migration.VolumeSpec{VolumePath: volume.VsphereVolume.VolumePath}
-					volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec)
+					volumeHandle, err = volumeMigrationService.GetVolumeID(ctx, migrationVolumeSpec, true)
 					if err != nil {
 						log.Warnf("Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 							"with error %+v", migrationVolumeSpec, err)

@@ -100,6 +100,9 @@ const (
 	// FileVolumeType is the VolumeType for CNS File Share Volume.
 	FileVolumeType = "FILE"
 
+	// UnknownVolumeType is assigned to CNS volumes whose type couldn't be determined.
+	UnknownVolumeType = "UNKNOWN"
+
 	// Nfsv4AccessPointKey is the key for NFSv4 access point.
 	Nfsv4AccessPointKey = "NFSv4.1"
 
@@ -137,6 +140,9 @@ const (
 	// VSphere7Version is the maximum vSphere version to use Vslm APIs
 	// to support volume migration feature.
 	VSphere7Version string = "7.0.0"
+
+	// VSphere8VersionMajorInt indicates the major version value in integer
+	VSphere8VersionMajorInt int = 8
 
 	// VSphere67u3lBuildInfo is the build number for vCenter in 6.7 Update 3l
 	// GA bits.
@@ -195,10 +201,18 @@ const (
 	// provisioned/deleted by its corresponding CSI driver.
 	AnnMigratedTo = "pv.kubernetes.io/migrated-to"
 
+	// AnnBetaStorageProvisioner annotation is added to a PVC that is supposed to
+	// be dynamically provisioned. Its value is name of volume plugin that is
+	// supposed to provision a volume for this PVC.
+	AnnBetaStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+
 	// AnnStorageProvisioner annotation is added to a PVC that is supposed to
 	// be dynamically provisioned. Its value is name of volume plugin that is
 	// supposed to provision a volume for this PVC.
-	AnnStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
+	AnnStorageProvisioner = "volume.kubernetes.io/storage-provisioner"
+
+	// vSphereCSIDriverName vSphere CSI driver name
+	VSphereCSIDriverName = "csi.vsphere.vmware.com"
 
 	// AnnDynamicallyProvisioned annotation is added to a PV that has been
 	// dynamically provisioned by Kubernetes. Its value is name of volume plugin
@@ -249,6 +263,24 @@ const (
 	// TopologyLabelsDomain is the domain name used to identify user-defined
 	// topology labels applied on the node by vSphere CSI driver.
 	TopologyLabelsDomain = "topology.csi.vmware.com"
+
+	//AnnGuestClusterRequestedTopology is the key for guest cluster requested topology
+	AnnGuestClusterRequestedTopology = "csi.vsphere.guest-cluster-requested-topology"
+
+	//AnnVolumeAccessibleTopology is the annotation set by the supervisor cluster on PVC
+	AnnVolumeAccessibleTopology = "csi.vsphere.volumeAccessibleTopology"
+
+	// PVtoBackingDiskObjectIdSupportedVCenterMajor is the minimum major version of vCenter
+	// on which PV to BackingDiskObjectId mapping feature is supported.
+	PVtoBackingDiskObjectIdSupportedVCenterMajor int = 7
+
+	// PVtoBackingDiskObjectIdSupportedVCenterMinor is the minimum minor version of vCenter
+	// on which PV to BackingDiskObjectId mapping feature is supported.
+	PVtoBackingDiskObjectIdSupportedVCenterMinor int = 0
+
+	// PVtoBackingDiskObjectIdSupportedVCenterPatch is the minimum patch version of vCenter
+	// on which PV to BackingDiskObjectId mapping feature is supported.
+	PVtoBackingDiskObjectIdSupportedVCenterPatch int = 2
 )
 
 // Supported container orchestrators.
@@ -301,4 +333,15 @@ const (
 	// CSIWindowsSupport is the feature to support csi block volumes for windows
 	// node.
 	CSIWindowsSupport = "csi-windows-support"
+	// UseCSINodeId is the feature to make sure CSI will no longer use
+	// ProviderID on K8s Node API object set by CPI. If not set, CSI
+	// will continue to use the Provider ID from K8s Node API object.
+	UseCSINodeId = "use-csinode-id"
+	// TKGsHA is the feature gate to check whether TKGS HA feature
+	// is enabled.
+	TKGsHA = "tkgs-ha"
+	// PVtoBackingDiskObjectIdMapping is the feature to support pv to backingDiskObjectId mapping on vSphere CSI driver.
+	PVtoBackingDiskObjectIdMapping = "pv-to-backingdiskobjectid-mapping"
+	// Block Create Volume for datastores that are in suspended mode
+	CnsMgrSuspendCreateVolume = "cnsmgr-suspend-create-volume"
 )

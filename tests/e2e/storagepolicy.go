@@ -31,6 +31,8 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 )
 
 // Tests to verify SPBM based dynamic volume provisioning using CSI Driver in
@@ -140,9 +142,14 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] "+
 		ginkgo.By(fmt.Sprintf("Invoking test for SPBM policy: %s", f.Namespace.Name))
 		scParameters := make(map[string]string)
 		scParameters[scParamStoragePolicyName] = f.Namespace.Name
-
-		expectedErrorMsg := "no pbm profile found with name: \"" + f.Namespace.Name + "\""
+		var expectedErrorMsg string
 		pvc := invokeInvalidPolicyTestNeg(client, namespace, scParameters, scParamStoragePolicyName, pollTimeoutShort)
+		if guestCluster {
+			expectedErrorMsg = "Volume parameter StoragePolicyName is not a valid GC CSI parameter"
+
+		} else {
+			expectedErrorMsg = "no pbm profile found with name: \"" + f.Namespace.Name + "\""
+		}
 		isFailureFound := checkEventsforError(client, namespace,
 			metav1.ListOptions{FieldSelector: fmt.Sprintf("involvedObject.name=%s", pvc.Name)}, expectedErrorMsg)
 		gomega.Expect(isFailureFound).To(gomega.BeTrue(), expectedErrorMsg)
@@ -175,8 +182,10 @@ func verifyStoragePolicyBasedVolumeProvisioning(f *framework.Framework, client c
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	defer func() {
-		err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		if !supervisorCluster {
+			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 	}()
 	defer func() {
 		err := fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
@@ -218,7 +227,7 @@ func verifyStoragePolicyBasedVolumeProvisioning(f *framework.Framework, client c
 		_, err := e2eVSphere.getVMByUUID(ctx, vmUUID)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	} else if vanillaCluster {
-		vmUUID = getNodeUUID(client, nodeName)
+		vmUUID = getNodeUUID(ctx, client, nodeName)
 	} else {
 		vmUUID, _ = getVMUUIDFromNodeName(nodeName)
 	}
@@ -279,6 +288,7 @@ func invokeInvalidPolicyTestNeg(client clientset.Interface, namespace string, sc
 	defer func() {
 		err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 	}()
 	defer func() {
 		err := fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)

@@ -35,6 +35,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	labels "k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubectl/pkg/drain"
@@ -85,7 +86,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		defer cancel()
 		generateNodeMap(ctx, testConfig, &e2eVSphere, client)
 
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 		kubectlMigEnabled = false
 
 		err = toggleCSIMigrationFeatureGatesOnKubeControllerManager(ctx, client, false)
@@ -106,12 +107,15 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		} else {
 			fullSyncWaitTime = defaultFullSyncWaitTime
 		}
+		vcpPvcsPreMig = []*v1.PersistentVolumeClaim{}
+		vcpPvcsPostMig = []*v1.PersistentVolumeClaim{}
+		vcpPvsPreMig = nil
+		vcpPvsPostMig = nil
 	})
 
 	ginkgo.JustAfterEach(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		fss.DeleteAllStatefulSets(client, namespace)
 		var pvcsToDelete []*v1.PersistentVolumeClaim
 		connect(ctx, &e2eVSphere)
 		if kcmMigEnabled {
@@ -141,6 +145,8 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 			time.Sleep(time.Duration(vsanHealthServiceWaitTime) * time.Second)
 		}
 
+		scaleDownNDeleteStsDeploymentsInNamespace(ctx, client, namespace)
+
 		for _, pod := range podsToDelete {
 			ginkgo.By(fmt.Sprintf("Deleting pod: %s", pod.Name))
 			volhandles := []string{}
@@ -162,7 +168,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 
 		if kubectlMigEnabled {
 			ginkgo.By("Disable CSI migration feature gates on kublets on k8s nodes")
-			toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+			toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 		}
 
 		crds := []*v1alpha1.CnsVSphereVolumeMigration{}
@@ -627,7 +633,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		verifyCnsVolumeMetadataAndCnsVSphereVolumeMigrationCrdForPvcs(ctx, client, vcpPvcsPostMig)
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true, namespace)
 		kubectlMigEnabled = true
 
 		ginkgo.By("Create pod1 using PVC1 and PVC2")
@@ -647,7 +653,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 			[]*v1.PersistentVolumeClaim{pvc1, pvc2})
 
 		ginkgo.By("Disable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 		kubectlMigEnabled = false
 
 	})
@@ -749,7 +755,8 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		verifyCnsVolumeMetadataAndCnsVSphereVolumeMigrationCrdForPvcs(ctx, client, vcpPvcsPreMig)
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(ctx, client, true, []*appsv1.StatefulSet{statefulset})
+		toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(
+			ctx, client, true, []*appsv1.StatefulSet{statefulset}, namespace)
 		kubectlMigEnabled = true
 
 		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
@@ -806,7 +813,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		vcpPvcsPostMig = []*v1.PersistentVolumeClaim{}
 
 		ginkgo.By("Disable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 	})
 
 	// Verify label and pod name updates with Deployment.
@@ -899,7 +906,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		verifyCnsVolumeMetadataAndCnsVSphereVolumeMigrationCrdForPvcs(ctx, client, vcpPvcsPreMig)
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true, namespace)
 		kubectlMigEnabled = true
 
 		ginkgo.By("Creating VCP PVC pvc2 post migration")
@@ -952,11 +959,15 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = fdep.WaitForDeploymentComplete(client, dep1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		pods, err = fdep.GetPodsForDeployment(client, dep1)
+		framework.Logf("sleep for 1 min...")
+		time.Sleep(1 * time.Minute)
+		dep1, err = client.AppsV1().Deployments(namespace).Get(ctx, dep1.Name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		pods, err = wait4DeploymentPodsCreation(client, dep1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(len(pods.Items)).NotTo(gomega.BeZero())
 		pod = pods.Items[0]
-		err = fpod.WaitForPodNameRunningInNamespace(client, pod.Name, namespace)
+		err = fpod.WaitTimeoutForPodReadyInNamespace(client, pod.Name, namespace, pollTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Wait and verify CNS entries for all CNS volumes created post migration " +
@@ -1032,7 +1043,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		kcmMigEnabled = true
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true, namespace)
 		kubectlMigEnabled = true
 
 		ginkgo.By("Create pod1 with inline volume and wait for it to reach Running state")
@@ -1152,7 +1163,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		verifyCnsVolumeMetadataAndCnsVSphereVolumeMigrationCrdForPvcs(ctx, client, vcpPvcsPreMig)
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, true, namespace)
 		kubectlMigEnabled = true
 
 		vcpPv, err := client.CoreV1().PersistentVolumes().Get(ctx, vcpPvsPreMig[0].Name, metav1.GetOptions{})
@@ -1222,7 +1233,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		vcpPvcsPreMig = []*v1.PersistentVolumeClaim{}
 
 		ginkgo.By("Disable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 		kubectlMigEnabled = false
 	})
 
@@ -1318,7 +1329,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		kcmMigEnabled = true
 
 		ginkgo.By("Enable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(ctx, client, true, stss)
+		toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(ctx, client, true, stss, namespace)
 		kubectlMigEnabled = true
 
 		ginkgo.By("Waiting for migration related annotations on PV/PVCs created before migration")
@@ -1399,7 +1410,7 @@ var _ = ginkgo.Describe("[csi-vcp-mig] VCP to CSI migration syncer tests", func(
 		vcpPvcsPostMig = []*v1.PersistentVolumeClaim{}
 
 		ginkgo.By("Disable CSI migration feature gates on kublets on k8s nodes")
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, false, namespace)
 
 	})
 
@@ -1514,7 +1525,10 @@ func getPodTryingToUsePvc(ctx context.Context, c clientset.Interface, namespace 
 			if strings.Contains(volume.Name, "kube-api-access") {
 				continue
 			}
-			if volume.VolumeSource.PersistentVolumeClaim == nil &&
+			if strings.Contains(volume.Name, "token") {
+				continue
+			}
+			if volume.VolumeSource.PersistentVolumeClaim != nil &&
 				volume.VolumeSource.PersistentVolumeClaim.ClaimName == pvcName {
 				return &pod
 			}
@@ -1535,7 +1549,7 @@ func createPodWithMultipleVolsVerifyVolMounts(ctx context.Context, client client
 	var vmUUID string
 
 	if vanillaCluster {
-		vmUUID = getNodeUUID(client, pod.Spec.NodeName)
+		vmUUID = getNodeUUID(ctx, client, pod.Spec.NodeName)
 	} else if guestCluster {
 		vmUUID, err = getVMUUIDFromNodeName(pod.Spec.NodeName)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1603,10 +1617,15 @@ func deletePodAndWaitForVolsToDetach(ctx context.Context, client clientset.Inter
 	} else {
 		return
 	}
+	framework.Logf("pod info:\n%s", spew.Sdump(pod))
 	for _, vol := range pod.Spec.Volumes {
 		if strings.Contains(vol.Name, "kube-api-access") {
 			continue
 		}
+		if strings.Contains(vol.Name, "token") {
+			continue
+		}
+		framework.Logf("vol info:\n%s", spew.Sdump(vol))
 		pv := getPvFromClaim(client, pod.Namespace, vol.PersistentVolumeClaim.ClaimName)
 		volhandles = append(volhandles, getVolHandle4Pv(ctx, client, pv))
 	}
@@ -1679,9 +1698,9 @@ func createPodWithInlineVols(ctx context.Context, client clientset.Interface,
 // toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts to toggle CSI
 // migration feature gates on kublets for worker nodes.
 func toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(ctx context.Context,
-	client clientset.Interface, shouldEnable bool, stss []*appsv1.StatefulSet) {
+	client clientset.Interface, shouldEnable bool, stss []*appsv1.StatefulSet, ns string) {
 	if stss == nil {
-		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, shouldEnable)
+		toggleCSIMigrationFeatureGatesOnK8snodes(ctx, client, shouldEnable, ns)
 		return
 	}
 	var err error
@@ -1723,4 +1742,55 @@ func toggleCSIMigrationFeatureGatesOnK8snodesWithWaitForSts(ctx context.Context,
 			fss.WaitForRunningAndReady(client, *ss.Spec.Replicas, ss)
 		}
 	}
+}
+
+//scaleDownNDeleteStsDeploymentsInNamespace scales down and deletes all statefulsets and deployments in given namespace
+func scaleDownNDeleteStsDeploymentsInNamespace(ctx context.Context, c clientset.Interface, ns string) {
+	ssList, err := c.AppsV1().StatefulSets(ns).List(
+		ctx, metav1.ListOptions{LabelSelector: labels.Everything().String()})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	for _, sts := range ssList.Items {
+		ss := &sts
+		if ss, err = fss.Scale(c, ss, 0); err != nil {
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+		fss.WaitForStatusReplicas(c, ss, 0)
+		framework.Logf("Deleting statefulset %v", ss.Name)
+		// Use OrphanDependents=false so it's deleted synchronously.
+		// We already made sure the Pods are gone inside Scale().
+		deletePolicy := metav1.DeletePropagationForeground
+		err = c.AppsV1().StatefulSets(ns).Delete(ctx, ss.Name, metav1.DeleteOptions{PropagationPolicy: &deletePolicy})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+
+	depList, err := c.AppsV1().Deployments(ns).List(
+		ctx, metav1.ListOptions{LabelSelector: labels.Everything().String()})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	for _, deployment := range depList.Items {
+		dep := &deployment
+		err = updateDeploymentReplicawithWait(c, 0, dep.Name, ns)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		deletePolicy := metav1.DeletePropagationForeground
+		err = c.AppsV1().Deployments(ns).Delete(ctx, dep.Name, metav1.DeleteOptions{PropagationPolicy: &deletePolicy})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	}
+}
+
+//wait4DeploymentPodsCreation wait for pods from deployment to be running
+func wait4DeploymentPodsCreation(c clientset.Interface, dep *appsv1.Deployment) (*v1.PodList, error) {
+	var pods *v1.PodList
+	var err error
+	waitErr := wait.PollImmediate(poll, pollTimeout, func() (bool, error) {
+		pods, err = fdep.GetPodsForDeployment(c, dep)
+		if err != nil {
+			if strings.Contains(err.Error(), "progressing") {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	})
+	return pods, waitErr
 }

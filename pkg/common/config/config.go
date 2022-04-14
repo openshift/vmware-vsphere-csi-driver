@@ -27,6 +27,7 @@ import (
 	"strings"
 
 	"gopkg.in/gcfg.v1"
+	corev1 "k8s.io/api/core/v1"
 
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
@@ -80,6 +81,9 @@ const (
 	DefaultGlobalMaxSnapshotsPerBlockVolume = 3
 	// MaxNumberOfTopologyCategories is the max number of topology domains/categories allowed.
 	MaxNumberOfTopologyCategories = 5
+	// TopologyLabelsDomain is the domain name used to identify user-defined
+	// topology labels applied on the node by vSphere CSI driver.
+	TopologyLabelsDomain = "topology.csi.vmware.com"
 )
 
 // Errors
@@ -101,6 +105,10 @@ var (
 	// ErrClusterIdCharLimit is returned when the provided cluster id is more
 	// than 64 characters.
 	ErrClusterIDCharLimit = errors.New("cluster id must not exceed 64 characters")
+
+	// ErrSupervisorIdCharLimit is returned when the provided supervisor id is more
+	// than 64 characters.
+	ErrSupervisorIDCharLimit = errors.New("supervisor id must not exceed 64 characters")
 
 	// ErrMissingEndpoint is returned when the provided configuration does not
 	// define any endpoints.
@@ -296,6 +304,11 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 		log.Error(ErrClusterIDCharLimit)
 		return ErrClusterIDCharLimit
 	}
+	// SupervisorID should not exceed 64 characters.
+	if len(cfg.Global.SupervisorID) > 64 {
+		log.Error(ErrSupervisorIDCharLimit)
+		return ErrSupervisorIDCharLimit
+	}
 	for vcServer, vcConfig := range cfg.VirtualCenter {
 		log.Debugf("Initializing vc server %s", vcServer)
 		if vcServer == "" {
@@ -387,6 +400,17 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 		if len(strings.Split(cfg.Labels.TopologyCategories, ",")) > MaxNumberOfTopologyCategories {
 			return logger.LogNewErrorf(log, "maximum limit of topology categories exceeded. Only %d allowed.",
 				MaxNumberOfTopologyCategories)
+		}
+	}
+
+	// Validate topology labels specified in TopologyCategory section.
+	betaDomain := strings.Split(corev1.LabelFailureDomainBetaZone, "/")[0]
+	gaDomain := strings.Split(corev1.LabelTopologyZone, "/")[0]
+	for key, categoryInfo := range cfg.TopologyCategory {
+		topoDomain := strings.Split(categoryInfo.Label, "/")[0]
+		if topoDomain != betaDomain && topoDomain != gaDomain && topoDomain != TopologyLabelsDomain {
+			return logger.LogNewErrorf(log, "unrecognised topology label %q used for topology category %q",
+				categoryInfo.Label, key)
 		}
 	}
 

@@ -75,6 +75,9 @@ rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list"]
+  - apiGroups: ["topology.tanzu.vmware.com"]
+    resources: ["availabilityzones"]
+    verbs: ["get", "list"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -333,7 +336,7 @@ spec:
             path: /etc/vmware/wcp/tls/
             type: Directory
 ---
-apiVersion: storage.k8s.io/v1beta1
+apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
   name: csi.vsphere.vmware.com
@@ -352,10 +355,13 @@ data:
   "trigger-csi-fullsync": "false"
   "csi-sv-feature-states-replication": "true"
   "fake-attach": "true"
-  "async-query-volume": "false"
+  "async-query-volume": "true"
   "improved-csi-idempotency": "false"
   "block-volume-snapshot": "false"
   "sibling-replica-bound-pvc-check": "true"
+  "tkgs-ha": "false"
+  "list-volumes": "false"
+  "cnsmgr-suspend-create-volume": "false"
 kind: ConfigMap
 metadata:
   name: csi-feature-states

@@ -31,10 +31,9 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
+	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
 )
 
 var _ = ginkgo.Describe("Volume health check", func() {
@@ -143,7 +142,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 
 		ginkgo.By("Invoking Test for validating health status")
@@ -165,8 +163,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -224,7 +224,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -314,7 +314,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 		// Decide which test setup is available to run.
@@ -335,8 +334,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -425,7 +426,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -460,7 +461,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 		// Decide which test setup is available to run.
@@ -481,8 +481,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -523,7 +525,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		queryResult, err := e2eVSphere.queryCNSVolumeWithResult(volHandle)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -580,7 +582,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -605,7 +607,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 		// Decide which test setup is available to run.
@@ -626,8 +627,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -716,7 +719,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -744,7 +747,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 		// Decide which test setup is available to run.
@@ -765,8 +767,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -848,7 +852,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -881,9 +885,12 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		scSpec := getVSphereStorageClassSpec(defaultNginxStorageClassName, scParameters, nil, "", "", false)
 		sc, err := client.StorageV1().StorageClasses().Create(ctx, scSpec, metav1.CreateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Creating service")
@@ -953,7 +960,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 		// Decide which test setup is available to run.
@@ -969,8 +975,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect volume to be provisioned successfully")
@@ -1010,7 +1018,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -1037,7 +1045,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 		ginkgo.By("Invoking Test for validating health status")
 
@@ -1051,8 +1058,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect volume to be provisioned successfully")
@@ -1116,7 +1125,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 
@@ -1236,7 +1245,6 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var isControllerUP = true
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
 		defer cancel()
 
 		ginkgo.By("Creating Storage Class and PVC")
@@ -1280,7 +1288,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		var gcClient clientset.Interface
 		if k8senv := GetAndExpectStringEnvVar("KUBECONFIG"); k8senv != "" {
-			gcClient, err = k8s.CreateKubernetesClientFromConfig(k8senv)
+			gcClient, err = createKubernetesClientFromConfig(k8senv)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 		ginkgo.By("Get svcClient and svNamespace")
@@ -1333,7 +1341,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -1355,7 +1363,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var pvc *v1.PersistentVolumeClaim
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 
 		if supervisorCluster {
@@ -1374,8 +1382,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By(fmt.Sprintf("Waiting for claim %s to be in bound phase", pvc.Name))
@@ -1444,7 +1454,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -1473,7 +1483,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var isControllerUP = true
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
@@ -1491,8 +1501,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By(fmt.Sprintf("Waiting for claim %s to be in bound phase", pvc.Name))
@@ -1579,7 +1591,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 
 		}
@@ -1609,7 +1621,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var pvclaims []*v1.PersistentVolumeClaim
 		var pv *v1.PersistentVolume
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
@@ -1636,8 +1648,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -1718,7 +1732,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		// It checks the colour code returned by cns for pv.
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red)")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthRed))
 		}
 
@@ -1749,7 +1763,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes)).NotTo(gomega.BeZero())
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -1776,7 +1790,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var pvclaims []*v1.PersistentVolumeClaim
 		var isSvcUp bool
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
@@ -1797,8 +1811,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -1834,7 +1850,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		ginkgo.By("Bringing SV API server down")
 		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
-		log.Infof("VC ip address: %v", vcAddress)
+		framework.Logf("VC ip address: %v", vcAddress)
 
 		err = bringSvcK8sAPIServerDown(vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1890,7 +1906,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var pvclaims []*v1.PersistentVolumeClaim
 		var pv *v1.PersistentVolume
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
 		if raid0StoragePolicyName == "" {
@@ -1915,8 +1931,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -2035,7 +2053,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -2065,7 +2083,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var isControllerUP = true
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
@@ -2101,7 +2119,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		var gcClient clientset.Interface
 		if k8senv := GetAndExpectStringEnvVar("KUBECONFIG"); k8senv != "" {
-			gcClient, err = k8s.CreateKubernetesClientFromConfig(k8senv)
+			gcClient, err = createKubernetesClientFromConfig(k8senv)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -2174,7 +2192,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(len(queryResult.Volumes) > 0)
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -2217,8 +2235,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			defer func() {
-				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				if !supervisorCluster {
+					err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
 			}()
 		}
 
@@ -2228,8 +2248,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			defer func() {
-				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
-				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				if !supervisorCluster {
+					err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
 			}()
 		}
 
@@ -2428,7 +2450,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		var err error
 		var pvclaims []*v1.PersistentVolumeClaim
 		ctx, cancel := context.WithCancel(context.Background())
-		log := logger.GetLogger(ctx)
+
 		defer cancel()
 		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
 		if raid0StoragePolicyName == "" {
@@ -2453,8 +2475,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -2511,7 +2535,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		queryResult, err := e2eVSphere.queryCNSVolumeWithResult(volHandle)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthRed))
 		}
 
@@ -2576,7 +2600,7 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 		ginkgo.By("Verifying the volume health status returned by CNS(green/yellow/red")
 		for _, vol := range queryResult.Volumes {
-			log.Infof("Volume health status: %s", vol.HealthStatus)
+			framework.Logf("Volume health status: %s", vol.HealthStatus)
 			gomega.Expect(vol.HealthStatus).Should(gomega.BeEquivalentTo(healthGreen))
 		}
 	})
@@ -2758,8 +2782,10 @@ var _ = ginkgo.Describe("Volume health check", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
-			err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !supervisorCluster {
+				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
 		}()
 
 		ginkgo.By("Expect claim to provision volume successfully")
@@ -2814,4 +2840,241 @@ var _ = ginkgo.Describe("Volume health check", func() {
 
 	})
 
+	// Restart statefulset pod and verify pod status when one of pvc pod becomes inaccessible
+	// Steps
+	// 1. Create a storage class.
+	// 2. Create nginx service.
+	// 3. Create nginx statefulset.
+	// 4. Wait until all Pods are ready and PVCs are bounded with PV.
+	// 5. Verify health annotation added on the PVC is accessible.
+	// 6. PSOD the host where volume is mounted.
+	// 7. Verify health annotation on the PVC is updated to inaccessible.
+	// 8. Restart statefulset and check pod status.
+	// 9. Delete the statefulset pod.
+	// 10. Delete the PVC.
+	// 11. Delete the storage class.
+
+	ginkgo.It("[csi-supervisor] [csi-guest] If pod pvc becomes inaccessible restart pod and check pod status", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var statusFlag bool = false
+		var pvSVC *v1.PersistentVolume
+		ignoreLabels := make(map[string]string)
+		raid0StoragePolicyName = os.Getenv("RAID_0_STORAGE_POLICY")
+		if raid0StoragePolicyName == "" {
+			ginkgo.Skip("Env RAID_0_STORAGE_POLICY is missing")
+		}
+
+		ginkgo.By("Creating StorageClass for Statefulset")
+		// Decide which test setup is available to run.
+		if supervisorCluster {
+			ginkgo.By("CNS_TEST: Running for WCP setup")
+			profileID := e2eVSphere.GetSpbmPolicyID(raid0StoragePolicyName)
+			scParameters[scParamStoragePolicyID] = profileID
+			// Create resource quota.
+			createResourceQuota(client, namespace, rqLimit, defaultNginxStorageClassName)
+			scSpec := getVSphereStorageClassSpec(defaultNginxStorageClassName, scParameters, nil, "", "", false)
+			sc, err := client.StorageV1().StorageClasses().Create(ctx, scSpec, metav1.CreateOptions{})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			defer func() {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}()
+		}
+
+		if guestCluster {
+			scParameters[svStorageClassName] = raid0StoragePolicyName
+			sc, err := createStorageClass(client, scParameters, nil, "", "", false, "nginx-sc")
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			defer func() {
+				err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}()
+		}
+
+		ginkgo.By("Creating service")
+		service := CreateService(namespace, client)
+		defer func() {
+			deleteService(namespace, client, service)
+		}()
+		statefulset := GetStatefulSetFromManifest(namespace)
+		ginkgo.By("Creating statefulset")
+		CreateStatefulSet(namespace, statefulset, client)
+		replicas := *(statefulset.Spec.Replicas)
+		// Waiting for pods status to be Ready.
+		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
+			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
+		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
+			"Number of Pods in the statefulset should match with number of replicas")
+
+		if supervisorCluster {
+			// Get the list of Volumes attached to Pods.
+			for _, sspod := range ssPodsBeforeScaleDown.Items {
+				for _, volumespec := range sspod.Spec.Volumes {
+					if volumespec.PersistentVolumeClaim != nil {
+						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						// Verify the attached volume match the one in CNS cache.
+						err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+							volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("Expect health status of the pvc to be accessible")
+						pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx,
+							volumespec.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("poll for health status annotation")
+						err = pvcHealthAnnotationWatcher(ctx, client, pvc, healthStatusAccessible)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						pvSVC = getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						framework.Logf("PV name in SVC for PVC in GC %v", pvSVC.Name)
+					}
+				}
+			}
+		}
+
+		if guestCluster {
+			for _, sspod := range ssPodsBeforeScaleDown.Items {
+				_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				for _, volumespec := range sspod.Spec.Volumes {
+					if volumespec.PersistentVolumeClaim != nil {
+						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						ginkgo.By("Verify CnsNodeVmAttachment CRD is created")
+						volumeID := pv.Spec.CSI.VolumeHandle
+						svcPVCName := volumeID
+						volumeID = getVolumeIDFromSupervisorCluster(svcPVCName)
+						gomega.Expect(volumeID).NotTo(gomega.BeEmpty())
+						verifyCRDInSupervisor(ctx, f, sspod.Spec.NodeName+"-"+svcPVCName,
+							crdCNSNodeVMAttachment, crdVersion, crdGroup, true)
+
+						ginkgo.By("Expect health status of the pvc to be accessible")
+						pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx,
+							volumespec.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+						ginkgo.By("poll for health status annotation")
+						err = pvcHealthAnnotationWatcher(ctx, client, pvc, healthStatusAccessible)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+						ginkgo.By("Expect health annotation is added on the SV pvc")
+						svPVC := getPVCFromSupervisorCluster(pv.Spec.CSI.VolumeHandle)
+						framework.Logf("svPVC %v", svPVC)
+
+						ginkgo.By("Get svcClient and svNamespace")
+						svcClient, svNamespace := getSvcClientAndNamespace()
+
+						ginkgo.By("poll for health status annotation")
+						err = pvcHealthAnnotationWatcher(ctx, svcClient, svPVC, healthStatusAccessible)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+						pvSVC = getPvFromClaim(svcClient, svNamespace, pv.Spec.CSI.VolumeHandle)
+						framework.Logf("PV name in SVC for PVC in GC %v", pvSVC.Name)
+
+					}
+				}
+			}
+		}
+
+		// PSOD the host.
+		ginkgo.By("PSOD the host")
+		framework.Logf("pv.Name %v", pvSVC.Name)
+		hostIP = psodHostWithPv(ctx, &e2eVSphere, pvSVC.Name)
+
+		defer func() {
+			ginkgo.By("checking host status")
+			err := waitForHostToBeUp(hostIP)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
+			fss.DeleteAllStatefulSets(client, namespace)
+		}()
+
+		ginkgo.By(fmt.Sprintf("Sleeping for %v to allow volume health check to be triggered", svOperationTimeout))
+		time.Sleep(svOperationTimeout)
+
+		ginkgo.By("Expect health status of a pvc to be inaccessible")
+		// Get the list of Volumes attached to Pods.
+		for _, sspod := range ssPodsBeforeScaleDown.Items {
+			for _, volumespec := range sspod.Spec.Volumes {
+				if volumespec.PersistentVolumeClaim != nil {
+					if supervisorCluster {
+						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						// Verify the attached volume match the one in CNS cache.
+						err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+							volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					}
+					pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx,
+						volumespec.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					if pvc.Annotations[volumeHealthAnnotation] == healthStatusInAccessible {
+						statusFlag = true
+						break
+					}
+				}
+			}
+		}
+		ginkgo.By("Expect health annotation is added on the SV pvc is inaccessible")
+		if guestCluster {
+			ginkgo.By("Get svcClient and svNamespace")
+			for _, sspod := range ssPodsBeforeScaleDown.Items {
+				_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				for _, volumespec := range sspod.Spec.Volumes {
+					if volumespec.PersistentVolumeClaim != nil {
+						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						svPVC := getPVCFromSupervisorCluster(pv.Spec.CSI.VolumeHandle)
+						if svPVC.Annotations[volumeHealthAnnotation] == healthStatusInAccessible {
+							statusFlag = true
+							break
+						} else {
+							statusFlag = false
+						}
+					}
+				}
+			}
+		}
+
+		// Expecting the status Flag to be true.
+		gomega.Expect(statusFlag).NotTo(gomega.BeFalse(), "Volume health status is not as expected")
+
+		ginkgo.By("Restart Statefulset and check Pod status")
+		// Fetch the number of Statefulset pods running before restart
+		list_of_pods, err := fpod.GetPodsInNamespace(client, namespace, ignoreLabels)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		cmd := []string{"rollout", "restart", "statefulset.apps/" + statefulset.Name, "--namespace=" + namespace}
+		framework.RunKubectlOrDie(namespace, cmd...)
+
+		// Wait for the StatefulSet Pods to be up and Running
+		num_csi_pods := len(list_of_pods)
+		err = fpod.WaitForPodsRunningReady(client, namespace, int32(num_csi_pods), 0, pollTimeout, ignoreLabels)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		if supervisorCluster {
+			// Get the list of Volumes attached to Pods.
+			for _, sspod := range ssPodsBeforeScaleDown.Items {
+				for _, volumespec := range sspod.Spec.Volumes {
+					if volumespec.PersistentVolumeClaim != nil {
+						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+						// Verify the attached volume match the one in CNS cache.
+						err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+							volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("Expect health status of the pvc to be accessible")
+						pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx,
+							volumespec.PersistentVolumeClaim.ClaimName, metav1.GetOptions{})
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("poll for health status annotation")
+						err = pvcHealthAnnotationWatcher(ctx, client, pvc, healthStatusAccessible)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					}
+				}
+			}
+		}
+
+	})
 })

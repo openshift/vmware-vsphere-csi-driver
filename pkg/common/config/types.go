@@ -25,6 +25,9 @@ type Config struct {
 		VCenterIP string
 		// Kubernetes Cluster ID
 		ClusterID string `gcfg:"cluster-id"`
+		// SupervisorID is the UUID representing Supervisor Cluster. ClusterID is being deprecated
+		// and SupervisorID is the replacement ID we need to use for VolumeMetadata and datastore lookup.
+		SupervisorID string `gcfg:"supervisor-id"`
 		// vCenter username.
 		User string `gcfg:"user"`
 		// vCenter password in clear text.
@@ -88,6 +91,8 @@ type Config struct {
 		// Maximum number of categories allowed is 5.
 		TopologyCategories string `gcfg:"topology-categories"`
 	}
+
+	TopologyCategory map[string]*TopologyCategoryInfo
 }
 
 // ConfigurationInfo is a struct that used to capture config param details
@@ -99,6 +104,11 @@ type ConfigurationInfo struct {
 type FeatureStatesConfigInfo struct {
 	Name      string
 	Namespace string
+}
+
+// TopologyCategoryInfo contains metadata for the Zone and Region parameters under Labels section.
+type TopologyCategoryInfo struct {
+	Label string `gcfg:"label"`
 }
 
 // NetPermissionConfig consists of information used to restrict the
