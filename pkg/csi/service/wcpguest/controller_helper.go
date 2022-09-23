@@ -26,13 +26,12 @@ import (
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
@@ -57,31 +56,43 @@ const (
 // CreateVolumeRequest for Guest Cluster CSI driver.
 // Function returns error if validation fails otherwise returns nil.
 func validateGuestClusterCreateVolumeRequest(ctx context.Context, req *csi.CreateVolumeRequest) error {
+	log := logger.GetLogger(ctx)
 	// Validate Name length of volumeName is > 4, eg: pvc-xxxxx
 	if len(req.Name) <= 4 {
-		msg := fmt.Sprintf("Volume name %s is not valid", req.Name)
-		return status.Error(codes.InvalidArgument, msg)
+		return logger.LogNewErrorCodef(log, codes.InvalidArgument, "Volume name %s is not valid", req.Name)
 	}
+	tkgsHAEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
 	// Get create params
-	var supervisorStorageClass string
-	params := req.GetParameters()
-	for param := range params {
-		paramName := strings.ToLower(param)
-		if paramName != common.AttributeSupervisorStorageClass {
-			msg := fmt.Sprintf("Volume parameter %s is not a valid GC CSI parameter", param)
-			return status.Error(codes.InvalidArgument, msg)
+	for param, val := range req.GetParameters() {
+		switch strings.ToLower(param) {
+		case common.AttributeSupervisorStorageClass:
+			// Validate if the req contains non-empty common.AttributeSupervisorStorageClass
+			if val == "" {
+				return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+					"volume parameter %s is not set in the CreateVolume request",
+					common.AttributeSupervisorStorageClass)
+			}
+		case common.AttributeStorageTopologyType:
+			if tkgsHAEnabled {
+				storageTopologyTypeVal := strings.ToLower(val)
+				if storageTopologyTypeVal != "" && storageTopologyTypeVal != "zonal" {
+					return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+						"invalid value %q received for %q parameter.", val, param)
+				}
+			} else {
+				return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+					"Volume parameter %s is not a valid GC CSI parameter", param)
+			}
+		default:
+			return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"Volume parameter %s is not a valid GC CSI parameter", param)
 		}
-		supervisorStorageClass = req.Parameters[param]
 	}
-	// Validate if the req contains non-empty common.AttributeSupervisorStorageClass
-	if supervisorStorageClass == "" {
-		msg := fmt.Sprintf("Volume parameter %s is not set in the req", common.AttributeSupervisorStorageClass)
-		return status.Error(codes.InvalidArgument, msg)
-	}
+
 	// Fail file volume creation if file volume feature gate is disabled
 	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FileVolume) &&
 		common.IsFileVolumeRequest(ctx, req.GetVolumeCapabilities()) {
-		return status.Error(codes.InvalidArgument, "File volume not supported.")
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "File volume provisioning is not supported.")
 	}
 	return common.ValidateCreateVolumeRequest(ctx, req)
 }
@@ -219,10 +230,10 @@ func generateGuestClusterRequestedTopologyJSON(topologies []*csi.Topology) (stri
 	return "[" + strings.Join(segmentsArray, ",") + "]", nil
 }
 
-// generateVolumeAccessibilityRequirementsFromPVCAnnotation returns TopologyRequirement generated using
-// PVC annotation "csi.vsphere.volumeAccessibleTopology"
-func generateVolumeAccessibilityRequirementsFromPVCAnnotation(claim *v1.PersistentVolumeClaim) (
-	*csi.TopologyRequirement, error) {
+// generateVolumeAccessibleTopologyFromPVCAnnotation returns accessible topologies generated using
+// PVC annotation "csi.vsphere.volume-accessible-topology".
+func generateVolumeAccessibleTopologyFromPVCAnnotation(claim *v1.PersistentVolumeClaim) (
+	[]map[string]string, error) {
 	volumeAccessibleTopology := claim.Annotations[common.AnnVolumeAccessibleTopology]
 	if volumeAccessibleTopology == "" {
 		return nil, fmt.Errorf("annotation %q is not set for the claim: %q, namespace: %q",
@@ -235,57 +246,78 @@ func generateVolumeAccessibilityRequirementsFromPVCAnnotation(claim *v1.Persiste
 			"err: %v", common.AnnVolumeAccessibleTopology, volumeAccessibleTopology,
 			claim.Name, claim.Namespace, err)
 	}
-	requirement := &csi.TopologyRequirement{}
-	for _, topology := range volumeAccessibleTopologyArray {
-		topologySegment := map[string]string{}
-		for key, value := range topology {
-			topologySegment[key] = fmt.Sprintf("%v", value)
-			requirement.Preferred = append(requirement.Preferred, &csi.Topology{Segments: topologySegment})
-		}
-	}
-	requirement.Requisite = requirement.Preferred
-	return requirement, nil
+	return volumeAccessibleTopologyArray, nil
 }
 
 // isPVCInSupervisorClusterBound return true if the PVC is bound in the
 // supervisor cluster before timeout, otherwise return false.
 func isPVCInSupervisorClusterBound(ctx context.Context, client clientset.Interface,
-	claim *v1.PersistentVolumeClaim, timeout time.Duration) (bool, error) {
+	supervisorPvc *v1.PersistentVolumeClaim, timeout time.Duration) (bool, error) {
 	log := logger.GetLogger(ctx)
-	pvcName := claim.Name
-	ns := claim.Namespace
+	supervisorPvcName := supervisorPvc.Name
+	supervisorPvcNamespace := supervisorPvc.Namespace
 	timeoutSeconds := int64(timeout.Seconds())
 
 	log.Infof("Waiting up to %d seconds for PersistentVolumeClaim %v in namespace %s to have phase %s",
-		timeoutSeconds, pvcName, ns, v1.ClaimBound)
-	watchClaim, err := client.CoreV1().PersistentVolumeClaims(ns).Watch(
-		ctx,
-		metav1.ListOptions{
-			FieldSelector:  fields.OneTermEqualSelector("metadata.name", pvcName).String(),
-			TimeoutSeconds: &timeoutSeconds,
-			Watch:          true,
-		})
-	if err != nil {
-		errMsg := fmt.Errorf("failed to watch PersistentVolumeClaim %s with Error: %v", pvcName, err)
-		log.Error(errMsg)
-		return false, errMsg
-	}
-	defer watchClaim.Stop()
+		timeoutSeconds, supervisorPvcName, supervisorPvcNamespace, v1.ClaimBound)
 
-	for event := range watchClaim.ResultChan() {
-		pvc, ok := event.Object.(*v1.PersistentVolumeClaim)
-		if !ok {
-			continue
+	isClaimBound := false
+
+	waitErr := wait.PollImmediate(5*time.Second, timeout, func() (done bool, err error) {
+		pvc, err := client.CoreV1().PersistentVolumeClaims(supervisorPvcNamespace).Get(
+			ctx, supervisorPvcName, metav1.GetOptions{})
+		if err != nil {
+			msg := fmt.Sprintf("unable to fetch pvc %q/%q "+
+				"from supervisor cluster with err: %+v",
+				supervisorPvcNamespace, pvc.Name, err)
+			log.Warnf(msg)
+			return false, logger.LogNewErrorf(log, msg)
 		}
-		log.Debugf("PersistentVolumeClaim %s in namespace %s is in state %s. Received event %v",
-			pvcName, ns, pvc.Status.Phase, event)
-		if pvc.Status.Phase == v1.ClaimBound && pvc.Name == pvcName {
-			log.Infof("PersistentVolumeClaim %s in namespace %s is in state %s", pvcName, ns, pvc.Status.Phase)
+		if pvc.Status.Phase == v1.ClaimBound {
+			log.Infof("PersistentVolumeClaim %s in namespace %s is in state %s",
+				supervisorPvcName, supervisorPvcNamespace, pvc.Status.Phase)
+			isClaimBound = true
 			return true, nil
+		} else if pvc.Status.Phase == v1.ClaimPending {
+			eventList, listErr := client.CoreV1().Events(supervisorPvcNamespace).List(ctx,
+				metav1.ListOptions{FieldSelector: "involvedObject.name=" + supervisorPvcName})
+			if listErr != nil {
+				msg := fmt.Sprintf("unable to fetch events for pvc %q/%q "+
+					"from supervisor cluster with err: %+v",
+					supervisorPvcNamespace, pvc.Name, listErr)
+				log.Warnf(msg)
+				return false, logger.LogNewErrorf(log, msg)
+			}
+			var failureMessage string
+			// reason I think this will work without sorting events by creation timestamp
+			// pvc creation attempt in supervisor -> pvc pending phase -> provisioning failed message -> return failure to GC
+			// GC retries -> pvc now created in supervisor -> pvc bound phase -> we return true inside ClaimBound
+			for _, svcPvcEvent := range eventList.Items {
+				if strings.Contains(svcPvcEvent.Reason, "ProvisioningFailed") {
+					failureMessage = svcPvcEvent.Message
+					break
+				}
+			}
+
+			if failureMessage != "" {
+				return true, logger.LogNewErrorf(log, failureMessage)
+			}
 		}
+		return false, nil
+	})
+
+	if !isClaimBound {
+		msg := fmt.Sprintf("persistentVolumeClaim %s in namespace %s not in phase %s "+
+			"within %d seconds", supervisorPvcName, supervisorPvcNamespace, v1.ClaimBound, timeoutSeconds)
+
+		if waitErr != nil {
+			msg += fmt.Sprintf(": message: %v", waitErr.Error())
+		}
+
+		return false, fmt.Errorf(msg)
 	}
-	return false, fmt.Errorf("persistentVolumeClaim %s in namespace %s not in phase %s within %d seconds",
-		pvcName, ns, v1.ClaimBound, timeoutSeconds)
+
+	return true, nil
 }
 
 // getProvisionTimeoutInMin() return the timeout for volume provision.

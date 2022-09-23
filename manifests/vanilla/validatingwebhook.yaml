@@ -113,9 +113,12 @@ spec:
     spec:
       serviceAccountName: vsphere-csi-webhook
       nodeSelector:
-        node-role.kubernetes.io/master: ""
+        node-role.kubernetes.io/control-plane: ""
       tolerations:
         - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/control-plane
           operator: Exists
           effect: NoSchedule
         # uncomment below toleration if you need an aggressive pod eviction in case when
@@ -131,7 +134,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: vsphere-webhook
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.5.1
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v2.6.0
           args:
             - "--operation-mode=WEBHOOK_SERVER"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"

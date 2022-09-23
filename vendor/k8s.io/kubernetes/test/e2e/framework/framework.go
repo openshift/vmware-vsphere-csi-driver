@@ -248,6 +248,9 @@ func (f *Framework) BeforeEach() {
 			ginkgo.By("Waiting for a default service account to be provisioned in namespace")
 			err = WaitForDefaultServiceAccountInNamespace(f.ClientSet, namespace.Name)
 			ExpectNoError(err)
+			ginkgo.By("Waiting for kube-root-ca.crt to be provisioned in namespace")
+			err = WaitForKubeRootCAInNamespace(f.ClientSet, namespace.Name)
+			ExpectNoError(err)
 		} else {
 			Logf("Skipping waiting for service account")
 		}
@@ -296,7 +299,7 @@ func (f *Framework) BeforeEach() {
 
 	gatherMetricsAfterTest := TestContext.GatherMetricsAfterTest == "true" || TestContext.GatherMetricsAfterTest == "master"
 	if gatherMetricsAfterTest && TestContext.IncludeClusterAutoscalerMetrics {
-		grabber, err := e2emetrics.NewMetricsGrabber(f.ClientSet, f.KubemarkExternalClusterClientSet, !ProviderIs("kubemark"), false, false, false, TestContext.IncludeClusterAutoscalerMetrics)
+		grabber, err := e2emetrics.NewMetricsGrabber(f.ClientSet, f.KubemarkExternalClusterClientSet, f.ClientConfig(), !ProviderIs("kubemark"), false, false, false, TestContext.IncludeClusterAutoscalerMetrics, false)
 		if err != nil {
 			Logf("Failed to create MetricsGrabber (skipping ClusterAutoscaler metrics gathering before test): %v", err)
 		} else {
@@ -449,7 +452,7 @@ func (f *Framework) AfterEach() {
 		ginkgo.By("Gathering metrics")
 		// Grab apiserver, scheduler, controller-manager metrics and (optionally) nodes' kubelet metrics.
 		grabMetricsFromKubelets := TestContext.GatherMetricsAfterTest != "master" && !ProviderIs("kubemark")
-		grabber, err := e2emetrics.NewMetricsGrabber(f.ClientSet, f.KubemarkExternalClusterClientSet, grabMetricsFromKubelets, true, true, true, TestContext.IncludeClusterAutoscalerMetrics)
+		grabber, err := e2emetrics.NewMetricsGrabber(f.ClientSet, f.KubemarkExternalClusterClientSet, f.ClientConfig(), grabMetricsFromKubelets, true, true, true, TestContext.IncludeClusterAutoscalerMetrics, false)
 		if err != nil {
 			Logf("Failed to create MetricsGrabber (skipping metrics gathering): %v", err)
 		} else {

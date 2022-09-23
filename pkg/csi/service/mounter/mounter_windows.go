@@ -403,8 +403,25 @@ func (mounter *csiProxyMounter) GetDeviceNameFromMount(mountPath string) (string
 // ResizeVolume resizes the volume to the maximum available size.
 // sizeInBytes is ignored in this function as windows is not resizing to full capacity
 func (mounter *csiProxyMounter) ResizeVolume(devicePath string, sizeInBytes int64) error {
+	// Set disk to online mode before resize
+	getDiskNumberRequest := &volume.GetDiskNumberFromVolumeIDRequest{
+		VolumeId: devicePath, // here devicePath is Device.RealDev which is Volume ID for Windows
+	}
+	getDiskNumberResponse, err := mounter.VolumeClient.GetDiskNumberFromVolumeID(context.Background(), getDiskNumberRequest)
+	if err != nil {
+		return err
+	}
+	diskNumber := getDiskNumberResponse.GetDiskNumber()
+	setDiskStateRequest := &disk.SetDiskStateRequest{
+		DiskNumber: diskNumber,
+		IsOnline:   true,
+	}
+	if _, err = mounter.DiskClient.SetDiskState(context.Background(), setDiskStateRequest); err != nil {
+		return err
+	}
+
 	req := &volume.ResizeVolumeRequest{VolumeId: devicePath, SizeBytes: 0}
-	_, err := mounter.VolumeClient.ResizeVolume(context.Background(), req)
+	_, err = mounter.VolumeClient.ResizeVolume(context.Background(), req)
 	return err
 }
 
@@ -490,6 +507,11 @@ func (mounter *csiProxyMounter) MountSensitive(source string, target string, fst
 func (mounter *csiProxyMounter) MountSensitiveWithoutSystemd(source string, target string, fstype string, options []string, sensitiveOptions []string) error {
 	return fmt.Errorf("MountSensitiveWithoutSystemd is not implemented for csiProxyMounter")
 }
+
+func (mounter *csiProxyMounter) MountSensitiveWithoutSystemdWithMountFlags(source string, target string, fstype string, options []string, sensitiveOptions []string, mountFlags []string) error {
+	return mounter.MountSensitive(source, target, fstype, options, sensitiveOptions /* sensitiveOptions */)
+}
+
 func (mounter *csiProxyMounter) List() ([]mount.MountPoint, error) {
 	return []mount.MountPoint{}, fmt.Errorf("List not implemented for csiProxyMounter")
 }

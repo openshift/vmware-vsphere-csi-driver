@@ -55,6 +55,11 @@ const (
 	// For example: StorageClassName: "silver".
 	AttributeSupervisorStorageClass = "svstorageclass"
 
+	// AttributeStorageTopologyType is a storageClass parameter.
+	// It represents a zonal or a crossZonal volume provisioning.
+	// For example: StorageTopologyType: "zonal"
+	AttributeStorageTopologyType = "storagetopologytype"
+
 	// AttributeFsType represents filesystem type in the Storage Classs.
 	// For Example: FsType: "ext4".
 	AttributeFsType = "fstype"
@@ -89,6 +94,9 @@ const (
 
 	// AttributeFirstClassDiskUUID is the SCSI Disk Identifier.
 	AttributeFirstClassDiskUUID = "diskUUID"
+
+	// AttributeVmUUID is the vmUUID to which volume is attached to.
+	AttributeVmUUID = "vmUUID"
 
 	// AttributeFakeAttached is the flag that indicates if a volume is fake
 	// attached.
@@ -265,10 +273,10 @@ const (
 	TopologyLabelsDomain = "topology.csi.vmware.com"
 
 	//AnnGuestClusterRequestedTopology is the key for guest cluster requested topology
-	AnnGuestClusterRequestedTopology = "csi.vsphere.guest-cluster-requested-topology"
+	AnnGuestClusterRequestedTopology = "csi.vsphere.volume-requested-topology"
 
 	//AnnVolumeAccessibleTopology is the annotation set by the supervisor cluster on PVC
-	AnnVolumeAccessibleTopology = "csi.vsphere.volumeAccessibleTopology"
+	AnnVolumeAccessibleTopology = "csi.vsphere.volume-accessible-topology"
 
 	// PVtoBackingDiskObjectIdSupportedVCenterMajor is the minimum major version of vCenter
 	// on which PV to BackingDiskObjectId mapping feature is supported.
@@ -281,6 +289,10 @@ const (
 	// PVtoBackingDiskObjectIdSupportedVCenterPatch is the minimum patch version of vCenter
 	// on which PV to BackingDiskObjectId mapping feature is supported.
 	PVtoBackingDiskObjectIdSupportedVCenterPatch int = 2
+
+	// PreferredDatastoresCategory points to the vSphere Category
+	// created to tag preferred datastores in a topology-aware environment.
+	PreferredDatastoresCategory = "cns.vmware.topology-preferred-datastores"
 )
 
 // Supported container orchestrators.
@@ -340,8 +352,15 @@ const (
 	// TKGsHA is the feature gate to check whether TKGS HA feature
 	// is enabled.
 	TKGsHA = "tkgs-ha"
+	// ListVolumes is the feature to support list volumes API
+	ListVolumes = "list-volumes"
 	// PVtoBackingDiskObjectIdMapping is the feature to support pv to backingDiskObjectId mapping on vSphere CSI driver.
 	PVtoBackingDiskObjectIdMapping = "pv-to-backingdiskobjectid-mapping"
 	// Block Create Volume for datastores that are in suspended mode
 	CnsMgrSuspendCreateVolume = "cnsmgr-suspend-create-volume"
+	// TopologyPreferentialDatastores is the feature gate for preferential
+	// datastore deployment in topology aware environments.
+	TopologyPreferentialDatastores = "topology-preferential-datastores"
+	// MaxPVSCSITargetsPerVM enables support for 255 volumes per node vm
+	MaxPVSCSITargetsPerVM = "max-pvscsi-targets-per-vm"
 )

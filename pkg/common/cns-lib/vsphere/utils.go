@@ -210,8 +210,11 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 		TargetvSANFileShareDatastoreURLs: targetDatastoreUrlsForFile,
 		TargetvSANFileShareClusters:      targetvSANClustersForFile,
 		VCClientTimeout:                  vcClientTimeout,
+		QueryLimit:                       cfg.Global.QueryLimit,
+		ListVolumeThreshold:              cfg.Global.ListVolumeThreshold,
 	}
 
+	log.Debugf("Setting the queryLimit = %v, ListVolumeThreshold = %v", vcConfig.QueryLimit, vcConfig.ListVolumeThreshold)
 	if strings.TrimSpace(cfg.VirtualCenter[host].Datacenters) != "" {
 		vcConfig.DatacenterPaths = strings.Split(cfg.VirtualCenter[host].Datacenters, ",")
 		for idx := range vcConfig.DatacenterPaths {
@@ -332,6 +335,7 @@ func GetTagManager(ctx context.Context, vc *VirtualCenter) (*tags.Manager, error
 // The 2nd output parameter will be vSAN-direct managed datastores.
 func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clusterID string) (
 	[]*DatastoreInfo, []*DatastoreInfo, error) {
+	log := logger.GetLogger(ctx)
 	// Get all vsan direct datastore urls in VC. Later, filter in this cluster.
 	allVsanDirectUrls, err := getVsanDirectDatastores(ctx, vc, clusterID)
 	if err != nil {
@@ -384,6 +388,8 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 	if len(sharedDatastores) == 0 && len(vsanDirectDatastores) == 0 {
 		return nil, nil, fmt.Errorf("no candidates datastores found in the Kubernetes cluster")
 	}
+	log.Infof("Found shared datastores: %+v and vSAN Direct datastores: %+v", sharedDatastores,
+		vsanDirectDatastores)
 	return sharedDatastores, vsanDirectDatastores, nil
 }
 

@@ -109,6 +109,8 @@ type Manager interface {
 	RegisterDisk(ctx context.Context, path string, name string) (string, error)
 	// RetrieveVStorageObject helps in retreiving virtual disk information for a given volume id.
 	RetrieveVStorageObject(ctx context.Context, volumeID string) (*vim25types.VStorageObject, error)
+	// ProtectVolumeFromVMDeletion sets keepAfterDeleteVm control flag on migrated volume
+	ProtectVolumeFromVMDeletion(ctx context.Context, volumeID string) error
 	// CreateSnapshot helps create a snapshot for a block volume
 	CreateSnapshot(ctx context.Context, volumeID string, desc string) (*CnsSnapshotInfo, error)
 	// DeleteSnapshot helps delete a snapshot for a block volume
@@ -1914,8 +1916,39 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 	}
 
 	// Get the taskInfo and more!
-	createSnapshotsTaskInfo, err := cns.GetTaskInfo(ctx, createSnapshotsTask)
-	if err != nil || createSnapshotsTaskInfo == nil {
+	createSnapshotsTaskInfo, err := createSnapshotsTask.WaitForResult(ctx, nil)
+	if err != nil {
+		if cnsvsphere.IsManagedObjectNotFound(err, createSnapshotsTask.Reference()) {
+			log.Infof("CreateSnapshot task %s not found in vCenter. Querying CNS "+
+				"to determine if the snapshot %s was successfully created.",
+				createSnapshotsTask.Reference().Value, instanceName)
+			queriedCnsSnapshot, ok := queryCreatedSnapshotByName(ctx, m, volumeID, instanceName)
+			if ok {
+				// Create the volumeOperationDetails object for persistence
+				volumeOperationDetails = createRequestDetails(
+					instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id, 0,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
+					createSnapshotsTask.Reference().Value,
+					"", taskInvocationStatusSuccess, "")
+
+				log.Infof("CreateSnapshot: Snapshot with name %s on volume %q is confirmed to be created "+
+					"successfully with SnapshotID %q", instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id)
+
+				return &CnsSnapshotInfo{
+					SnapshotID:                queriedCnsSnapshot.SnapshotId.Id,
+					SourceVolumeID:            volumeID,
+					SnapshotDescription:       snapshotName,
+					SnapshotCreationTimestamp: queriedCnsSnapshot.CreateTime,
+				}, nil
+			} else {
+				errMsg := fmt.Sprintf("Snapshot with name %s on volume %q is not present in CNS. "+
+					"Marking task %s as failed.", snapshotName, volumeID, createSnapshotsTask.Reference().Value)
+				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0,
+					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
+					"", taskInvocationStatusError, errMsg)
+				return nil, logger.LogNewError(log, errMsg)
+			}
+		}
 		return nil, logger.LogNewErrorf(log, "Failed to get taskInfo for CreateSnapshots task "+
 			"from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
 	}
@@ -2228,4 +2261,29 @@ func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, sn
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
 	return err
+}
+
+// ProtectVolumeFromVMDeletion helps set keepAfterDeleteVm control flag for given volumeID
+func (m *defaultManager) ProtectVolumeFromVMDeletion(ctx context.Context, volumeID string) error {
+	log := logger.GetLogger(ctx)
+	err := validateManager(ctx, m)
+	if err != nil {
+		log.Errorf("failed to validate volume manager with err: %+v", err)
+		return err
+	}
+	// Set up the VC connection
+	err = m.virtualCenter.ConnectVslm(ctx)
+	if err != nil {
+		log.Errorf("ConnectVslm failed with err: %+v", err)
+		return err
+	}
+	globalObjectManager := vslm.NewGlobalObjectManager(m.virtualCenter.VslmClient)
+	err = globalObjectManager.SetControlFlags(ctx, vim25types.ID{Id: volumeID}, []string{
+		string(vim25types.VslmVStorageObjectControlFlagKeepAfterDeleteVm)})
+	if err != nil {
+		log.Errorf("failed to set control flag keepAfterDeleteVm  for volumeID %q with err: %v", volumeID, err)
+		return err
+	}
+	log.Infof("Successfully set keepAfterDeleteVm control flag for volumeID: %q", volumeID)
+	return nil
 }

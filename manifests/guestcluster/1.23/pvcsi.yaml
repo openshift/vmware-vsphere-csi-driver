@@ -163,6 +163,9 @@ spec:
             - "--leader-election"
             - "--kube-api-qps=100"
             - "--kube-api-burst=100"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
           imagePullPolicy: "IfNotPresent"
           env:
             - name: ADDRESS
@@ -177,7 +180,6 @@ spec:
             - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
-            - "--use-gocsi=false"
           imagePullPolicy: "IfNotPresent"
           ports:
             - containerPort: 2112
@@ -273,6 +275,9 @@ spec:
             - "--default-fstype=ext4"
             - "--kube-api-qps=100"
             - "--kube-api-burst=100"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
           imagePullPolicy: "IfNotPresent"
           env:
             - name: ADDRESS
@@ -290,6 +295,9 @@ spec:
             - "--leader-election"
             - "--kube-api-qps=100"
             - "--kube-api-burst=100"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -325,6 +333,8 @@ spec:
       app: vsphere-csi-node
   updateStrategy:
     type: "RollingUpdate"
+    rollingUpdate:
+      maxUnavailable: 1
   template:
     metadata:
       labels:
@@ -343,7 +353,6 @@ spec:
           - "--v=5"
           - "--csi-address=$(ADDRESS)"
           - "--kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)"
-          - "--health-port=9809"
         env:
           - name: ADDRESS
             value: /csi/csi.sock
@@ -354,15 +363,14 @@ spec:
             mountPath: /csi
           - name: registration-dir
             mountPath: /registration
-        ports:
-          - containerPort: 9809
-            name: healthz
         livenessProbe:
-          httpGet:
-            path: /healthz
-            port: healthz
-          initialDelaySeconds: 5
-          timeoutSeconds: 5
+          exec:
+            command:
+            - /csi-node-driver-registrar
+            - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
+            - --mode=kubelet-registration-probe
+          initialDelaySeconds: 30
+          timeoutSeconds: 15
       - name: vsphere-csi-node
         image: vmware.io/vsphere-csi:<image_tag>
         args:
@@ -370,7 +378,6 @@ spec:
           - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
           - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
           - "--fss-namespace=$(CSI_NAMESPACE)"
-          - "--use-gocsi=false"
         imagePullPolicy: "IfNotPresent"
         env:
         - name: NODE_NAME
@@ -467,7 +474,7 @@ data:
   "file-volume": "true"
   "csi-sv-feature-states-replication": "false"
   "block-volume-snapshot": "false"
-  "tkgs-ha": "false"
+  "tkgs-ha": "true"
   "cnsmgr-suspend-create-volume": "false"
 kind: ConfigMap
 metadata:
