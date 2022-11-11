@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,6 +33,7 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	admissionapi "k8s.io/pod-security-admission/api"
 
 	"github.com/vmware/govmomi/cns"
 	cnsmethods "github.com/vmware/govmomi/cns/methods"
@@ -45,6 +46,7 @@ import (
 
 var _ = ginkgo.Describe("[csi-file-vanilla] Basic File Volume Static Provisioning", func() {
 	f := framework.NewDefaultFramework("e2e-csifilestaticprovision")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 
 	var (
 		client            clientset.Interface

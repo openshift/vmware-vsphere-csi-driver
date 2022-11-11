@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -32,10 +32,12 @@ import (
 	fdep "k8s.io/kubernetes/test/e2e/framework/deployment"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("[vmc-gc] Deploy, Update and Scale Deployments", func() {
 	f := framework.NewDefaultFramework("e2e-vsphere-deployment")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		namespace         string
 		client            clientset.Interface

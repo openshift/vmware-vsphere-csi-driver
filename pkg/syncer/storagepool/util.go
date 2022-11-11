@@ -39,7 +39,6 @@ import (
 	"k8s.io/client-go/dynamic"
 	"k8s.io/utils/clock"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-
 	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/storagepool/cns/v1alpha1"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"

@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/cns"
@@ -389,40 +390,12 @@ func (vs *vSphere) getLabelsForCNSVolume(volumeID string, entityType string,
 func (vs *vSphere) waitForLabelsToBeUpdated(volumeID string, matchLabels map[string]string,
 	entityType string, entityName string, entityNamespace string) error {
 	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
-		queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
-		framework.Logf("queryResult: %s", spew.Sdump(queryResult))
-		if err != nil {
-			return true, err
+		err := vs.verifyLabelsAreUpdated(volumeID, matchLabels, entityType, entityName, entityNamespace)
+		if err == nil {
+			return true, nil
+		} else {
+			return false, nil
 		}
-		if len(queryResult.Volumes) != 1 || queryResult.Volumes[0].VolumeId.Id != volumeID {
-			return true, fmt.Errorf("failed to query cns volume %s", volumeID)
-		}
-		gomega.Expect(queryResult.Volumes[0].Metadata).NotTo(gomega.BeNil())
-		for _, metadata := range queryResult.Volumes[0].Metadata.EntityMetadata {
-			if metadata == nil {
-				continue
-			}
-			kubernetesMetadata := metadata.(*cnstypes.CnsKubernetesEntityMetadata)
-			k8sEntityName := kubernetesMetadata.EntityName
-			if guestCluster {
-				k8sEntityName = kubernetesMetadata.CnsEntityMetadata.EntityName
-			}
-			if kubernetesMetadata.EntityType == entityType && k8sEntityName == entityName &&
-				kubernetesMetadata.Namespace == entityNamespace {
-				if matchLabels == nil {
-					return true, nil
-				}
-				labelsMatch := reflect.DeepEqual(getLabelsMapFromKeyValue(kubernetesMetadata.Labels), matchLabels)
-				if guestCluster {
-					labelsMatch = reflect.DeepEqual(getLabelsMapFromKeyValue(kubernetesMetadata.CnsEntityMetadata.Labels),
-						matchLabels)
-				}
-				if labelsMatch {
-					return true, nil
-				}
-			}
-		}
-		return false, nil
 	})
 	if err != nil {
 		if err == wait.ErrWaitTimeout {
@@ -1042,11 +1015,125 @@ func (vs *vSphere) createVolumeSnapshotInCNS(fcdID string) (string, error) {
 func (vs *vSphere) verifyVolumeCompliance(volumeID string, shouldBeCompliant bool) {
 	queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
 	framework.Logf("Volume id: %v compliance status: %v", volumeID, queryResult.Volumes[0].ComplianceStatus)
 	if shouldBeCompliant {
 		gomega.Expect(queryResult.Volumes[0].ComplianceStatus == "compliant").To(gomega.BeTrue())
 	} else {
 		gomega.Expect(queryResult.Volumes[0].ComplianceStatus == "compliant").To(gomega.BeFalse())
 	}
+}
+
+// verifyLabelsAreUpdated executes cns QueryVolume API on vCenter and verifies if
+// volume labels are updated by metadata-syncer
+func (vs *vSphere) verifyLabelsAreUpdated(volumeID string, matchLabels map[string]string,
+	entityType string, entityName string, entityNamespace string) error {
+
+	queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
+	framework.Logf("queryResult: %s", spew.Sdump(queryResult))
+	if err != nil {
+		return err
+	}
+	if len(queryResult.Volumes) != 1 || queryResult.Volumes[0].VolumeId.Id != volumeID {
+		return fmt.Errorf("failed to query cns volume %s", volumeID)
+	}
+	gomega.Expect(queryResult.Volumes[0].Metadata).NotTo(gomega.BeNil())
+	for _, metadata := range queryResult.Volumes[0].Metadata.EntityMetadata {
+		if metadata == nil {
+			continue
+		}
+		kubernetesMetadata := metadata.(*cnstypes.CnsKubernetesEntityMetadata)
+		k8sEntityName := kubernetesMetadata.EntityName
+		if guestCluster {
+			k8sEntityName = kubernetesMetadata.CnsEntityMetadata.EntityName
+		}
+		if kubernetesMetadata.EntityType == entityType && k8sEntityName == entityName &&
+			kubernetesMetadata.Namespace == entityNamespace {
+			if matchLabels == nil {
+				return nil
+			}
+			labelsMatch := reflect.DeepEqual(getLabelsMapFromKeyValue(kubernetesMetadata.Labels), matchLabels)
+			if guestCluster {
+				labelsMatch = reflect.DeepEqual(getLabelsMapFromKeyValue(kubernetesMetadata.CnsEntityMetadata.Labels),
+					matchLabels)
+			}
+			if labelsMatch {
+				return nil
+			} else {
+				return fmt.Errorf("labels are not updated to %+v for %s %q for volume %s",
+					matchLabels, entityType, entityName, volumeID)
+			}
+		}
+	}
+	return nil
+}
+
+// verifyDatastoreMatch verify if any of the given dsUrl matches with the datstore url for the volumeid
+func (vs *vSphere) verifyDatastoreMatch(volumeID string, dsUrls []string) {
+	actualDatastoreUrl := fetchDsUrl4CnsVol(e2eVSphere, volumeID)
+	gomega.Expect(actualDatastoreUrl).Should(gomega.BeElementOf(dsUrls),
+		"Volume is not provisioned on any of the given datastores: %s, but on: %s", dsUrls,
+		actualDatastoreUrl)
+}
+
+// cnsRelocateVolume relocates volume from one datastore to another using CNS relocate volume API
+func (vs *vSphere) cnsRelocateVolume(e2eVSphere vSphere, ctx context.Context, fcdID string,
+	dsRefDest vim25types.ManagedObjectReference) error {
+	var pandoraSyncWaitTime int
+	var err error
+	if os.Getenv(envPandoraSyncWaitTime) != "" {
+		pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	} else {
+		pandoraSyncWaitTime = defaultPandoraSyncWaitTime
+	}
+
+	relocateSpec := cnstypes.NewCnsBlockVolumeRelocateSpec(fcdID, dsRefDest)
+	var baseCnsVolumeRelocateSpecList []cnstypes.BaseCnsVolumeRelocateSpec
+	baseCnsVolumeRelocateSpecList = append(baseCnsVolumeRelocateSpecList, relocateSpec)
+	req := cnstypes.CnsRelocateVolume{
+		This:          cnsVolumeManagerInstance,
+		RelocateSpecs: baseCnsVolumeRelocateSpecList,
+	}
+
+	cnsClient, err := newCnsClient(ctx, vs.Client.Client)
+	framework.Logf("error: %v", err)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	res, err := cnsmethods.CnsRelocateVolume(ctx, cnsClient, &req)
+	framework.Logf("error is: %v", err)
+	if err != nil {
+		return err
+	}
+
+	task, err := object.NewTask(e2eVSphere.Client.Client, res.Returnval), nil
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	framework.Logf("taskInfo: %v", taskInfo)
+	framework.Logf("error: %v", err)
+	if err != nil {
+		return err
+	}
+	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return err
+	}
+
+	framework.Logf("Sleeping for %v seconds to allow CNS to sync with pandora", pandoraSyncWaitTime)
+	time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
+
+	cnsRelocateVolumeRes := taskResult.GetCnsVolumeOperationResult()
+
+	if cnsRelocateVolumeRes.Fault != nil {
+		err = fmt.Errorf("failed to relocate volume=%+v", cnsRelocateVolumeRes.Fault)
+		return err
+	}
+	return nil
+}
+
+// fetchDsUrl4CnsVol executes query CNS volume to get the datastore
+// where the volume is Present
+func fetchDsUrl4CnsVol(e2eVSphere vSphere, volHandle string) string {
+	framework.Logf("Invoking QueryCNSVolumeWithResult with VolumeID: %s", volHandle)
+	queryResult, err := e2eVSphere.queryCNSVolumeWithResult(volHandle)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(queryResult.Volumes).ShouldNot(gomega.BeEmpty())
+	return queryResult.Volumes[0].DatastoreUrl
 }

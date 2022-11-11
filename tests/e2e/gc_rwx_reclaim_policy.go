@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
@@ -33,11 +33,13 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 // Test to verify RWX volume provision with reclaim policy set and modified
 var _ = ginkgo.Describe("File Volume Test for Reclaim Policy", func() {
 	f := framework.NewDefaultFramework("rwx-tkg-reclaim")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client            clientset.Interface
 		namespace         string
