@@ -31,7 +31,11 @@ func getPVsInBoundAvailableOrReleased(ctx context.Context,
 	if err != nil {
 		return nil, err
 	}
+	log.Infof("JSAF: IsFSSEnabled: %v", metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.CSIMigration))
 	for _, pv := range allPVs {
+		log.Infof("JSAF: pvName: %s", pv.Name)
+		log.Infof("JSAF: isValidVsphere: %v", isValidvSphereVolume(ctx, pv.ObjectMeta))
+
 		if (pv.Spec.CSI != nil && pv.Spec.CSI.Driver == csitypes.Name) ||
 			(metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.CSIMigration) && pv.Spec.VsphereVolume != nil &&
 				isValidvSphereVolume(ctx, pv.ObjectMeta)) {
@@ -253,6 +257,7 @@ func isValidvSphereVolumeClaim(ctx context.Context, pvcMetadata metav1.ObjectMet
 func isValidvSphereVolume(ctx context.Context, pvMetadata metav1.ObjectMeta) bool {
 	log := logger.GetLogger(ctx)
 	// Checking if the migrated-to annotation is found in the PV metadata.
+	log.Infof("JSAF: isValidvSphereVolume: PV %s has annotation %+v", pvMetadata.Name, pvMetadata.Annotations)
 	if annotation, annMigratedToFound := pvMetadata.Annotations[common.AnnMigratedTo]; annMigratedToFound {
 		if annotation == csitypes.Name &&
 			pvMetadata.Annotations[common.AnnDynamicallyProvisioned] == common.InTreePluginName {
@@ -267,6 +272,7 @@ func isValidvSphereVolume(ctx context.Context, pvMetadata metav1.ObjectMeta) boo
 			return true
 		}
 	}
+	log.Infof("JSAF: isValidvSphereVolume: PV %s is not migrated", pvMetadata.Name)
 	return false
 }
 
