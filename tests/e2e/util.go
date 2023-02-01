@@ -23,7 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand"
 	"net"
 	"net/http"
@@ -1235,21 +1235,26 @@ func invokeVCenterServiceControl(command, service, host string) error {
 	return nil
 }
 
-// isFssEnabled invokes the given command to check if vCenter
-// has a particular FSS enabled or not
-func isFssEnabled(host, fss string) bool {
-	sshCmd := fmt.Sprintf("python /usr/sbin/feature-state-wrapper.py %s", fss)
-	framework.Logf("Checking if fss is enabled on vCenter host %v", host)
-	result, err := fssh.SSH(sshCmd, host, framework.TestContext.Provider)
-	fssh.LogResult(result)
-	if err == nil && result.Code == 0 {
-		return strings.TrimSpace(result.Stdout) == "enabled"
-	} else {
-		ginkgo.By(fmt.Sprintf("couldn't execute command: %s on vCenter host: %v", sshCmd, err))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}
-	return false
-}
+/*
+	Note: As per PR #2935677, even if cns_new_sync is enabled volume expansion
+	will not work if sps-service is down.
+	Keeping this code for reference. Disabling isFssEnabled util method as we won't be using
+	this util method in testcases.
+	isFssEnabled invokes the given command to check if vCenter has a particular FSS enabled or not
+*/
+// func isFssEnabled(host, fss string) bool {
+// 	sshCmd := fmt.Sprintf("python /usr/sbin/feature-state-wrapper.py %s", fss)
+// 	framework.Logf("Checking if fss is enabled on vCenter host %v", host)
+// 	result, err := fssh.SSH(sshCmd, host, framework.TestContext.Provider)
+// 	fssh.LogResult(result)
+// 	if err == nil && result.Code == 0 {
+// 		return strings.TrimSpace(result.Stdout) == "enabled"
+// 	} else {
+// 		ginkgo.By(fmt.Sprintf("couldn't execute command: %s on vCenter host: %v", sshCmd, err))
+// 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+// 	}
+// 	return false
+// }
 
 // waitVCenterServiceToBeInState invokes the status check for the given service and waits
 // via service-control on the given vCenter host over SSH.
@@ -1280,7 +1285,7 @@ func httpRequest(client *http.Client, req *http.Request) ([]byte, int) {
 	resp, err := client.Do(req)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
-	bodyBytes, err := ioutil.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(resp.Body)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	framework.Logf("API Response status %d", resp.StatusCode)
 
@@ -1288,7 +1293,7 @@ func httpRequest(client *http.Client, req *http.Request) ([]byte, int) {
 
 }
 
-//getVMImages returns the available gc images present in svc
+// getVMImages returns the available gc images present in svc
 func getVMImages(wcpHost string, wcpToken string) VMImages {
 	transCfg := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // ignore expired SSL certificates
@@ -1311,7 +1316,7 @@ func getVMImages(wcpHost string, wcpToken string) VMImages {
 	return vmImage
 }
 
-//deleteTKG method deletes the TKG Cluster
+// deleteTKG method deletes the TKG Cluster
 func deleteTKG(wcpHost string, wcpToken string, tkgCluster string) error {
 	ginkgo.By("Delete TKG")
 	transCfg := &http.Transport{
@@ -1346,8 +1351,8 @@ func deleteTKG(wcpHost string, wcpToken string, tkgCluster string) error {
 
 }
 
-//waitForDeleteToComplete method polls for the requested object status
-//returns true if its deleted successfully else returns error
+// waitForDeleteToComplete method polls for the requested object status
+// returns true if its deleted successfully else returns error
 func waitForDeleteToComplete(client *http.Client, req *http.Request) error {
 	waitErr := wait.Poll(pollTimeoutShort, pollTimeout*6, func() (bool, error) {
 		framework.Logf("Polling for New GC status")
@@ -1362,7 +1367,7 @@ func waitForDeleteToComplete(client *http.Client, req *http.Request) error {
 	return waitErr
 }
 
-//upgradeTKG method updates the TKG Cluster with the tkgImage
+// upgradeTKG method updates the TKG Cluster with the tkgImage
 func upgradeTKG(wcpHost string, wcpToken string, tkgCluster string, tkgImage string) {
 	ginkgo.By("Upgrade TKG")
 	transCfg := &http.Transport{
@@ -1401,7 +1406,7 @@ func upgradeTKG(wcpHost string, wcpToken string, tkgCluster string, tkgImage str
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	defer resp.Body.Close()
 
-	bodyBytes, err = ioutil.ReadAll(resp.Body)
+	bodyBytes, err = io.ReadAll(resp.Body)
 	framework.Logf("API Response status %v", resp.StatusCode)
 	gomega.Expect(resp.StatusCode).Should(gomega.BeNumerically("==", 200))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1411,7 +1416,7 @@ func upgradeTKG(wcpHost string, wcpToken string, tkgCluster string, tkgImage str
 
 }
 
-//createGC method creates GC and takes WCP host and bearer token as input param
+// createGC method creates GC and takes WCP host and bearer token as input param
 func createGC(wcpHost string, wcpToken string) {
 
 	transCfg := &http.Transport{
@@ -1424,7 +1429,7 @@ func createGC(wcpHost string, wcpToken string) {
 	tkg_yaml, err := filepath.Abs(gcManifestPath + "tkg.yaml")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	framework.Logf("Taking yaml from %v", tkg_yaml)
-	gcBytes, err := ioutil.ReadFile(tkg_yaml)
+	gcBytes, err := os.ReadFile(tkg_yaml)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	req, err := http.NewRequest("POST", createGCURL, bytes.NewBuffer(gcBytes))
@@ -1439,7 +1444,7 @@ func createGC(wcpHost string, wcpToken string) {
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 201))
 }
 
-//scaleTKGWorker scales the TKG worker nodes on given tkgCluster based on the tkgworker count
+// scaleTKGWorker scales the TKG worker nodes on given tkgCluster based on the tkgworker count
 func scaleTKGWorker(wcpHost string, wcpToken string, tkgCluster string, tkgworker int) {
 
 	transCfg := &http.Transport{
@@ -1478,7 +1483,7 @@ func scaleTKGWorker(wcpHost string, wcpToken string, tkgCluster string, tkgworke
 
 }
 
-//getGC polls for the GC status, returns error if its not in running phase
+// getGC polls for the GC status, returns error if its not in running phase
 func getGC(wcpHost string, wcpToken string, gcName string) error {
 	var response string
 	transCfg := &http.Transport{
@@ -1509,7 +1514,7 @@ func getGC(wcpHost string, wcpToken string, gcName string) error {
 	return waitErr
 }
 
-//getWCPSessionId returns the bearer token for given user
+// getWCPSessionId returns the bearer token for given user
 func getWCPSessionId(hostname string, username string, password string) string {
 	type WcpSessionID struct {
 		Session_id string
@@ -2498,15 +2503,17 @@ func trimQuotes(str string) string {
 }
 
 // readConfigFromSecretString takes input string of the form:
-//    [Global]
-//    insecure-flag = "true"
-//    cluster-id = "domain-c1047"
-//    cluster-distribution = "CSI-Vanilla"
-//    [VirtualCenter "wdc-rdops-vm09-dhcp-238-224.eng.vmware.com"]
-//    user = "workload_storage_management-792c9cce-3cd2-4618-8853-52f521400e05@vsphere.local"
-//    password = "qd?\\/\"K=O_<ZQw~s4g(S"
-//    datacenters = "datacenter-1033"
-//    port = "443"
+//
+//	[Global]
+//	insecure-flag = "true"
+//	cluster-id = "domain-c1047"
+//	cluster-distribution = "CSI-Vanilla"
+//	[VirtualCenter "wdc-rdops-vm09-dhcp-238-224.eng.vmware.com"]
+//	user = "workload_storage_management-792c9cce-3cd2-4618-8853-52f521400e05@vsphere.local"
+//	password = "qd?\\/\"K=O_<ZQw~s4g(S"
+//	datacenters = "datacenter-1033"
+//	port = "443"
+//
 // Returns a de-serialized structured config data
 func readConfigFromSecretString(cfg string) (e2eTestConfig, error) {
 	var config e2eTestConfig
@@ -4073,7 +4080,7 @@ func verifyPVnodeAffinityAndPODnodedetailsForStatefulsets(ctx context.Context,
 	}
 }
 
-//isCsiFssEnabled checks if the given CSI FSS is enabled or not, errors out if not found
+// isCsiFssEnabled checks if the given CSI FSS is enabled or not, errors out if not found
 func isCsiFssEnabled(ctx context.Context, client clientset.Interface, namespace string, fss string) bool {
 	fssCM, err := client.CoreV1().ConfigMaps(namespace).Get(ctx, csiFssCM, metav1.GetOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
