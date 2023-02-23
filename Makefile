@@ -3,6 +3,7 @@ all: build
 # Get the absolute path and name of the current directory.
 PWD := $(abspath .)
 BASE_DIR := $(notdir $(PWD))
+GOFLAGS_VENDOR := -mod=vendor
 
 # BUILD_OUT is the root directory containing the build output.
 export BUILD_OUT ?= .build
@@ -90,6 +91,7 @@ GOARCH ?= amd64
 LDFLAGS := $(shell cat hack/make/ldflags.txt)
 LDFLAGS_CSI := $(LDFLAGS) -X "$(MOD_NAME)/pkg/csi/service.Version=$(VERSION)"
 LDFLAGS_SYNCER := $(LDFLAGS) -X "$(MOD_NAME)/pkg/syncer.Version=$(VERSION)"
+LDFLAGS_CNSCTL := $(LDFLAGS) -X "main.Version=$(VERSION)"
 
 # The CSI binary.
 CSI_BIN_NAME := vsphere-csi
@@ -104,13 +106,25 @@ CSI_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./c
 export CSI_BIN_SRCS
 endif
 $(CSI_BIN): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_LINUX) $<
 	@touch $@
 
 $(CSI_BIN_WINDOWS): $(CSI_BIN_SRCS)
-	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
+	CGO_ENABLED=0 GOOS=windows GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CSI)' -o $(CSI_BIN_WINDOWS) $<
 	@touch $@
 
+# The cnsctl binary.
+CNSCTL_BIN_NAME := cnsctl
+CNSCTL_BIN := $(BIN_OUT)/$(CNSCTL_BIN_NAME).$(GOOS)_$(GOARCH)
+build-cnsctl: $(CNSCTL_BIN)
+ifndef CNSCTL_BIN_SRCS
+CNSCTL_BIN_SRCS := $(CNSCTL_BIN_NAME)/main.go go.mod go.sum
+CNSCTL_BIN_SRCS += $(addsuffix /*.go,$(shell go list -f '{{ join .Deps "\n" }}' ./$(CNSCTL_BIN_NAME) | grep $(MOD_NAME) | sed 's~$(MOD_NAME)~.~'))
+export CNSCTL_BIN_SRCS
+endif
+$(CNSCTL_BIN): $(CNSCTL_BIN_SRCS)
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_CNSCTL)' -o $(abspath $@) $<
+	@touch $@
 
 # The Syncer binary.
 SYNCER_BIN_NAME := syncer
@@ -141,12 +155,12 @@ else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
 
-$(SYNCER_BIN): $(SYNCER_BIN_SRCS) syncer_manifest
-	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
+$(SYNCER_BIN): $(SYNCER_BIN_SRCS)
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS_VENDOR) -ldflags '$(LDFLAGS_SYNCER)' -o $(abspath $@) $<
 	@touch $@
 
 # The default build target.
-build build-bins: $(CSI_BIN) $(CSI_BIN_WINDOWS) $(SYNCER_BIN)
+build build-bins: $(CSI_BIN) $(CSI_BIN_WINDOWS) $(SYNCER_BIN) $(CNSCTL_BIN)
 build-with-docker:
 	hack/make.sh
 
