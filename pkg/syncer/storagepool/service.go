@@ -22,17 +22,17 @@ import (
 	"sync"
 	"time"
 
-	cnstypes "github.com/vmware/govmomi/cns/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	storagepoolconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/storagepool/config"
 
-	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/storagepool/cns/v1alpha1"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	commonconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	storagepoolconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool/config"
+
+	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool/cns/v1alpha1"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 // Service holds the controllers needed to manage StoragePools.
@@ -121,7 +121,7 @@ func InitStoragePoolService(ctx context.Context,
 			log.Errorf("Creating Kubernetes client failed. Err: %v", err)
 			return
 		}
-		k8sInformerManager := k8s.NewInformer(k8sClient)
+		k8sInformerManager := k8s.NewInformer(ctx, k8sClient, true)
 		err = InitNodeAnnotationListener(ctx, k8sInformerManager, scWatchCntlr, spController)
 		if err != nil {
 			log.Errorf("InitNodeAnnotationListener failed. err: %v", err)
@@ -132,26 +132,15 @@ func InitStoragePoolService(ctx context.Context,
 	go func() {
 		diskDecommEnablementTicker := time.NewTicker(common.DefaultFeatureEnablementCheckInterval)
 		defer diskDecommEnablementTicker.Stop()
-		clusterFlavor := cnstypes.CnsClusterFlavorWorkload
 		for ; true; <-diskDecommEnablementTicker.C {
-			coCommonInterface, err := commonco.GetContainerOrchestratorInterface(ctx,
-				common.Kubernetes, clusterFlavor, *coInitParams)
+			_, err := initDiskDecommController(ctx, migrationController)
 			if err != nil {
-				log.Errorf("Failed to create CO agnostic interface. Error: %v", err)
+				log.Warnf("Error while initializing disk decommission controller. Error: %+v. "+
+					"Retry will be triggered at %v",
+					err, time.Now().Add(common.DefaultFeatureEnablementCheckInterval))
 				continue
 			}
-			if !coCommonInterface.IsFSSEnabled(ctx, common.VSANDirectDiskDecommission) {
-				log.Infof("VSANDirectDiskDecommission feature is disabled on the cluster")
-			} else {
-				_, err := initDiskDecommController(ctx, migrationController)
-				if err != nil {
-					log.Warnf("Error while initializing disk decommission controller. Error: %+v. "+
-						"Retry will be triggered at %v",
-						err, time.Now().Add(common.DefaultFeatureEnablementCheckInterval))
-					continue
-				}
-				break
-			}
+			break
 		}
 	}()
 
@@ -193,13 +182,35 @@ func ResetVC(ctx context.Context, vc *cnsvsphere.VirtualCenter) {
 		log.Errorf("Failed to connect to SPBM service. Err: %+v", err)
 		return
 	}
-	log.Infof("Resetting VC connection in StoragePool service")
+	log.Info("Resetting VC connection in StoragePool service")
 	defaultStoragePoolServiceLock.Lock()
 	defer defaultStoragePoolServiceLock.Unlock()
-
-	defaultStoragePoolService.spController.vc = vc
-	defaultStoragePoolService.scWatchCntlr.vc = vc
-	defaultStoragePoolService.migrationCntlr.vc = vc
-	// PC listener will automatically reestablish its session with VC.
-	log.Debugf("Successfully reset VC connection in StoragePool service")
+	resetspControllerVC := false
+	resetscwatchControllerVC := false
+	resetmigrationControllerVC := false
+	if defaultStoragePoolService.spController != nil {
+		defaultStoragePoolService.spController.vc = vc
+		resetspControllerVC = true
+	} else {
+		log.Info("StoragePool service controller is not yet initialized. " +
+			"Skip resetting new VC connection to spController.")
+	}
+	if defaultStoragePoolService.scWatchCntlr != nil {
+		defaultStoragePoolService.scWatchCntlr.vc = vc
+		resetscwatchControllerVC = true
+	} else {
+		log.Info("StoragePool service watch controller is not yet initialized. " +
+			"Skip resetting new VC connection to scWatchCntlr.")
+	}
+	if defaultStoragePoolService.migrationCntlr != nil {
+		defaultStoragePoolService.migrationCntlr.vc = vc
+		resetmigrationControllerVC = true
+	} else {
+		log.Info("StoragePool service migration controller is not yet initialized. " +
+			"Skip resetting new VC connection to migrationCntlr.")
+	}
+	if resetspControllerVC && resetscwatchControllerVC && resetmigrationControllerVC {
+		// PC listener will automatically reestablish its session with VC.
+		log.Info("Successfully reset VC connection in StoragePool service")
+	}
 }

@@ -39,14 +39,14 @@ import (
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 
-	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/storagepool/cns/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/k8scloudoperator"
+	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool/cns/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/k8scloudoperator"
 )
 
 // validateCreateBlockReqParam is a helper function used to validate the parameter
@@ -602,9 +602,9 @@ func getVolumeIDToVMMap(ctx context.Context, c *controller, volumeIDs []string) 
 	log := logger.GetLogger(ctx)
 	response := &csi.ListVolumesResponse{}
 
-	fakeAttachMarkedVolumes := commonco.ContainerOrchestratorUtility.GetFakeAttachedVolumes(ctx, volumeIDs)
+	allFakeAttachMarkedVolumes := commonco.ContainerOrchestratorUtility.GetFakeAttachedVolumes(ctx, volumeIDs)
 	fakeAttachedVolumes := make([]string, 0)
-	for volumeID, isfakeAttached := range fakeAttachMarkedVolumes {
+	for volumeID, isfakeAttached := range allFakeAttachMarkedVolumes {
 		if isfakeAttached {
 			fakeAttachedVolumes = append(fakeAttachedVolumes, volumeID)
 		}
@@ -634,8 +634,13 @@ func getVolumeIDToVMMap(ctx context.Context, c *controller, volumeIDs []string) 
 	}
 
 	hostNames := commonco.ContainerOrchestratorUtility.GetNodeIDtoNameMap(ctx)
+	if len(hostNames) == 0 {
+		log.Errorf("no hostnames found in the NodeIDtoName map")
+		return nil, fmt.Errorf("no hostnames found in the NodeIDtoName map")
+	}
+
 	for volumeID, VMMoID := range volumeIDToVMMap {
-		isFakeAttached, exists := fakeAttachMarkedVolumes[volumeID]
+		isFakeAttached, exists := allFakeAttachMarkedVolumes[volumeID]
 		// If we do not find this entry in the input list obtained from CNS
 		//, then we do not bother adding it to the result since, CNS is not aware
 		// of this volume. Also, if it is fake attached volume we have handled it

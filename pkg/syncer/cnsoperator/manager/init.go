@@ -31,25 +31,24 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
-	cnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator/config"
-	internalapiscnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsoperator/config"
-	csinodetopologyconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology/config"
+	cnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/config"
+	internalapiscnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsoperator/config"
+	csinodetopologyconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology/config"
 
-	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator"
-	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/node"
-	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	commonconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis"
-	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology"
-	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology/v1alpha1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/cnsoperator/controller"
+	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
+	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis"
+	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology"
+	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology/v1alpha1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/controller"
 )
 
 var (
@@ -73,11 +72,33 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 
 	var volumeManager volumes.Manager
 	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload || clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
-		vCenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, cnsOperator.configInfo, false)
-		if err != nil {
-			return err
+		var (
+			vCenter  *cnsvsphere.VirtualCenter
+			err      error
+			vcconfig *cnsvsphere.VirtualCenterConfig
+		)
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.MultiVCenterCSITopology) {
+			vcconfig, err = cnsvsphere.GetVirtualCenterConfig(ctx, cnsOperator.configInfo.Cfg)
+			if err != nil {
+				log.Errorf("failed to get VirtualCenterConfig. Err: %+v", err)
+				return err
+			}
+			vCenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcconfig, false)
+			if err != nil {
+				return err
+			}
+		} else {
+			vCenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, cnsOperator.configInfo, false)
+			if err != nil {
+				return err
+			}
 		}
-		volumeManager = volumes.GetManager(ctx, vCenter, nil, false)
+
+		volumeManager, err = volumes.GetManager(ctx, vCenter, nil,
+			false, false, false, commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ListViewPerf))
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
+		}
 	}
 
 	// Get a config to talk to the apiserver
@@ -182,26 +203,12 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			}()
 		}
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
-		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
-			// Create CSINodeTopology CRD.
-			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, csinodetopologyconfig.EmbedCSINodeTopologyFile,
-				csinodetopologyconfig.EmbedCSINodeTopologyFileName)
-			if err != nil {
-				log.Errorf("Failed to create %q CRD. Error: %+v", csinodetopology.CRDSingular, err)
-				return err
-			}
-			// Initialize node manager so that CSINodeTopology controller can
-			// retrieve NodeVM using the NodeID in the spec.
-			useNodeUuid := false
-			if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.UseCSINodeId) {
-				useNodeUuid = true
-			}
-			nodeMgr := &node.Nodes{}
-			err = nodeMgr.Initialize(ctx, useNodeUuid)
-			if err != nil {
-				log.Errorf("failed to initialize nodeManager. Error: %+v", err)
-				return err
-			}
+		// Create CSINodeTopology CRD.
+		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, csinodetopologyconfig.EmbedCSINodeTopologyFile,
+			csinodetopologyconfig.EmbedCSINodeTopologyFileName)
+		if err != nil {
+			log.Errorf("Failed to create %q CRD. Error: %+v", csinodetopology.CRDSingular, err)
+			return err
 		}
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.TKGsHA) {
@@ -338,7 +345,7 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 // container.
 func watcher(ctx context.Context, cnsOperator *cnsOperator) error {
 	log := logger.GetLogger(ctx)
-	cfgPath := common.GetConfigPath(ctx)
+	cfgPath := commonconfig.GetConfigPath(ctx)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Errorf("Failed to create fsnotify watcher. Err: %+v", err)
@@ -384,7 +391,7 @@ func watcher(ctx context.Context, cnsOperator *cnsOperator) error {
 // with the latest configInfo.
 func reloadConfiguration(ctx context.Context, cnsOperator *cnsOperator) error {
 	log := logger.GetLogger(ctx)
-	cfg, err := common.GetConfig(ctx)
+	cfg, err := commonconfig.GetConfig(ctx)
 	if err != nil {
 		log.Errorf("Failed to read config. Error: %+v", err)
 		return err

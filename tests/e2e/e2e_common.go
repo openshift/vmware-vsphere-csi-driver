@@ -28,10 +28,12 @@ import (
 )
 
 const (
-	adminPassword                              = "Admin!23"
+	adminUser                                  = "Administrator@vsphere.local"
+	apiServerIPs                               = "API_SERVER_IPS"
 	attacherContainerName                      = "csi-attacher"
-	busyBoxImageOnGcr                          = "gcr.io/google_containers/busybox:1.27"
-	nginxImage                                 = "k8s.gcr.io/nginx-slim:0.8"
+	busyBoxImageOnGcr                          = "harbor-repo.vmware.com/csi/busybox:1.35"
+	nginxImage                                 = "registry.k8s.io/nginx-slim:0.26"
+	nginxImage4upg                             = "registry.k8s.io/nginx-slim:0.27"
 	configSecret                               = "vsphere-config-secret"
 	contollerClusterKubeConfig                 = "CONTROLLER_CLUSTER_KUBECONFIG"
 	crdCNSNodeVMAttachment                     = "cnsnodevmattachments"
@@ -44,6 +46,7 @@ const (
 	csiFssCM                                   = "internal-feature-states.csi.vsphere.vmware.com"
 	csiVolAttrVolType                          = "vSphere CNS Block Volume"
 	csiDriverContainerName                     = "vsphere-csi-controller"
+	datacenter                                 = "DATACENTER"
 	defaultFullSyncIntervalInMin               = "30"
 	defaultProvisionerTimeInSec                = "300"
 	defaultFullSyncWaitTime                    = 1800
@@ -57,6 +60,7 @@ const (
 	diskSizeInMinMb                            = int64(200)
 	e2eTestPassword                            = "E2E-test-password!23"
 	e2evSphereCSIDriverName                    = "csi.vsphere.vmware.com"
+	ensureAccessibilityMModeType               = "ensureObjectAccessibility"
 	envClusterFlavor                           = "CLUSTER_FLAVOR"
 	envDiskSizeLarge                           = "LARGE_DISK_SIZE"
 	envCSINamespace                            = "CSI_NAMESPACE"
@@ -89,7 +93,6 @@ const (
 	envVmdkDiskURL                             = "DISK_URL_PATH"
 	envVolumeOperationsScale                   = "VOLUME_OPS_SCALE"
 	envComputeClusterName                      = "COMPUTE_CLUSTER_NAME"
-	esxPassword                                = "ca$hc0w"
 	execCommand                                = "/bin/df -T /mnt/volume1 | " +
 		"/bin/awk 'FNR == 2 {print $2}' > /mnt/volume1/fstype && while true ; do sleep 2 ; done"
 	execRWXCommandPod1 = "echo 'Hello message from Pod1' > /mnt/volume1/Pod1.html  && " +
@@ -98,9 +101,13 @@ const (
 		"chmod o+rX /mnt /mnt/volume1/Pod2.html && while true ; do sleep 2 ; done"
 	ext3FSType                                = "ext3"
 	ext4FSType                                = "ext4"
+	xfsFSType                                 = "xfs"
+	evacMModeType                             = "evacuateAllData"
 	fcdName                                   = "BasicStaticFCD"
 	fileSizeInMb                              = int64(2048)
 	fullSyncFss                               = "trigger-csi-fullsync"
+	gcNodeUser                                = "vmware-system-user"
+	gcKubeConfigPath                          = "GC_KUBE_CONFIG"
 	healthGreen                               = "green"
 	healthRed                                 = "red"
 	healthStatusAccessible                    = "accessible"
@@ -110,7 +117,6 @@ const (
 	invalidFSType                             = "ext10"
 	k8sPodTerminationTimeOut                  = 7 * time.Minute
 	k8sPodTerminationTimeOutLong              = 10 * time.Minute
-	k8sVmPasswd                               = "ca$hc0w"
 	kcmManifest                               = "/etc/kubernetes/manifests/kube-controller-manager.yaml"
 	kubeAPIPath                               = "/etc/kubernetes/manifests/"
 	kubeAPIfile                               = "kube-apiserver.yaml"
@@ -137,6 +143,7 @@ const (
 	restartOperation                          = "restart"
 	rqLimit                                   = "200Gi"
 	rqLimitScaleTest                          = "900Gi"
+	rootUser                                  = "root"
 	defaultrqLimit                            = "20Gi"
 	rqStorageType                             = ".storageclass.storage.k8s.io/requests.storage"
 	resizerContainerName                      = "csi-resizer"
@@ -151,7 +158,10 @@ const (
 	spsServiceName                            = "sps"
 	snapshotterContainerName                  = "csi-snapshotter"
 	sshdPort                                  = "22"
+	sshSecretName                             = "SSH_SECRET_NAME"
 	svcRunningMessage                         = "Running"
+	svcMasterIP                               = "SVC_MASTER_IP"
+	svcMasterPassword                         = "SVC_MASTER_PASSWORD"
 	startOperation                            = "start"
 	svcStoppedMessage                         = "Stopped"
 	stopOperation                             = "stop"
@@ -238,9 +248,25 @@ var (
 	envTestbedInfoJsonPath = "TESTBEDINFO_JSON"
 )
 
+// Config secret testuser credentials
+var (
+	configSecretTestUser1Password = "VMware!23"
+	configSecretTestUser2Password = "VMware!234"
+	configSecretTestUser1         = "testuser1"
+	configSecretTestUser2         = "testuser2"
+)
+
 // CSI Internal FSSs
 var (
 	useCsiNodeID = "use-csinode-id"
+)
+
+// Nimbus generated passwords
+var (
+	nimbusK8sVmPwd = "NIMBUS_K8S_VM_PWD"
+	nimbusEsxPwd   = "ESX_PWD"
+	nimbusVcPwd    = "VC_PWD"
+	vcUIPwd        = "VC_ADMIN_PWD"
 )
 
 // volume allocation types for cns volumes
@@ -248,6 +274,18 @@ var (
 	thinAllocType = "Conserve space when possible"
 	eztAllocType  = "Fully initialized"
 	lztAllocType  = "Reserve space"
+)
+
+// For Preferential datatsore
+var (
+	preferredDatastoreRefreshTimeInterval = 1
+	preferredDatastoreTimeOutInterval     = 1 * time.Minute
+	preferredDSCat                        = "cns.vmware.topology-preferred-datastores"
+	preferredTagDesc                      = "preferred datastore tag"
+	nfsStoragePolicyName                  = "NFS_STORAGE_POLICY_NAME"
+	nfstoragePolicyDatastoreUrl           = "NFS_STORAGE_POLICY_DATASTORE_URL"
+	workerClusterMap                      = "WORKER_CLUSTER_MAP"
+	datastoreClusterMap                   = "DATASTORE_CLUSTER_MAP"
 )
 
 // GetAndExpectStringEnvVar parses a string from env variable.

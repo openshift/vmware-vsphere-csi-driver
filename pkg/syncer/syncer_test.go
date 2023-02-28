@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,13 +38,13 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	testclient "k8s.io/client-go/kubernetes/fake"
 
-	cnsvolumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/unittestcommon"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/types"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	cnsvolumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/unittestcommon"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 const (
@@ -192,21 +193,29 @@ func TestSyncerWorkflows(t *testing.T) {
 		}
 	}()
 
-	volumeManager = cnsvolumes.GetManager(ctx, virtualCenter, nil, false)
+	volumeManager, err = cnsvolumes.GetManager(ctx, virtualCenter, nil, false, false, false, false)
+	if err != nil {
+		t.Fatalf("failed to create an instance of volume manager. err=%v", err)
+	}
 
 	// Initialize metadata syncer object.
 	metadataSyncer = &metadataSyncInformer{}
 	configInfo := &cnsconfig.ConfigurationInfo{}
 	configInfo.Cfg = csiConfig
 	metadataSyncer.configInfo = configInfo
-	metadataSyncer.volumeManager = cnsvolumes.GetManager(ctx, virtualCenter, nil, false)
+	metadataSyncer.volumeManager, err = cnsvolumes.GetManager(ctx, virtualCenter, nil, false, false, false, false)
+	if err != nil {
+		t.Fatalf("failed to create an instance of volume manager. err=%v", err)
+	}
 	metadataSyncer.host = virtualCenter.Config.Host
+	volumeOperationsLock = make(map[string]*sync.Mutex)
+	volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
 
 	// Create the kubernetes client from config or env.
 	// Here we should use a faked client to avoid test inteference with running
 	// metadata syncer pod in real Kubernetes cluster.
 	k8sclient = testclient.NewSimpleClientset()
-	metadataSyncer.k8sInformerManager = k8s.NewInformer(k8sclient)
+	metadataSyncer.k8sInformerManager = k8s.NewInformer(ctx, k8sclient, true)
 	metadataSyncer.k8sInformerManager.GetPodLister()
 	metadataSyncer.pvLister = metadataSyncer.k8sInformerManager.GetPVLister()
 	metadataSyncer.pvcLister = metadataSyncer.k8sInformerManager.GetPVCLister()
@@ -645,7 +654,8 @@ func runTestFullSyncWorkflows(t *testing.T) {
 			CnsBackingObjectDetails: cnstypes.CnsBackingObjectDetails{CapacityInMb: gbInMb},
 		},
 	}
-	cnsCreationMap = make(map[string]bool)
+	cnsCreationMap = make(map[string]map[string]bool)
+	cnsCreationMap[csiConfig.Global.VCenterIP] = make(map[string]bool)
 
 	volumeInfo, _, err := volumeManager.CreateVolume(ctx, &createSpec)
 	if err != nil {
@@ -672,15 +682,16 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	if len(queryResult.Volumes) != 1 && queryResult.Volumes[0].VolumeId.Id != volumeInfo.VolumeID.Id {
 		t.Fatalf("failed to find the newly created volume with ID: %s", volumeInfo.VolumeID.Id)
 	}
-	cnsDeletionMap = make(map[string]bool)
+	cnsDeletionMap = make(map[string]map[string]bool)
+	cnsDeletionMap[csiConfig.Global.VCenterIP] = make(map[string]bool)
 	// PV does not exist in K8S, but volume exist in CNS cache.
 	// FullSync should delete this volume from CNS cache after two cycles.
 	waitForListerSync()
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,11 +737,11 @@ func runTestFullSyncWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForListerSync()
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -759,7 +770,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForListerSync()
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -781,7 +792,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForListerSync()
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +815,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitForListerSync()
-	err = CsiFullSync(ctx, metadataSyncer)
+	err = CsiFullSync(ctx, metadataSyncer, csiConfig.Global.VCenterIP)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -896,4 +907,125 @@ func getPodSpec(namespace string, labels map[string]string, pvcName string, phas
 // objects, we need to ensure listers used in the metadata syncer are synced.
 func waitForListerSync() {
 	time.Sleep(1 * time.Second)
+}
+
+func TestGetVCForTopologySegments(t *testing.T) {
+	// Create context.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	tests := []struct {
+		name                      string
+		topologyVCMap             map[string]map[string]struct{}
+		requestedTopologySegments map[string][]string
+		expectedVC                string
+		expectingErr              bool
+	}{
+		{
+			name: "Higher-level topology label present in more than one VC",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}, "10.100.100.1": {}},
+				"zone-1":   {"10.100.100.0": {}},
+				"zone-2":   {"10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-1"},
+				"topology.csi.vmware.com/zone":   {"zone-2"},
+			},
+			expectedVC:   "10.100.100.1",
+			expectingErr: false,
+		},
+		{
+			name: "Invalid topology label given as input",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}, "10.100.100.1": {}},
+				"zone-1":   {"10.100.100.0": {}},
+				"zone-2":   {"10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-1"},
+				"topology.csi.vmware.com/zone":   {"zone-3"},
+			},
+			expectedVC:   "",
+			expectingErr: true,
+		},
+		{
+			name: "Topology label belongs to more than one VC",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}, "10.100.100.1": {}},
+				"zone-1":   {"10.100.100.0": {}, "10.100.100.1": {}},
+				"zone-2":   {"10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-1"},
+				"topology.csi.vmware.com/zone":   {"zone-1"},
+			},
+			expectedVC:   "",
+			expectingErr: true,
+		},
+		{
+			name: "Leaf-level topology label present in more than one VC",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}},
+				"region-2": {"10.100.100.1": {}},
+				"zone-1":   {"10.100.100.0": {}, "10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-2"},
+				"topology.csi.vmware.com/zone":   {"zone-1"},
+			},
+			expectedVC:   "10.100.100.1",
+			expectingErr: false,
+		},
+		{
+			name: "Topology labels distinct across VCs",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}},
+				"region-2": {"10.100.100.1": {}},
+				"zone-1":   {"10.100.100.0": {}},
+				"zone-2":   {"10.100.100.1": {}},
+				"city-1":   {"10.100.100.0": {}},
+				"city-2":   {"10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-2"},
+				"topology.csi.vmware.com/zone":   {"zone-2"},
+				"topology.csi.vmware.com/city":   {"city-2"},
+			},
+			expectedVC:   "10.100.100.1",
+			expectingErr: false,
+		},
+		{
+			name: "Multiple values for same topology key",
+			topologyVCMap: map[string]map[string]struct{}{
+				"region-1": {"10.100.100.0": {}},
+				"region-2": {"10.100.100.0": {}},
+				"zone-1":   {"10.100.100.0": {}},
+				"zone-2":   {"10.100.100.1": {}},
+			},
+			requestedTopologySegments: map[string][]string{
+				"topology.csi.vmware.com/region": {"region-1", "region-2"},
+				"topology.csi.vmware.com/zone":   {"zone-1"},
+			},
+			expectedVC:   "10.100.100.0",
+			expectingErr: false,
+		},
+	}
+
+	MetadataSyncer = &metadataSyncInformer{}
+	for _, tc := range tests {
+		t.Run(tc.name, func(tt *testing.T) {
+			MetadataSyncer.topologyVCMap = tc.topologyVCMap
+			vc, err := getVCForTopologySegments(ctx, tc.requestedTopologySegments)
+			gotError := err != nil
+			if tc.expectingErr != gotError {
+				tt.Errorf("Error expectation did not meet. Expected error: %t. Got error: %t. Error: %v",
+					tc.expectingErr, gotError, err)
+			}
+			if tc.expectedVC != vc {
+				tt.Errorf("VC expectation did not meet. Expected VC: %q. Got VC: %q",
+					tc.expectedVC, vc)
+			}
+		})
+	}
 }

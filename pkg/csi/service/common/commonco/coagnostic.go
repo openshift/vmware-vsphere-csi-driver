@@ -23,12 +23,12 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	storagev1 "k8s.io/api/storage/v1"
 
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/k8sorchestrator"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/types"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/k8sorchestrator"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 // ContainerOrchestratorUtility represents the singleton instance of
@@ -65,10 +65,22 @@ type COCommonInterface interface {
 	// GetAllVolumes returns list of volumes in a bound state
 	GetAllVolumes() []string
 	// GetAllK8sVolumes returns list of volumes in a bound state, in the K8s cluster
+	// list Includes Migrated vSphere Volumes VMDK Paths and CSI Volume IDs
 	GetAllK8sVolumes() []string
 	// AnnotateVolumeSnapshot annotates the volumesnapshot CR in k8s cluster with the snapshot-id and fcd-id
 	AnnotateVolumeSnapshot(ctx context.Context, volumeSnapshotName string,
 		volumeSnapshotNamespace string, annotations map[string]string) (bool, error)
+	// GetConfigMap checks if ConfigMap with given name exists in the given namespace.
+	// If it exists, this function returns ConfigMap data, otherwise returns error.
+	GetConfigMap(ctx context.Context, name string, namespace string) (map[string]string, error)
+	// CreateConfigMap creates the ConfigMap with given name, namespace, data and immutable
+	// parameter values.
+	CreateConfigMap(ctx context.Context, name string, namespace string, data map[string]string,
+		isImmutable bool) error
+	// GetCSINodeTopologyInstancesList lists CSINodeTopology instances for a given cluster.
+	GetCSINodeTopologyInstancesList() []interface{}
+	// GetCSINodeTopologyInstanceByName fetches the CSINodeTopology instance for a given node name in the cluster.
+	GetCSINodeTopologyInstanceByName(nodeName string) (item interface{}, exists bool, err error)
 }
 
 // GetContainerOrchestratorInterface returns orchestrator object for a given

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/akutz/gofsutil"
 	"github.com/container-storage-interface/spec/lib/go/csi"
@@ -34,10 +35,10 @@ import (
 	k8svol "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util/fs"
 	"k8s.io/mount-utils"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/mounter"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/mounter"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -88,7 +89,7 @@ func (osUtils *OsUtils) NodeStageBlockVolume(
 	log.Debugf("nodeStageBlockVolume: Disk %q attached at %q", diskID, volPath)
 
 	// Check that block device looks good.
-	dev, err := osUtils.GetDevice(volPath)
+	dev, err := osUtils.GetDevice(ctx, volPath)
 	if err != nil {
 		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"error getting block device for volume: %q. Parameters: %v err: %v",
@@ -316,6 +317,17 @@ func (osUtils *OsUtils) IsBlockVolumePublished(ctx context.Context, volID string
 	}
 
 	if dev == nil {
+		// check if target is mount point
+		notMountPoint, err := mount.IsNotMountPoint(osUtils.Mounter, target)
+		if err != nil {
+			log.Errorf("error while checking target path %q is mount point err: %v", target, err)
+			return false, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to verify mount point %q. Error: %v", target, err)
+		}
+		if !notMountPoint {
+			log.Infof("target %q is mount point", target)
+			return true, nil
+		}
 		// Nothing is mounted, so unpublish is already done. However, we also know
 		// that the target path exists, and it is our job to remove it.
 		log.Debugf("isBlockVolumePublished: No device found. Assuming Unpublish is "+
@@ -378,7 +390,7 @@ func (osUtils *OsUtils) PublishMountVol(
 	log.Infof("PublishMountVolume called with args: %+v", params)
 
 	// Extract fs details.
-	_, mntFlags, err := osUtils.EnsureMountVol(ctx, log, req.GetVolumeCapability())
+	_, mntFlags, err := osUtils.EnsureMountVol(ctx, req.GetVolumeCapability())
 	if err != nil {
 		return nil, err
 	}
@@ -521,7 +533,7 @@ func (osUtils *OsUtils) PublishFileVol(
 	log.Infof("PublishFileVolume called with args: %+v", params)
 
 	// Extract mount details.
-	fsType, mntFlags, err := osUtils.EnsureMountVol(ctx, log, req.GetVolumeCapability())
+	fsType, mntFlags, err := osUtils.EnsureMountVol(ctx, req.GetVolumeCapability())
 	if err != nil {
 		return nil, err
 	}
@@ -587,10 +599,26 @@ func (osUtils *OsUtils) PublishFileVol(
 
 // GetDevice returns a Device struct with info about the given device, or
 // an error if it doesn't exist or is not a block device.
-func (osUtils *OsUtils) GetDevice(path string) (*Device, error) {
-
+func (osUtils *OsUtils) GetDevice(ctx context.Context, path string) (*Device, error) {
+	log := logger.GetLogger(ctx)
+	log.Infof("check path exits %s", path)
 	fi, err := os.Lstat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			err = syscall.Access(path, syscall.F_OK)
+			if err == nil {
+				// The access syscall says the file exists, the stat syscall says it doesn't.
+				// fake error and treat the path as existing but corrupted.
+				log.Debugf("Potential stale file handle detected: %s", path)
+				return nil, syscall.ESTALE
+			}
+			log.Infof("path: %v does not exists", err)
+			return nil, nil
+		} else if mount.IsCorruptedMnt(err) {
+			log.Infof("mount is currupted %v", err)
+			return nil, err
+		}
+		log.Infof("error checking path %v", err)
 		return nil, err
 	}
 
@@ -658,7 +686,6 @@ func (osUtils *OsUtils) GetDiskPath(id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-
 	targetDisk := blockPrefix + id
 
 	for _, f := range devs {
@@ -900,7 +927,7 @@ func (osUtils *OsUtils) GetDevFromMount(ctx context.Context, target string) (*De
 			if m.Device == "udev" || m.Device == "devtmpfs" {
 				d = m.Source
 			}
-			dev, err := osUtils.GetDevice(d)
+			dev, err := osUtils.GetDevice(ctx, d)
 			if err != nil {
 				return nil, err
 			}
@@ -927,19 +954,36 @@ func (osUtils *OsUtils) IsTargetInMounts(ctx context.Context, path string) (bool
 // Defaults to nfs4 for file volume and ext4 for block volume when empty string
 // is observed. This function also ignores default ext4 fstype supplied by
 // external-provisioner when none is specified in the StorageClass
-func (osUtils *OsUtils) GetVolumeCapabilityFsType(ctx context.Context, capability *csi.VolumeCapability) string {
+func (osUtils *OsUtils) GetVolumeCapabilityFsType(ctx context.Context,
+	capability *csi.VolumeCapability) (string, error) {
 	log := logger.GetLogger(ctx)
 	fsType := strings.ToLower(capability.GetMount().GetFsType())
-	log.Debugf("FsType received from Volume Capability: %q", fsType)
+	log.Infof("FsType received from Volume Capability: %q", fsType)
 	isFileVolume := common.IsFileVolumeRequest(ctx, []*csi.VolumeCapability{capability})
-	if isFileVolume && (fsType == "" || fsType == "ext4") {
-		log.Infof("empty string or ext4 fstype observed for file volume. Defaulting to: %s", common.NfsV4FsType)
-		fsType = common.NfsV4FsType
-	} else if !isFileVolume && fsType == "" {
-		log.Infof("empty string fstype observed for block volume. Defaulting to: %s", common.Ext4FsType)
-		fsType = common.Ext4FsType
+	if isFileVolume {
+		// For File volumes we only support nfs or nfs4 filesystem. External-provisioner sets default fstype
+		// as ext4 when none is specified in StorageClass, hence overwrite it to nfs4 while mounting the volume.
+		if fsType == "" || fsType == "ext4" {
+			log.Infof("empty string or ext4 fstype observed for file volume. Defaulting to: %s",
+				common.NfsV4FsType)
+			fsType = common.NfsV4FsType
+		} else if !(fsType == common.NfsFsType || fsType == common.NfsV4FsType) {
+			return "", logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+				"unsupported fsType %q observed for file volume", fsType)
+		}
+	} else {
+		// For Block volumes we only support following filesystems:
+		// ext3, ext4 and xfs for Linux.
+		if fsType == "" {
+			log.Infof("empty string fstype observed for block volume. Defaulting to: %s",
+				common.Ext4FsType)
+			fsType = common.Ext4FsType
+		} else if !(fsType == common.Ext4FsType || fsType == common.Ext3FsType || fsType == common.XFSType) {
+			return "", logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+				"unsupported fsType %q observed for block volume", fsType)
+		}
 	}
-	return fsType
+	return fsType, nil
 }
 
 // ResizeVolume resizes the volume
@@ -985,7 +1029,7 @@ func (osUtils *OsUtils) VerifyVolumeAttachedAndFillParams(ctx context.Context,
 	}
 
 	// Get underlying block device.
-	*dev, err = osUtils.GetDevice(volPath)
+	*dev, err = osUtils.GetDevice(ctx, volPath)
 	log.Debugf("Device: %v", dev)
 	if err != nil {
 		return logger.LogNewErrorCodef(log, codes.Internal,
@@ -1052,4 +1096,15 @@ func unescape(ctx context.Context, in string) string {
 		s = tail
 	}
 	return string(out)
+}
+
+// Check if device at given path is block device or not
+func (osUtils *OsUtils) IsBlockDevice(ctx context.Context, volumePath string) (bool, error) {
+	log := logger.GetLogger(ctx)
+
+	deviceInfo, err := os.Stat(volumePath)
+	if err != nil {
+		return false, logger.LogNewErrorf(log, "IsBlockDevice: could not get device info for path %s", volumePath)
+	}
+	return deviceInfo.Mode()&os.ModeDevice == os.ModeDevice, nil
 }

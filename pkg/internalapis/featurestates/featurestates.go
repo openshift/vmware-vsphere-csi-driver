@@ -32,12 +32,12 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	featurestatesconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/featurestates/config"
+	featurestatesconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/featurestates/config"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis"
-	featurestatesv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/featurestates/v1alpha1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis"
+	featurestatesv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/featurestates/v1alpha1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 const (
@@ -123,7 +123,7 @@ func StartSvFSSReplicationService(ctx context.Context, svFeatureStatConfigMapNam
 	}
 
 	// Create k8s Informer and watch on configmaps and namespaces.
-	informer := k8s.NewInformer(k8sClient)
+	informer := k8s.NewInformer(ctx, k8sClient, true)
 	// Configmap informer to watch on SV featurestate config-map.
 	informer.AddConfigMapListener(ctx, k8sClient, svFeatureStateConfigMapNamespace,
 		// Add.

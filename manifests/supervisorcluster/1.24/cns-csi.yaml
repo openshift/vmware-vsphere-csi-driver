@@ -209,11 +209,14 @@ spec:
         - operator: "Exists"
           key: "node-role.kubernetes.io/control-plane"
           effect: "NoSchedule"
+        - operator: "Exists"
+          key: "node-role.kubernetes.io/master"
+          effect: "NoSchedule"
       hostNetwork: true
       priorityClassName: system-node-critical
       containers:
         - name: csi-provisioner
-          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v3.2.1_vmware.1
+          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v3.3.0_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -248,7 +251,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-attacher
-          image: localhost:5000/vmware.io/csi-attacher:v3.5.0_vmware.1
+          image: localhost:5000/vmware.io/csi-attacher:v4.0.0_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -259,6 +262,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
+            - "--worker-threads=25"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -271,7 +275,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-resizer
-          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.5.0_vmware.1
+          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.6.0_vmware.1
           imagePullPolicy: IfNotPresent
           args:
             - --v=4
@@ -306,9 +310,9 @@ spec:
             httpGet:
               path: /healthz
               port: healthz
-            initialDelaySeconds: 10
+            initialDelaySeconds: 30
             timeoutSeconds: 10
-            periodSeconds: 5
+            periodSeconds: 180
             failureThreshold: 3
           env:
             - name: CSI_ENDPOINT
@@ -333,6 +337,8 @@ spec:
               value: "50"
             - name: INCLUSTER_CLIENT_BURST
               value: "50"
+            - name: GODEBUG
+              value: x509sha1=1
           imagePullPolicy: "IfNotPresent"
           volumeMounts:
             - mountPath: /etc/vmware/wcp
@@ -353,6 +359,9 @@ spec:
           image: localhost:5000/vmware/syncer:<syncer_ver>
           args:
             - "--leader-election"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
           env:
             - name: CLUSTER_FLAVOR
               value: "WORKLOAD"
@@ -376,6 +385,8 @@ spec:
               value: "50"
             - name: INCLUSTER_CLIENT_BURST
               value: "50"
+            - name: GODEBUG
+              value: x509sha1=1
           imagePullPolicy: "IfNotPresent"
           ports:
             - containerPort: 2113
@@ -413,7 +424,6 @@ data:
   "online-volume-extend": "true"
   "file-volume": "true"
   "csi-auth-check": "true"
-  "vsan-direct-disk-decommission": "true"
   "trigger-csi-fullsync": "false"
   "csi-sv-feature-states-replication": "true"
   "fake-attach": "true"
@@ -423,7 +433,8 @@ data:
   "sibling-replica-bound-pvc-check": "true"
   "tkgs-ha": "true"
   "list-volumes": "false"
-  "cnsmgr-suspend-create-volume": "false"
+  "cnsmgr-suspend-create-volume": "true"
+  "listview-tasks": "false"
 kind: ConfigMap
 metadata:
   name: csi-feature-states
@@ -599,6 +610,9 @@ spec:
       terminationGracePeriodSeconds: 10
       tolerations:
         - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
+        - key: node-role.kubernetes.io/master
           operator: Exists
           effect: NoSchedule
         - effect: NoExecute

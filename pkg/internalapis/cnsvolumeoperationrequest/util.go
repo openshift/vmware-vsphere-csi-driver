@@ -19,7 +19,7 @@ package cnsvolumeoperationrequest
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 )
 
 const (
@@ -50,6 +50,7 @@ type VolumeOperationRequestDetails struct {
 type OperationDetails struct {
 	TaskInvocationTimestamp metav1.Time
 	TaskID                  string
+	VCenterServer           string
 	OpID                    string
 	TaskStatus              string
 	Error                   string
@@ -58,7 +59,8 @@ type OperationDetails struct {
 // CreateVolumeOperationRequestDetails returns an object of type
 // VolumeOperationRequestDetails from the input parameters.
 func CreateVolumeOperationRequestDetails(name, volumeID, snapshotID string, capacity int64,
-	taskInvocationTimestamp metav1.Time, taskID, opID, taskStatus, error string) *VolumeOperationRequestDetails {
+	taskInvocationTimestamp metav1.Time, taskID, vCenterServer, opID,
+	taskStatus, error string) *VolumeOperationRequestDetails {
 	return &VolumeOperationRequestDetails{
 		Name:       name,
 		VolumeID:   volumeID,
@@ -67,6 +69,7 @@ func CreateVolumeOperationRequestDetails(name, volumeID, snapshotID string, capa
 		OperationDetails: &OperationDetails{
 			TaskInvocationTimestamp: taskInvocationTimestamp,
 			TaskID:                  taskID,
+			VCenterServer:           vCenterServer,
 			OpID:                    opID,
 			TaskStatus:              taskStatus,
 			Error:                   error,
@@ -82,6 +85,7 @@ func convertToCnsVolumeOperationRequestDetails(
 	return &cnsvolumeoprequestv1alpha1.OperationDetails{
 		TaskInvocationTimestamp: details.TaskInvocationTimestamp,
 		TaskID:                  details.TaskID,
+		VCenterServer:           details.VCenterServer,
 		OpID:                    details.OpID,
 		TaskStatus:              details.TaskStatus,
 		Error:                   details.Error,

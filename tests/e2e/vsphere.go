@@ -1137,3 +1137,45 @@ func fetchDsUrl4CnsVol(e2eVSphere vSphere, volHandle string) string {
 	gomega.Expect(queryResult.Volumes).ShouldNot(gomega.BeEmpty())
 	return queryResult.Volumes[0].DatastoreUrl
 }
+
+// verifyPreferredDatastoreMatch verify if any of the given dsUrl matches with the datstore url for the volumeid
+func (vs *vSphere) verifyPreferredDatastoreMatch(volumeID string, dsUrls []string) bool {
+	actualDatastoreUrl := fetchDsUrl4CnsVol(e2eVSphere, volumeID)
+	flag := false
+	for _, dsUrl := range dsUrls {
+		if actualDatastoreUrl == dsUrl {
+			flag = true
+			return flag
+		}
+	}
+	return flag
+}
+
+// Delete CNS volume
+func (vs *vSphere) deleteCNSvolume(volumeID string, isDeleteDisk bool) (*cnstypes.CnsDeleteVolumeResponse, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Connect to VC
+	connect(ctx, vs)
+
+	var volumeIds []cnstypes.CnsVolumeId
+	volumeIds = append(volumeIds, cnstypes.CnsVolumeId{
+		Id: volumeID,
+	})
+
+	req := cnstypes.CnsDeleteVolume{
+		This:       cnsVolumeManagerInstance,
+		VolumeIds:  volumeIds,
+		DeleteDisk: isDeleteDisk,
+	}
+
+	err := connectCns(ctx, vs)
+	if err != nil {
+		return nil, err
+	}
+	res, err := cnsmethods.CnsDeleteVolume(ctx, vs.CnsClient.Client, &req)
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
+}

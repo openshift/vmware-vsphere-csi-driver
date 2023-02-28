@@ -25,10 +25,10 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 // Version of the syncer. This should be set via ldflags.
@@ -73,17 +73,20 @@ var (
 	// cnsDeletionMap tracks volumes that exist in CNS but not in K8s
 	// If a volume exists in this map across two fullsync cycles,
 	// the volume is deleted from CNS
-	cnsDeletionMap map[string]bool
+	// A separate map is maintained for each VC.
+	cnsDeletionMap map[string]map[string]bool
 
 	// cnsCreationMap tracks volumes that exist in K8s but not in CNS
 	// If a volume exists in this map across two fullsync cycles,
 	// the volume is created in CNS
-	cnsCreationMap map[string]bool
+	// A separate map is maintained for each VC.
+	cnsCreationMap map[string]map[string]bool
 
 	// Metadata syncer and full sync share a global lock
 	// to mitigate race conditions related to
 	// static provisioning of volumes
-	volumeOperationsLock sync.Mutex
+	// There is a separate lock for each VC.
+	volumeOperationsLock map[string]*sync.Mutex
 )
 
 type (
@@ -100,8 +103,11 @@ type (
 )
 
 type metadataSyncInformer struct {
-	clusterFlavor      cnstypes.CnsClusterFlavor
-	volumeManager      volumes.Manager
+	clusterFlavor cnstypes.CnsClusterFlavor
+	volumeManager volumes.Manager
+	// map of VC Host to Volume Manager
+	// Use this for Vanilla flavor Multi vCenter Topology feature
+	volumeManagers     map[string]volumes.Manager
 	host               string
 	cnsOperatorClient  client.Client
 	supervisorClient   clientset.Interface
@@ -111,6 +117,13 @@ type metadataSyncInformer struct {
 	pvcLister          corelisters.PersistentVolumeClaimLister
 	podLister          corelisters.PodLister
 	coCommonInterface  commonco.COCommonInterface
+	// topologyVCMap maintains a cache of topology tags to the vCenter IP/FQDN which holds the tag.
+	// Example - {region1: {VC1: struct{}{}, VC2: struct{}{}},
+	//            zone1: {VC1: struct{}{}},
+	//            zone2: {VC2: struct{}{}}}
+	// The vCenter IP/FQDN under each tag are maintained as a map of string with nil values to improve
+	// retrieval and deletion performance.
+	topologyVCMap map[string]map[string]struct{}
 }
 
 const (

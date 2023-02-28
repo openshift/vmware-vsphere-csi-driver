@@ -79,6 +79,12 @@ const (
 	// Ext4FsType represents the default filesystem type for block volume.
 	Ext4FsType = "ext4"
 
+	// Ext3FsType represents the ext3 filesystem type for block volume.
+	Ext3FsType = "ext3"
+
+	// XFSType represents the xfs filesystem type for block volume.
+	XFSType = "xfs"
+
 	// NfsV4FsType represents nfs4 mount type.
 	NfsV4FsType = "nfs4"
 
@@ -341,8 +347,6 @@ const (
 	// CSISVFeatureStateReplication is feature flag for SV feature state
 	// replication feature.
 	CSISVFeatureStateReplication = "csi-sv-feature-states-replication"
-	// VSANDirectDiskDecommission is feature flag for vsanD disk decommission.
-	VSANDirectDiskDecommission = "vsan-direct-disk-decommission"
 	// FileVolume is feature flag name for file volume support in WCP.
 	FileVolume = "file-volume"
 	// FakeAttach is the feature flag for fake attach support in WCP.
@@ -352,10 +356,6 @@ const (
 	// CSIVolumeManagerIdempotency is the feature flag for idempotency handling
 	// in CSI volume manager.
 	CSIVolumeManagerIdempotency = "improved-csi-idempotency"
-	// ImprovedVolumeTopology is the feature flag used to make the following
-	// improvements to topology feature:
-	// 1. Avoid taking in VC credentials in node daemonset.
-	ImprovedVolumeTopology = "improved-volume-topology"
 	// BlockVolumeSnapshot is the feature to support CSI Snapshots for block
 	// volume on vSphere CSI driver.
 	BlockVolumeSnapshot = "block-volume-snapshot"
@@ -384,4 +384,11 @@ const (
 	TopologyPreferentialDatastores = "topology-preferential-datastores"
 	// MaxPVSCSITargetsPerVM enables support for 255 volumes per node vm
 	MaxPVSCSITargetsPerVM = "max-pvscsi-targets-per-vm"
+	// MultiVCenterCSITopology is the feature gate for enabling multi vCenter topology support for vSphere CSI driver.
+	MultiVCenterCSITopology = "multi-vcenter-csi-topology"
+	// CSIInternalGeneratedClusterID enables support to generate unique cluster
+	// ID internally if user doesn't provide it in vSphere config secret.
+	CSIInternalGeneratedClusterID = "csi-internal-generated-cluster-id"
+	// ListViewPerf uses govmomi ListView to wait for CNS tasks
+	ListViewPerf = "listview-tasks"
 )

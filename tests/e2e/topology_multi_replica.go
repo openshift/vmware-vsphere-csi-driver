@@ -79,6 +79,8 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			defaultDatastore           *object.Datastore
 			fullSyncWaitTime           int
 			k8sVersion                 string
+			nimbusGeneratedVcPwd       string
+			nimbusGeneratedK8sVmPwd    string
 		)
 		ginkgo.BeforeEach(func() {
 			var cancel context.CancelFunc
@@ -111,10 +113,13 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap, topologyLength)
 			allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
 
+			nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
+			nimbusGeneratedVcPwd = GetAndExpectStringEnvVar(nimbusVcPwd)
+
 			sshClientConfig = &ssh.ClientConfig{
 				User: "root",
 				Auth: []ssh.AuthMethod{
-					ssh.Password(k8sVmPasswd),
+					ssh.Password(nimbusGeneratedK8sVmPwd),
 				},
 				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			}
@@ -461,8 +466,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				if i == 2 {
 					/* Delete elected leader CSi-Controller-Pod where CSI-Attacher is running */
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where CSI-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -516,8 +520,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				if i == 2 {
 					/* Delete newly elected leader CSi-Controller-Pod where CSI-Attacher is running */
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where CSI-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -641,8 +644,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				if i == 2 {
 					/* Delete elected leader CSi-Controller-Pod where CSI-Attacher is running */
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where CSI-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -882,8 +884,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				if i == 1 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client,
-						sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1046,8 +1047,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				if i == 4 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Resizer is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client,
-						sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1230,8 +1230,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				// Delete elected leader Csi-Controller-Pod where CSi-Attacher is running
 				if i == 2 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client,
-						sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1369,8 +1368,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				if i == 2 {
 					/* Delete elected leader CSi-Controller-Pod where CSI-Attacher is running */
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where CSI-Provisioner is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1438,8 +1436,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				if i == 1 {
 					/* Delete newly elected leader CSi-Controller-Pod where CSI-Attacher is running */
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where CSI-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1536,7 +1533,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				pvclaimsList = append(pvclaimsList, pvclaim)
 				if i == 4 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Provisioner is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1591,7 +1588,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				gomega.Expect(isDiskAttached).To(gomega.BeTrue(), "Volume is not attached")
 				if i == 4 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Attacher is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1721,7 +1718,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 			username := vsphereCfg.Global.User
 			newPassword := e2eTestPassword
-			err = invokeVCenterChangePassword(username, adminPassword, newPassword, vcAddress)
+			err = invokeVCenterChangePassword(username, nimbusGeneratedVcPwd, newPassword, vcAddress)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Modifying the password in the secret")
@@ -1762,7 +1759,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Reverting the password change")
-			err = invokeVCenterChangePassword(username, newPassword, adminPassword, vcAddress)
+			err = invokeVCenterChangePassword(username, newPassword, nimbusGeneratedVcPwd, vcAddress)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Reverting the secret change back to reflect the original password")
@@ -1799,7 +1796,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				pvclaimsList = append(pvclaimsList, pvclaim)
 				if i == 4 {
 					ginkgo.By("Delete elected leader Csi-Controller-Pod where CSi-Provisioner is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, c, sshClientConfig, csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}
@@ -1963,7 +1960,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 
 			// Delete elected leader Csi-Controller-Pod where vsphere-syncer is running
 			ginkgo.By("Delete elected leader Csi-Controller-Pod where vsphere-syncer is running")
-			err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig, csi_controller_pod)
+			err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Get newly elected leader Csi-Controller-Pod where CSI Syncer is running and " +
 				"find the master node IP where this Csi-Controller-Pod is running")
@@ -2274,8 +2271,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 
 				if i == 4 {
 					ginkgo.By("Delete elected leader CSi-Controller-Pod where vsphere-syncer is running")
-					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, sshClientConfig,
-						csi_controller_pod)
+					err = deleteCsiControllerPodWhereLeaderIsRunning(ctx, client, csi_controller_pod)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 					/* Get newly elected current leader Csi-Controller-Pod where CSI Syncer is running" +

@@ -20,9 +20,9 @@ import (
 	"errors"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 )
 
 var (
@@ -59,6 +59,19 @@ type Manager struct {
 	VcenterConfig  *cnsvsphere.VirtualCenterConfig
 	CnsConfig      *config.Config
 	VolumeManager  cnsvolume.Manager
+	VcenterManager cnsvsphere.VirtualCenterManager
+}
+
+// Managers type comprises VirtualCenterConfigs, CnsConfig, VolumeManagers and VirtualCenterManager
+// If k8s cluster is deployed on single vCenter server VcenterConfigs and VolumeManagers will hold single entry
+// if k8s cluster is deployed on multi vCenter server, we will have VirtualCenterConfig and VolumeManagers for each
+// participating vCenter server.
+type Managers struct {
+	// map of VC Host to *VirtualCenterConfig
+	VcenterConfigs map[string]*cnsvsphere.VirtualCenterConfig
+	CnsConfig      *config.Config
+	// map of VC Host to Volume Manager
+	VolumeManagers map[string]cnsvolume.Manager
 	VcenterManager cnsvsphere.VirtualCenterManager
 }
 

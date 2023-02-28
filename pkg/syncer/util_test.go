@@ -10,7 +10,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer/k8scloudoperator"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/k8scloudoperator"
 )
 
 var (
@@ -192,4 +192,202 @@ func TestGetSCNameFromPVC(t *testing.T) {
 		t.Error(err)
 	}
 	t.Log("testGetSCNameFromPVC: end")
+}
+
+func TestGetTopologySegmentsFromNodeAffinityRulesSingleMatchExpression(t *testing.T) {
+	// Create context.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Log("getTopologySegmentsFromNodeAffinityRules with a single match expression")
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testPv",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "topology.csi.vmware.com/k8s-zone",
+									Operator: "In",
+									Values:   []string{"zone-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-building",
+									Operator: "In",
+									Values:   []string{"building-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-level",
+									Operator: "In",
+									Values:   []string{"level-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-rack",
+									Operator: "In",
+									Values:   []string{"rack-1", "rack-2"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-region",
+									Operator: "In",
+									Values:   []string{"region-1"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	topologySegments := getTopologySegmentsFromNodeAffinityRules(ctx, pv)
+
+	expectedTopologySegments := []map[string][]string{
+		{
+			"topology.csi.vmware.com/k8s-zone":     {"zone-1"},
+			"topology.csi.vmware.com/k8s-building": {"building-1"},
+			"topology.csi.vmware.com/k8s-level":    {"level-1"},
+			"topology.csi.vmware.com/k8s-rack":     {"rack-1", "rack-2"},
+			"topology.csi.vmware.com/k8s-region":   {"region-1"},
+		},
+	}
+
+	if len(topologySegments) != len(expectedTopologySegments) {
+		t.Errorf("Unequal number of topology segments. Expected: %d, Received: %d",
+			len(expectedTopologySegments), len(topologySegments))
+	}
+
+	for _, topology := range topologySegments {
+		foundMatch := false
+		for _, expectedTopology := range expectedTopologySegments {
+			if reflect.DeepEqual(expectedTopology, topology) {
+				foundMatch = true
+				break
+			}
+		}
+		if foundMatch == false {
+			t.Errorf("Mismatch in topology segments")
+		}
+	}
+}
+
+func TestGetTopologySegmentsFromNodeAffinityRulesMultipleMatchExpressions(t *testing.T) {
+	// Create context.
+	ctx, cancel = context.WithCancel(context.Background())
+	defer cancel()
+
+	t.Log("getTopologySegmentsFromNodeAffinityRules with multiple match expressions")
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "testPv",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			NodeAffinity: &corev1.VolumeNodeAffinity{
+				Required: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "topology.csi.vmware.com/k8s-zone",
+									Operator: "In",
+									Values:   []string{"zone-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-building",
+									Operator: "In",
+									Values:   []string{"building-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-level",
+									Operator: "In",
+									Values:   []string{"level-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-rack",
+									Operator: "In",
+									Values:   []string{"rack-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-region",
+									Operator: "In",
+									Values:   []string{"region-1"},
+								},
+							},
+						},
+						{
+							MatchExpressions: []corev1.NodeSelectorRequirement{
+								{
+									Key:      "topology.csi.vmware.com/k8s-zone",
+									Operator: "In",
+									Values:   []string{"zone-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-building",
+									Operator: "In",
+									Values:   []string{"building-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-level",
+									Operator: "In",
+									Values:   []string{"level-1"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-rack",
+									Operator: "In",
+									Values:   []string{"rack-2"},
+								},
+								{
+									Key:      "topology.csi.vmware.com/k8s-region",
+									Operator: "In",
+									Values:   []string{"region-1"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	topologySegments := getTopologySegmentsFromNodeAffinityRules(ctx, pv)
+
+	expectedTopologySegments := []map[string][]string{
+		{
+			"topology.csi.vmware.com/k8s-zone":     {"zone-1"},
+			"topology.csi.vmware.com/k8s-building": {"building-1"},
+			"topology.csi.vmware.com/k8s-level":    {"level-1"},
+			"topology.csi.vmware.com/k8s-rack":     {"rack-1"},
+			"topology.csi.vmware.com/k8s-region":   {"region-1"},
+		},
+		{
+			"topology.csi.vmware.com/k8s-zone":     {"zone-1"},
+			"topology.csi.vmware.com/k8s-building": {"building-1"},
+			"topology.csi.vmware.com/k8s-level":    {"level-1"},
+			"topology.csi.vmware.com/k8s-rack":     {"rack-2"},
+			"topology.csi.vmware.com/k8s-region":   {"region-1"},
+		},
+	}
+
+	if len(topologySegments) != len(expectedTopologySegments) {
+		t.Errorf("Unequal number of topology segments. Expected: %d, Received: %d",
+			len(expectedTopologySegments), len(topologySegments))
+	}
+
+	for _, topology := range topologySegments {
+		foundMatch := false
+		for _, expectedTopology := range expectedTopologySegments {
+			if reflect.DeepEqual(expectedTopology, topology) {
+				foundMatch = true
+				break
+			}
+		}
+		if foundMatch == false {
+			t.Errorf("Mismatch in topology segments")
+		}
+	}
 }

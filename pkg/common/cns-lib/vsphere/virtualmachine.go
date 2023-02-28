@@ -25,14 +25,18 @@ import (
 
 	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25/mo"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
 )
 
-// ErrVMNotFound is returned when a virtual machine isn't found.
-var ErrVMNotFound = errors.New("virtual machine wasn't found")
+var (
+	// ErrVMNotFound is returned when a virtual machine isn't found.
+	ErrVMNotFound = errors.New("virtual machine wasn't found")
+	// ErrNoSharedDatastoresFound is raised when no shared datastores are found among the given NodeVMs.
+	ErrNoSharedDatastoresFound = errors.New("no shared datastores found among given NodeVMs")
+)
 
 // VirtualMachine holds details of a virtual machine instance.
 type VirtualMachine struct {
@@ -83,7 +87,15 @@ func (vm *VirtualMachine) GetAllAccessibleDatastores(ctx context.Context) ([]*Da
 	hostObj := &HostSystem{
 		HostSystem: object.NewHostSystem(vm.Client(), host.Reference()),
 	}
-	return hostObj.GetAllAccessibleDatastores(ctx)
+	accessibleDatastores, err := hostObj.GetAllAccessibleDatastores(ctx)
+	if err != nil {
+		log.Errorf("failed to get all accessible datastores for VM %q on host %q with err: %v",
+			vm.VirtualMachine, hostObj.Reference(), err)
+	} else {
+		log.Debugf("Accessible datastores for node %q on host %q: %v",
+			vm.VirtualMachine, hostObj.Reference(), accessibleDatastores)
+	}
+	return accessibleDatastores, err
 }
 
 // Renew renews the virtual machine and datacenter information. If reconnect is
@@ -384,7 +396,7 @@ func GetSharedDatastoresForVMs(ctx context.Context, nodeVMs []*VirtualMachine) (
 			sharedDatastores = sharedAccessibleDatastores
 		}
 		if len(sharedDatastores) == 0 {
-			return nil, fmt.Errorf("no shared datastores found for nodeVm: %+v", nodeVM)
+			return nil, ErrNoSharedDatastoresFound
 		}
 	}
 	return sharedDatastores, nil

@@ -32,9 +32,9 @@ import (
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	csifault "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/fault"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	csifault "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/fault"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -306,6 +306,7 @@ func getCnsVolumeInfoFromTaskResult(ctx context.Context, virtualCenter *cnsvsphe
 	log := logger.GetLogger(ctx)
 	var datastoreURL string
 	volumeCreateResult := interface{}(taskResult).(*cnstypes.CnsVolumeCreateResult)
+	log.Debugf("volumeCreateResult.PlacementResults :%v", volumeCreateResult.PlacementResults)
 	if volumeCreateResult.PlacementResults != nil {
 		var datastoreMoRef types.ManagedObjectReference
 		for _, placementResult := range volumeCreateResult.PlacementResults {
@@ -362,21 +363,28 @@ func ExtractFaultTypeFromErr(ctx context.Context, err error) string {
 func ExtractFaultTypeFromVolumeResponseResult(ctx context.Context,
 	resp *cnstypes.CnsVolumeOperationResult) string {
 	log := logger.GetLogger(ctx)
+	log.Debugf("Extracting fault type from response: %+v", resp)
 	var faultType string
 	fault := resp.Fault
 	if fault != nil {
 		// faultType has the format like "*type.XXX", XXX is the specific VimFault type.
 		// For example, when CnsVolumeOperationrResult failed with ResourceInUse, faultType will be "*type.ResourceInUse".
-		faultType = reflect.TypeOf(fault.Fault).String()
-		log.Infof("Extract vimfault type: +%v  vimFault: +%v Fault: %+v from resp: +%v",
-			faultType, fault.Fault, fault, resp)
-		slice := strings.Split(faultType, ".")
-		vimFaultType := vimFaultPrefix + slice[1]
-		return vimFaultType
+		if fault.Fault != nil {
+			faultType = reflect.TypeOf(fault.Fault).String()
+			log.Infof("Extract vimfault type: %+v  vimFault: %+v Fault: %+v from resp: %+v",
+				faultType, fault.Fault, fault, resp)
+			slice := strings.Split(faultType, ".")
+			vimFaultType := vimFaultPrefix + slice[1]
+			return vimFaultType
+		} else {
+			faultType = reflect.TypeOf(fault).String()
+			log.Infof("Extract fault: %q from resp: %+v",
+				faultType, resp)
+			return faultType
+		}
 	}
-	log.Info("No fault in resp +%v", resp)
+	log.Info("No fault in resp %+v", resp)
 	return ""
-
 }
 
 // invokeCNSCreateSnapshot invokes CreateSnapshot operation for that volume on CNS.

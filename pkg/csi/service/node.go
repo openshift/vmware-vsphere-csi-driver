@@ -25,15 +25,13 @@ import (
 	"github.com/vmware/govmomi/units"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
-	v1 "k8s.io/api/core/v1"
 
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/types"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/osutils"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/osutils"
 )
 
 const (
@@ -89,7 +87,7 @@ func (driver *vsphereCSIDriver) NodeStageVolume(
 		// Mount Volume.
 		// Extract mount volume details.
 		log.Debug("NodeStageVolume: Volume detected as a mount volume")
-		params.FsType, params.MntFlags, err = driver.osUtils.EnsureMountVol(ctx, log, volCap)
+		params.FsType, params.MntFlags, err = driver.osUtils.EnsureMountVol(ctx, volCap)
 		if err != nil {
 			return nil, err
 		}
@@ -419,42 +417,16 @@ func (driver *vsphereCSIDriver) NodeGetInfo(
 		}
 		accessibleTopology, err = topologyService.GetNodeTopologyLabels(ctx, &nodeInfo)
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
-			// Initialize volume topology service.
-			if err = initVolumeTopologyService(ctx); err != nil {
-				return nil, err
-			}
-			// Fetch topology labels for given node.
-			nodeInfo := commoncotypes.NodeInfo{
-				NodeName: nodeName,
-				NodeID:   nodeID,
-			}
-			accessibleTopology, err = topologyService.GetNodeTopologyLabels(ctx, &nodeInfo)
-		} else {
-			// If ImprovedVolumeTopology is not enabled, use the VC credentials to
-			// fetch node topology information.
-			var cfg *cnsconfig.Config
-			cfgPath = os.Getenv(cnsconfig.EnvVSphereCSIConfig)
-			if cfgPath == "" {
-				cfgPath = cnsconfig.DefaultCloudConfigPath
-			}
-			cfg, err = cnsconfig.GetCnsconfig(ctx, cfgPath)
-			if err != nil {
-				if os.IsNotExist(err) {
-					log.Infof("Config file not provided to node daemonset. Assuming non-topology aware cluster.")
-					nodeInfoResponse = &csi.NodeGetInfoResponse{
-						NodeId:            nodeID,
-						MaxVolumesPerNode: maxVolumesPerNode,
-					}
-					log.Infof("NodeGetInfo response: %v", nodeInfoResponse)
-					return nodeInfoResponse, nil
-				}
-				return nil, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to read CNS config. Error: %v", err)
-			}
-			// Fetch topology labels using VC TagManager.
-			accessibleTopology, err = driver.fetchTopologyLabelsUsingVCCreds(ctx, nodeID, cfg)
+		// Initialize volume topology service.
+		if err = initVolumeTopologyService(ctx); err != nil {
+			return nil, err
 		}
+		// Fetch topology labels for given node.
+		nodeInfo := commoncotypes.NodeInfo{
+			NodeName: nodeName,
+			NodeID:   nodeID,
+		}
+		accessibleTopology, err = topologyService.GetNodeTopologyLabels(ctx, &nodeInfo)
 	}
 
 	if err != nil {
@@ -490,98 +462,6 @@ func initVolumeTopologyService(ctx context.Context) error {
 			"failed to init topology service. Error: %+v", err)
 	}
 	return nil
-}
-
-// fetchTopologyLabelsUsingVCCreds retrieves topology information of the nodes
-// using VC credentials mounted on the nodes. This approach will be deprecated
-// soon.
-func (driver *vsphereCSIDriver) fetchTopologyLabelsUsingVCCreds(
-	ctx context.Context, nodeID string, cfg *cnsconfig.Config) (
-	map[string]string, error) {
-	log := logger.GetLogger(ctx)
-
-	// If zone or region are empty, return.
-	if cfg.Labels.Zone == "" || cfg.Labels.Region == "" {
-		return nil, nil
-	}
-
-	log.Infof("Config file provided to node daemonset contains zone and region info. " +
-		"Assuming topology aware cluster.")
-	vcenterconfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, cfg)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to get VirtualCenterConfig from cns config. err: %v", err)
-	}
-	vcManager := cnsvsphere.GetVirtualCenterManager(ctx)
-	vcenter, err := vcManager.RegisterVirtualCenter(ctx, vcenterconfig)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to register vcenter with virtualCenterManager. err: %v", err)
-	}
-	defer func() {
-		if vcManager != nil {
-			err = vcManager.UnregisterAllVirtualCenters(ctx)
-			if err != nil {
-				log.Errorf("UnregisterAllVirtualCenters failed. err: %v", err)
-			}
-		}
-	}()
-
-	// Connect to vCenter.
-	err = vcenter.Connect(ctx)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to connect to vcenter host: %s. err: %v", vcenter.Config.Host, err)
-	}
-	// Get VM UUID.
-	uuid, err := driver.osUtils.GetSystemUUID(ctx)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to get system uuid for node VM. err: %v", err)
-	}
-	log.Debugf("Successfully retrieved uuid:%s  from the node: %s", uuid, nodeID)
-	nodeVM, err := cnsvsphere.GetVirtualMachineByUUID(ctx, uuid, false)
-	if err != nil || nodeVM == nil {
-		log.Errorf("failed to get nodeVM for uuid: %s. err: %+v", uuid, err)
-		uuid, err = driver.osUtils.ConvertUUID(uuid)
-		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
-				"convertUUID failed with error: %v", err)
-		}
-		nodeVM, err = cnsvsphere.GetVirtualMachineByUUID(ctx, uuid, false)
-		if err != nil || nodeVM == nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to get nodeVM for uuid: %s. err: %+v", uuid, err)
-		}
-	}
-	// Get a tag manager instance.
-	tagManager, err := cnsvsphere.GetTagManager(ctx, vcenter)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to create tagManager. err: %v", err)
-	}
-	defer func() {
-		err := tagManager.Logout(ctx)
-		if err != nil {
-			log.Errorf("failed to logout tagManager. err: %v", err)
-		}
-	}()
-
-	// Fetch zone and region for given node.
-	zone, region, err := nodeVM.GetZoneRegion(ctx, cfg.Labels.Zone, cfg.Labels.Region, tagManager)
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to get accessibleTopology for vm: %v, err: %v", nodeVM.Reference(), err)
-	}
-	log.Debugf("zone: [%s], region: [%s], Node VM: [%s]", zone, region, nodeID)
-
-	if zone != "" && region != "" {
-		accessibleTopology := make(map[string]string)
-		accessibleTopology[v1.LabelZoneRegion] = region
-		accessibleTopology[v1.LabelZoneFailureDomain] = zone
-		return accessibleTopology, nil
-	}
-	return nil, nil
 }
 
 func (driver *vsphereCSIDriver) NodeExpandVolume(
@@ -645,6 +525,37 @@ func (driver *vsphereCSIDriver) NodeExpandVolume(
 			if err != nil {
 				return nil, logger.LogNewErrorCode(log, codes.Internal, err.Error())
 			}
+		}
+	}
+
+	// Check the volume capability and handle accordingly.
+	// NOTE: VolumeCapability is optional field, if specified, use it for validation.
+	//       Otherwise, use volume_path to determine access_type and handle accordingly.
+	volCap := req.GetVolumeCapability()
+	if volCap != nil {
+		caps := []*csi.VolumeCapability{volCap}
+		if err := common.IsValidVolumeCapabilities(ctx, caps); err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"volume capability not supported. Err: %+v", err)
+		}
+		// No need to expand file system for raw block volumes, hence return.
+		if volCap.GetBlock() != nil {
+			log.Infof("NodeExpandVolume: called for raw block volume %s, ignoring..", volumeID)
+			return &csi.NodeExpandVolumeResponse{
+				CapacityBytes: int64(units.FileSize(reqVolSizeMB * common.MbInBytes)),
+			}, nil
+		}
+	} else {
+		isBlock, err := driver.osUtils.IsBlockDevice(ctx, volumePath)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to determine device path for volpath [%v]: %v", volumePath, err)
+		}
+		if isBlock {
+			log.Infof("NodeExpandVolume: called for raw block volume %s at volumePath %s, ignoring..", volumeID, volumePath)
+			return &csi.NodeExpandVolumeResponse{
+				CapacityBytes: int64(units.FileSize(reqVolSizeMB * common.MbInBytes)),
+			}, nil
 		}
 	}
 

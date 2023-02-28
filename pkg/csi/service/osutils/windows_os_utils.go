@@ -18,7 +18,9 @@ package osutils
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,10 +31,10 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8svol "k8s.io/kubernetes/pkg/volume"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/mounter"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/mounter"
 )
 
 const (
@@ -100,23 +102,21 @@ func (osUtils *OsUtils) NodeStageBlockVolume(
 		return nil, err
 	}
 	// Get the windows specific disk number
-	diskNumber, err := mounter.GetDiskNumber(diskID)
+	diskNumber, err := mounter.GetDiskNumber(ctx, diskID)
 	if err != nil {
 		return nil, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to get Disk Number, err: %v", err)
 	}
 	log.Infof("nodeStageBlockVolume diskNumber %s, diskId %s,stagingTargetPath %s ", diskNumber, diskID, stagingTargetPath)
 
-	// check if disk is mounted and formatted correctly, here the path should exist as it is created by CO and already checked
-	notMounted, err := mounter.IsLikelyNotMountPoint(stagingTargetPath)
+	mounted, err := osUtils.haveMountPoint(ctx, stagingTargetPath)
 	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"Could not determine if staging path is already mounted, err: %v", err)
+		return nil, err
 	}
-	if notMounted {
+	if !mounted {
 		log.Info("calling FormatAndMount")
 		//currently proxy does not support read only mount or filesystems other than ntfs
-		err := mounter.FormatAndMount(diskNumber, stagingTargetPath, params.FsType, params.MntFlags)
+		err := mounter.FormatAndMount(ctx, diskNumber, stagingTargetPath, params.FsType, params.MntFlags)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"error mounting volume. Parameters: %v err: %v", params, err)
@@ -126,6 +126,34 @@ func (osUtils *OsUtils) NodeStageBlockVolume(
 		log.Infof("nodeStageBlockVolume: Device already mounted.")
 	}
 	return &csi.NodeStageVolumeResponse{}, nil
+}
+
+func (osUtils *OsUtils) haveMountPoint(ctx context.Context, target string) (bool, error) {
+	log := logger.GetLogger(ctx)
+	mounter, err := GetMounter(ctx, osUtils)
+	if err != nil {
+		return false, err
+	}
+	// check if disk is mounted and formatted correctly, here the path should exist as it is created by CO and already checked
+	notMounted, err := mounter.IsLikelyNotMountPoint(target)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, logger.LogNewErrorCodef(log, codes.Internal,
+			"Could not determine if staging path is already mounted, err: %v", err)
+	}
+	if notMounted {
+		return false, nil
+	}
+	// testing original mount point, make sure the mount link is valid
+	if _, err := os.ReadDir(target); err != nil {
+		// mount link is invalid, now unmount and remount later
+		log.Warnf("haveMountPoint: ReadDir %s failed with %v, unmounting", target, err)
+		if err := mounter.Unmount(target); err != nil {
+			log.Errorf("haveMountPoint: Unmount directory %s failed with %v", target, err)
+			return true, err
+		}
+		return false, nil
+	}
+	return true, nil
 }
 
 // CleanupStagePath will unmount the volume from node and remove the stage directory
@@ -158,7 +186,7 @@ func (osUtils *OsUtils) CleanupPublishPath(ctx context.Context, target string, v
 		return err
 	}
 	// no need to check if target exist first as rmdir do not throw error if path does not exists.
-	err = mounter.Rmdir(target)
+	err = mounter.Rmdir(ctx, target)
 	if err != nil {
 		return fmt.Errorf(
 			"error unmounting publishTarget: %v", err)
@@ -229,7 +257,7 @@ func (osUtils *OsUtils) GetMetrics(ctx context.Context, path string) (*k8svol.Me
 	if err != nil {
 		return nil, err
 	}
-	available, capacity, usage, inodes, inodesFree, inodesUsed, err := mounter.StatFS(path)
+	available, capacity, usage, inodes, inodesFree, inodesUsed, err := mounter.StatFS(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -249,7 +277,7 @@ func (osUtils *OsUtils) GetBlockSizeBytes(ctx context.Context, devicePath string
 	if err != nil {
 		return -1, err
 	}
-	sizeInBytes, err := mounter.GetVolumeSizeInBytes(devicePath)
+	sizeInBytes, err := mounter.GetVolumeSizeInBytes(ctx, devicePath)
 
 	if err != nil {
 		return -1, err
@@ -265,7 +293,7 @@ func (osUtils *OsUtils) GetDevice(ctx context.Context, path string) (*Device, er
 	if err != nil {
 		return nil, err
 	}
-	d, err := mounter.GetDeviceNameFromMount(path)
+	d, err := mounter.GetDeviceNameFromMount(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -283,7 +311,7 @@ func (osUtils *OsUtils) RescanDevice(ctx context.Context, dev *Device) error {
 	if err != nil {
 		return err
 	}
-	return mounter.Rescan()
+	return mounter.Rescan(ctx)
 }
 
 // VerifyTargetDir checks if the target path is not empty, exists and is a
@@ -303,7 +331,7 @@ func (osUtils *OsUtils) VerifyTargetDir(ctx context.Context, target string, targ
 		return false, err
 	}
 
-	isExists, err := mounter.ExistsPath(target)
+	isExists, err := mounter.ExistsPath(ctx, target)
 	if err != nil {
 		return false, err
 	}
@@ -336,19 +364,30 @@ func (osUtils *OsUtils) IsTargetInMounts(ctx context.Context, path string) (bool
 // Defaults to nfs4 for file volume and ntfs for block volume when empty string
 // is observed. This function also ignores default ext4 fstype supplied by
 // external-provisioner when none is specified in the StorageClass
-func (osUtils *OsUtils) GetVolumeCapabilityFsType(ctx context.Context, capability *csi.VolumeCapability) string {
+func (osUtils *OsUtils) GetVolumeCapabilityFsType(ctx context.Context,
+	capability *csi.VolumeCapability) (string, error) {
 	log := logger.GetLogger(ctx)
 	fsType := strings.ToLower(capability.GetMount().GetFsType())
-	log.Debugf("FsType received from Volume Capability: %q", fsType)
+	log.Infof("FsType received from Volume Capability: %q", fsType)
 	isFileVolume := common.IsFileVolumeRequest(ctx, []*csi.VolumeCapability{capability})
-	if isFileVolume && (fsType == "" || fsType == "ext4") {
-		log.Infof("empty string or ext4 fstype observed for file volume. Defaulting to: %s", common.NfsV4FsType)
-		fsType = common.NfsV4FsType
-	} else if !isFileVolume && fsType == "" {
-		log.Infof("empty string fstype observed for block volume. Defaulting to: %s", common.NTFSFsType)
-		fsType = common.NTFSFsType
+	if isFileVolume {
+		// Volumes with RWM or ROM access modes are not supported on Windows
+		return "", logger.LogNewErrorCode(log, codes.FailedPrecondition,
+			"vSAN file service volume can not be mounted on windows node")
 	}
-	return fsType
+
+	// On Windows we only support ntfs filesystem. External-provisioner sets default fstype as ext4
+	// when none is specified in StorageClass, hence overwrite it to ntfs while mounting the volume.
+	if fsType == common.NTFSFsType {
+		return fsType, nil
+	} else if fsType == "" || fsType == "ext4" {
+		log.Infof("replacing fsType: %q received from volume "+
+			"capability with %q", fsType, common.NTFSFsType)
+		return common.NTFSFsType, nil
+	} else {
+		return "", logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+			"unsupported fsType %q observed", fsType)
+	}
 }
 
 // ResizeVolume resizes the volume
@@ -360,22 +399,23 @@ func (osUtils *OsUtils) ResizeVolume(ctx context.Context, devicePath, volumePath
 		return err
 	}
 	log.Infof("resizing using csi proxy, devicePath %s", devicePath)
-	err = mounter.ResizeVolume(devicePath, reqVolSizeBytes)
-	if err != nil {
-		return fmt.Errorf(
-			"error when resizing filesystem on devicePath %s and volumePath %s, err: %v ", devicePath, volumePath, err)
-	}
+
 	// Check the block size.
-	currentBlockSizeBytes, err := mounter.GetDiskTotalBytes(devicePath)
+	currentBlockSizeBytes, err := mounter.GetDiskTotalBytes(ctx, devicePath)
 	if err != nil {
 		return logger.LogNewErrorCodef(log, codes.Internal,
 			"error when getting size of block volume at path %s: %v", devicePath, err)
 	}
-	// For windows volume size is less than the disk size by some mb. Since Resize is successful
-	// check if disk size was good
-	if currentBlockSizeBytes < reqVolSizeBytes {
-		return logger.LogNewErrorCodef(log, codes.Internal,
-			"requested volume size was %d, but got volume with size %d", reqVolSizeBytes, currentBlockSizeBytes)
+	// For windows volume size is less than the disk size by some mb.
+	if reqVolSizeBytes-currentBlockSizeBytes < 1024*1024 {
+		log.Infof("minimum extent size is 1 MB. Skip resize for volume %s from currentBytes=%d to wantedBytes=%d ",
+			devicePath, currentBlockSizeBytes, reqVolSizeBytes)
+		return nil
+	}
+	err = mounter.ResizeVolume(ctx, devicePath, reqVolSizeBytes)
+	if err != nil {
+		return fmt.Errorf(
+			"error when resizing filesystem on devicePath %s and volumePath %s, err: %v ", devicePath, volumePath, err)
 	}
 	return nil
 }
@@ -398,19 +438,19 @@ func (osUtils *OsUtils) PreparePublishPath(ctx context.Context, path string) err
 	if err != nil {
 		return err
 	}
-	isExists, err := mounter.ExistsPath(path)
+	isExists, err := mounter.ExistsPath(ctx, path)
 	if err != nil {
 		return err
 	}
 	if isExists {
 		log.Infof("Removing path: %s", path)
-		if err = mounter.Rmdir(path); err != nil {
+		if err = mounter.Rmdir(ctx, path); err != nil {
 			return err
 		}
 	}
 	// ensure parent dir is created
 	parentDir := filepath.Dir(path)
-	if err := mounter.MakeDir(parentDir); err != nil {
+	if err := mounter.MakeDir(ctx, parentDir); err != nil {
 		return err
 	}
 	return nil
@@ -424,7 +464,7 @@ func (osUtils *OsUtils) GetSystemUUID(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	sn, err := mounter.GetBIOSSerialNumber()
+	sn, err := mounter.GetBIOSSerialNumber(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -470,4 +510,9 @@ func (osUtils *OsUtils) ShouldContinue(ctx context.Context) {
 		os.Exit(1)
 	}
 	return
+}
+
+// Check if device at given path is block device or not
+func (osUtils *OsUtils) IsBlockDevice(ctx context.Context, volumePath string) (bool, error) {
+	return false, nil
 }

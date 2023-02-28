@@ -192,7 +192,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 		originalFsSize, err := getFSSizeMb(f, pod)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		rand.Seed(time.Now().Unix())
+		rand.New(rand.NewSource(time.Now().Unix()))
 		testdataFile := fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
 		ginkgo.By(fmt.Sprintf("Creating a 512mb test data file %v", testdataFile))
 		op, err := exec.Command("dd", "if=/dev/urandom", fmt.Sprintf("of=%v", testdataFile),
@@ -1166,8 +1166,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandleSvc)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify volume is deleted in Supervisor Cluster")
-			volumeExists := verifyVolumeExistInSupervisorCluster(svcPvcName)
-			gomega.Expect(volumeExists).To(gomega.BeFalse())
+			err = waitTillVolumeIsDeletedInSvc(svcPvcName, poll, pollTimeoutShort)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
@@ -1364,8 +1364,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandleSvc)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify volume is deleted in Supervisor Cluster")
-			volumeExists := verifyVolumeExistInSupervisorCluster(svcPvcName)
-			gomega.Expect(volumeExists).To(gomega.BeFalse())
+			err = waitTillVolumeIsDeletedInSvc(svcPvcName, poll, pollTimeoutShort)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
@@ -1436,7 +1436,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
-		rand.Seed(time.Now().Unix())
+		rand.New(rand.NewSource(time.Now().Unix()))
 		testdataFile := fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
 		ginkgo.By(fmt.Sprintf("Creating a 512mb test data file %v", testdataFile))
 		op, err := exec.Command("dd", "if=/dev/urandom", fmt.Sprintf("of=%v", testdataFile),

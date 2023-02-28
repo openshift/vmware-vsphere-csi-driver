@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"strings"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
@@ -72,6 +72,8 @@ func (dc *Datacenter) GetDatastoreInfoByURL(ctx context.Context, datastoreURL st
 	}
 	for _, dsMo := range dsMoList {
 		if dsMo.Info.GetDatastoreInfo().Url == datastoreURL {
+			log.Debugf("Found datastore MoRef %v for datastoreURL: %q in datacenter: %q on vCenter: %q",
+				dsMo.Reference(), datastoreURL, dc.InventoryPath, dc.VirtualCenterHost)
 			return &DatastoreInfo{
 				&Datastore{object.NewDatastore(dc.Client(), dsMo.Reference()),
 					dc},

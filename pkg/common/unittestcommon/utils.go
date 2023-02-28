@@ -26,16 +26,16 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/types"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
-	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
+	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 )
 
 var mapVolumePathToID map[string]map[string]string
@@ -44,14 +44,16 @@ var mapVolumePathToID map[string]map[string]string
 func GetFakeContainerOrchestratorInterface(orchestratorType int) (commonco.COCommonInterface, error) {
 	if orchestratorType == common.Kubernetes {
 		fakeCO := &FakeK8SOrchestrator{
+			featureStatesLock: &sync.RWMutex{},
 			featureStates: map[string]string{
-				"volume-extend":         "true",
-				"volume-health":         "true",
-				"csi-migration":         "true",
-				"file-volume":           "true",
-				"block-volume-snapshot": "true",
-				"tkgs-ha":               "true",
-				"list-volumes":          "true",
+				"volume-extend":                     "true",
+				"volume-health":                     "true",
+				"csi-migration":                     "true",
+				"file-volume":                       "true",
+				"block-volume-snapshot":             "true",
+				"tkgs-ha":                           "true",
+				"list-volumes":                      "true",
+				"csi-internal-generated-cluster-id": "true",
 			},
 		}
 		return fakeCO, nil
@@ -64,13 +66,16 @@ func GetFakeContainerOrchestratorInterface(orchestratorType int) (commonco.COCom
 func (c *FakeK8SOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) bool {
 	var featureState bool
 	var err error
+	c.featureStatesLock.RLock()
 	if flag, ok := c.featureStates[featureName]; ok {
+		c.featureStatesLock.RUnlock()
 		featureState, err = strconv.ParseBool(flag)
 		if err != nil {
 			return false
 		}
 		return featureState
 	}
+	c.featureStatesLock.RUnlock()
 	return false
 }
 
@@ -263,4 +268,29 @@ func (c *FakeK8SOrchestrator) GetAllK8sVolumes() []string {
 func (c *FakeK8SOrchestrator) AnnotateVolumeSnapshot(ctx context.Context, volumeSnapshotName string,
 	volumeSnapshotNamespace string, annotations map[string]string) (bool, error) {
 	return true, nil
+}
+
+// GetConfigMap checks if ConfigMap with given name exists in the given namespace.
+// If it exists, this function returns ConfigMap data, otherwise returns error.
+func (c *FakeK8SOrchestrator) GetConfigMap(ctx context.Context, name string,
+	namespace string) (map[string]string, error) {
+	return nil, nil
+}
+
+// CreateConfigMap creates the ConfigMap with given name, namespace, data and immutable
+// parameter values.
+func (c *FakeK8SOrchestrator) CreateConfigMap(ctx context.Context, name string, namespace string,
+	data map[string]string, isImmutable bool) error {
+	return nil
+}
+
+// GetCSINodeTopologyInstancesList lists CSINodeTopology instances for a given cluster.
+func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstancesList() []interface{} {
+	return nil
+}
+
+// GetCSINodeTopologyInstanceByName fetches the CSINodeTopology instance for a given node name in the cluster.
+func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstanceByName(nodeName string) (
+	item interface{}, exists bool, err error) {
+	return nil, false, nil
 }

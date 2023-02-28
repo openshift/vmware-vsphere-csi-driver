@@ -42,16 +42,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	vmoperatortypes "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/node"
-	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/csinodetopology/v1alpha1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/node"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology/v1alpha1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 )
 
 const defaultMaxWorkerThreadsForCSINodeTopology = 1
@@ -83,13 +83,6 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		return err
 	}
 
-	if clusterFlavor == cnstypes.CnsClusterFlavorVanilla &&
-		!coCommonInterface.IsFSSEnabled(ctx, common.ImprovedVolumeTopology) {
-		log.Infof("Not initializing the CSINodetopology Controller as %s FSS is disabled in %s",
-			common.ImprovedVolumeTopology, cnstypes.CnsClusterFlavorVanilla)
-		return nil
-	}
-
 	if clusterFlavor == cnstypes.CnsClusterFlavorGuest && !coCommonInterface.IsFSSEnabled(ctx, common.TKGsHA) {
 		log.Infof("Not initializing the CSINodetopology Controller as %s FSS is disabled in %s",
 			common.TKGsHA, cnstypes.CnsClusterFlavorGuest)
@@ -118,6 +111,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	}
 
 	useNodeUuid := coCommonInterface.IsFSSEnabled(ctx, common.UseCSINodeId)
+	isMultiVCFSSEnabled := coCommonInterface.IsFSSEnabled(ctx, common.MultiVCenterCSITopology)
 	// Initialize kubernetes client.
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -135,17 +129,23 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme,
 		corev1.EventSource{Component: csinodetopologyv1alpha1.GroupName})
 	return add(mgr, newReconciler(mgr, configInfo, recorder, useNodeUuid,
-		enableTKGsHAinGuest, vmOperatorClient, supervisorNamespace))
+		enableTKGsHAinGuest, isMultiVCFSSEnabled, vmOperatorClient, supervisorNamespace))
 }
 
 // newReconciler returns a new `reconcile.Reconciler`.
 func newReconciler(mgr manager.Manager, configInfo *cnsconfig.ConfigurationInfo, recorder record.EventRecorder,
-	useNodeUuid bool, enableTKGsHAinGuest bool, vmOperatorClient client.Client,
+	useNodeUuid bool, enableTKGsHAinGuest bool, isMultiVCFSSEnabled bool, vmOperatorClient client.Client,
 	supervisorNamespace string) reconcile.Reconciler {
-	return &ReconcileCSINodeTopology{client: mgr.GetClient(), scheme: mgr.GetScheme(),
-		configInfo: configInfo, recorder: recorder,
-		useNodeUuid: useNodeUuid, enableTKGsHAinGuest: enableTKGsHAinGuest,
-		vmOperatorClient: vmOperatorClient, supervisorNamespace: supervisorNamespace}
+	return &ReconcileCSINodeTopology{
+		client:              mgr.GetClient(),
+		scheme:              mgr.GetScheme(),
+		configInfo:          configInfo,
+		recorder:            recorder,
+		useNodeUuid:         useNodeUuid,
+		enableTKGsHAinGuest: enableTKGsHAinGuest,
+		isMultiVCFSSEnabled: isMultiVCFSSEnabled,
+		vmOperatorClient:    vmOperatorClient,
+		supervisorNamespace: supervisorNamespace}
 }
 
 // add adds a new Controller to mgr with r as the `reconcile.Reconciler`.
@@ -210,6 +210,7 @@ type ReconcileCSINodeTopology struct {
 	recorder            record.EventRecorder
 	useNodeUuid         bool
 	enableTKGsHAinGuest bool
+	isMultiVCFSSEnabled bool
 	vmOperatorClient    client.Client
 	supervisorNamespace string
 }
@@ -311,7 +312,7 @@ func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, requ
 		log.Infof("Detected a topology aware cluster")
 
 		// Fetch topology labels for nodeVM.
-		topologyLabels, err := getNodeTopologyInfo(ctx, nodeVM, r.configInfo.Cfg)
+		topologyLabels, err := getNodeTopologyInfo(ctx, nodeVM, r.configInfo.Cfg, r.isMultiVCFSSEnabled)
 		if err != nil {
 			msg := fmt.Sprintf("failed to fetch topology information for the nodeVM %q. Error: %v",
 				instance.Name, err)
@@ -360,6 +361,9 @@ func (r *ReconcileCSINodeTopology) reconcileForGuest(ctx context.Context, reques
 		// Error reading the object - return with err.
 		return reconcile.Result{}, err
 	}
+	// TODO: If the CR status is already at Success, do not reconcile further.
+	// This is required only when NodeVM moves from one AZ to another AZ,
+	// otherwise there is no functional impact.
 
 	// Initialize backOffDuration for the instance, if required.
 	var timeout time.Duration
@@ -464,15 +468,26 @@ func updateCRStatus(ctx context.Context, r *ReconcileCSINodeTopology, instance *
 	return nil
 }
 
-func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine, cfg *cnsconfig.Config) (
-	[]csinodetopologyv1alpha1.TopologyLabel, error) {
+func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine, cfg *cnsconfig.Config,
+	isMultiVCFSSEnabled bool) ([]csinodetopologyv1alpha1.TopologyLabel, error) {
 	log := logger.GetLogger(ctx)
-
+	var (
+		vcenter *cnsvsphere.VirtualCenter
+		err     error
+	)
 	// Get VC instance.
-	vcenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, false)
-	if err != nil {
-		log.Errorf("failed to get virtual center instance with error: %v", err)
-		return nil, err
+	if isMultiVCFSSEnabled {
+		vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, nodeVM.VirtualCenterHost, true)
+		if err != nil {
+			return nil, logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter Host: %q, err: %v",
+				nodeVM.VirtualCenterHost, err)
+		}
+	} else {
+		vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, false)
+		if err != nil {
+			log.Errorf("failed to get virtual center instance with error: %v", err)
+			return nil, err
+		}
 	}
 
 	// Get tag manager instance.

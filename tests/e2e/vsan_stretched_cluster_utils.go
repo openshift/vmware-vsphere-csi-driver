@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,7 +47,7 @@ import (
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
+	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
 )
 
 type FaultDomains struct {
@@ -445,23 +446,20 @@ func getMasterIpOnSite(ctx context.Context, client clientset.Interface, primaryS
 	}
 	allMasterIps := getK8sMasterIPs(ctx, client)
 	framework.Logf("all master ips : %v", allMasterIps)
-	sshClientConfig := &ssh.ClientConfig{
-		User: "root",
-		Auth: []ssh.AuthMethod{
-			ssh.Password(k8sVmPasswd),
-		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-	}
 	framework.Logf("Site esx map : %v", siteEsxMap)
-	// Assuming atleast one master is on that site
 	vcAddress := e2eVSphere.Config.Global.VCenterHostname
+	vcAdminPwd := GetAndExpectStringEnvVar(vcUIPwd)
+	// Assuming atleast one master is on that site
 	for _, masterIp := range allMasterIps {
-		cmd := "export GOVC_INSECURE=1;"
-		cmd += fmt.Sprintf("export GOVC_URL='https://administrator@vsphere.local:Admin!23@%s';", vcAddress)
-		cmd += fmt.Sprintf("govc vm.info --vm.ip=%s;", masterIp)
-		result, err := sshExec(sshClientConfig, masterIp, cmd)
+		govcCmd := "export GOVC_INSECURE=1;"
+		govcCmd += fmt.Sprintf("export GOVC_URL='https://administrator@vsphere.local:%s@%s';",
+			vcAdminPwd, vcAddress)
+		govcCmd += fmt.Sprintf("govc vm.info --vm.ip=%s;", masterIp)
+		framework.Logf("Running command: %s", govcCmd)
+		result, err := exec.Command("/bin/bash", "-c", govcCmd).Output()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		hostIp := strings.Split(result.Stdout, "Host:")
+		framework.Logf("res is: %v", result)
+		hostIp := strings.Split(string(result), "Host:")
 		host := strings.TrimSpace(hostIp[1])
 		if siteEsxMap[host] {
 			masterIpOnSite = masterIp
@@ -568,15 +566,18 @@ func checkVmStorageCompliance(client clientset.Interface, storagePolicy string) 
 	defer cancel()
 	masterIp := getK8sMasterIPs(ctx, client)
 	vcAddress := e2eVSphere.Config.Global.VCenterHostname
+	nimbusGeneratedK8sVmPwd := GetAndExpectStringEnvVar(nimbusK8sVmPwd)
+	vcAdminPwd := GetAndExpectStringEnvVar(vcUIPwd)
 	sshClientConfig := &ssh.ClientConfig{
 		User: "root",
 		Auth: []ssh.AuthMethod{
-			ssh.Password(k8sVmPasswd),
+			ssh.Password(nimbusGeneratedK8sVmPwd),
 		},
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 	}
 	cmd := "export GOVC_INSECURE=1;"
-	cmd += fmt.Sprintf("export GOVC_URL='https://administrator@vsphere.local:Admin!23@%s';", vcAddress)
+	cmd += fmt.Sprintf("export GOVC_URL='https://administrator@vsphere.local:%s@%s';",
+		vcAdminPwd, vcAddress)
 	cmd += fmt.Sprintf("govc storage.policy.info -c -s %s;", storagePolicy)
 	result, err := sshExec(sshClientConfig, masterIp[0], cmd)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -907,7 +908,7 @@ func createStaticPvAndPvcInParallel(client clientset.Interface, ctx context.Cont
 		// PVC will use this label as Selector to find PV.
 		staticPVLabels["fcd-id"] = fcdIDs[i]
 		framework.Logf("Creating the PV from fcd ID: %s", fcdIDs[i])
-		pv := getPersistentVolumeSpec(fcdIDs[i], v1.PersistentVolumeReclaimRetain, staticPVLabels)
+		pv := getPersistentVolumeSpec(fcdIDs[i], v1.PersistentVolumeReclaimRetain, staticPVLabels, ext4FSType)
 		pv, err := client.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		err = e2eVSphere.waitForCNSVolumeToBeCreated(pv.Spec.CSI.VolumeHandle)

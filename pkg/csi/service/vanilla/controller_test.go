@@ -40,7 +40,6 @@ import (
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/simulator/vpx"
-	"github.com/vmware/govmomi/vapi/tags"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
@@ -48,14 +47,15 @@ import (
 	testclient "k8s.io/client-go/kubernetes/fake"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/unittestcommon"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
+
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/unittestcommon"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 const (
@@ -274,10 +274,8 @@ func (f *FakeNodeManager) GetAllNodes(ctx context.Context) ([]*cnsvsphere.Virtua
 	return nil, nil
 }
 
-func (f *FakeNodeManager) GetSharedDatastoresInTopology(ctx context.Context,
-	topologyRequirement *csi.TopologyRequirement, tagManager *tags.Manager,
-	zoneKey string, regionKey string) ([]*cnsvsphere.DatastoreInfo, map[string][]map[string]string, error) {
-	return nil, nil, nil
+func (f *FakeNodeManager) GetAllNodesByVC(ctx context.Context, vcHost string) ([]*cnsvsphere.VirtualMachine, error) {
+	return nil, nil
 }
 
 func (f *FakeAuthManager) GetDatastoreMapForBlockVolumes(ctx context.Context) map[string]*cnsvsphere.DatastoreInfo {
@@ -332,10 +330,15 @@ func getControllerTest(t *testing.T) *controllerTest {
 			t.Fatal(err)
 		}
 
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true, false, false, false)
+		if err != nil {
+			t.Fatalf("failed to create an instance of volume manager. err=%v", err)
+		}
+
 		manager := &common.Manager{
 			VcenterConfig:  vcenterconfig,
 			CnsConfig:      config,
-			VolumeManager:  cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true),
+			VolumeManager:  volumeManager,
 			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 		}
 
@@ -404,7 +407,7 @@ func TestCreateVolumeWithStoragePolicy(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -2135,10 +2138,10 @@ func TestDeleteBlockVolumeSnapshotWithManagedObjectNotFound(t *testing.T) {
 	instanceName := "deletesnapshot-" + volID + "-" + snapshotID
 	operationInstance := cnsvolumeoperationrequest.CreateVolumeOperationRequestDetails(
 		instanceName, "", "", 0, metav1.Now(),
-		taskID, "", cnsvolumeoperationrequest.TaskInvocationStatusInProgress, "")
+		taskID, "", "", cnsvolumeoperationrequest.TaskInvocationStatusInProgress, "")
 	_ = ct.operationStore.StoreRequestDetails(ctx, operationInstance)
 
-	//logger.SetLoggerLevel(logger.DevelopmentLogLevel) // enable debug level log
+	// logger.SetLoggerLevel(logger.DevelopmentLogLevel) // enable debug level log
 
 	// Delete the snapshot
 	reqDeleteSnapshot := &csi.DeleteSnapshotRequest{
@@ -2266,7 +2269,7 @@ func TestCreateSnapshotWithManagedObjectNotFound(t *testing.T) {
 	instanceName := snapshotName + "-" + volID
 	operationInstance := cnsvolumeoperationrequest.CreateVolumeOperationRequestDetails(
 		instanceName, volID, "", 0, metav1.Now(),
-		taskID, "", cnsvolumeoperationrequest.TaskInvocationStatusInProgress, "")
+		taskID, "", "", cnsvolumeoperationrequest.TaskInvocationStatusInProgress, "")
 	_ = ct.operationStore.StoreRequestDetails(ctx, operationInstance)
 	// Attempt to create snapshot again, but the task-id is non-existent.
 	// Since the snapshot already exists, no error is expected.

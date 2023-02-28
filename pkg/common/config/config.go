@@ -25,13 +25,12 @@ import (
 	"strconv"
 	"strings"
 
+	cnstypes "github.com/vmware/govmomi/cns/types"
+	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 	"gopkg.in/gcfg.v1"
 	corev1 "k8s.io/api/core/v1"
 
-	cnstypes "github.com/vmware/govmomi/cns/types"
-	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
-
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -99,6 +98,8 @@ const (
 	TKCKind = "TanzuKubernetesCluster"
 	// TKCAPIVersion refers to the version of TanzuKubernetesCluster object currently being used.
 	TKCAPIVersion = "run.tanzu.vmware.com/v1alpha1"
+	// ClusterIDConfigMapName refers to the name of the immutable ConfigMap used to store cluster ID
+	ClusterIDConfigMapName = "vsphere-csi-cluster-id"
 )
 
 // Errors
@@ -136,7 +137,25 @@ var (
 	// ErrInvalidNetPermission is returned when the value of Permission in
 	// NetPermissions is not among the ones listed.
 	ErrInvalidNetPermission = errors.New("invalid value for Permissions under NetPermission Config")
+
+	// ErrMissingTopologyCategoriesForMultiVCenterSetup is returned when the TopologyCategories are not specified for
+	// Multi vCenter deployment
+	ErrMissingTopologyCategoriesForMultiVCenterSetup = errors.New("vsphere CSI config requires " +
+		"topology-categories to be specified for multi vCenter deployment")
+
+	// ErrMaxVCenterSupportedForMultiVCenterSetup is returned when vSphere config secret has more than 5 vCenter
+	// servers
+	ErrMaxVCenterSupportedForMultiVCenterSetup = errors.New("max 5 vCenters are supported for multi " +
+		"vCenter deployment")
 )
+
+// GeneratedVanillaClusterID is used to save unique cluster ID generated
+// internally when clusterID is not provided by user in vSphere
+// config secret for vanilla k8s deployments.
+// Scope of this variable is limited to csi-controller container,
+// we are using wrapper function in syncer container to get the
+// internally generated cluster ID.
+var GeneratedVanillaClusterID string
 
 func getEnvKeyValue(match string, partial bool) (string, string, error) {
 	for _, e := range os.Environ() {
@@ -314,6 +333,10 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 		log.Error(ErrMissingVCenter)
 		return ErrMissingVCenter
 	}
+	if len(cfg.VirtualCenter) > 5 {
+		log.Error(ErrMaxVCenterSupportedForMultiVCenterSetup)
+		return ErrMaxVCenterSupportedForMultiVCenterSetup
+	}
 	// Cluster ID should not exceed 64 characters.
 	if len(cfg.Global.ClusterID) > 64 {
 		log.Error(ErrClusterIDCharLimit)
@@ -323,6 +346,14 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 	if len(cfg.Global.SupervisorID) > 64 {
 		log.Error(ErrSupervisorIDCharLimit)
 		return ErrSupervisorIDCharLimit
+	}
+	if len(cfg.VirtualCenter) > 1 && strings.TrimSpace(cfg.Labels.TopologyCategories) == "" {
+		log.Error(ErrMissingTopologyCategoriesForMultiVCenterSetup)
+		return ErrMissingTopologyCategoriesForMultiVCenterSetup
+	}
+	var setCfgGlobalvCenter bool
+	if len(cfg.VirtualCenter) == 1 {
+		setCfgGlobalvCenter = true
 	}
 	for vcServer, vcConfig := range cfg.VirtualCenter {
 		log.Debugf("Initializing vc server %s", vcServer)
@@ -356,6 +387,9 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 		insecure := vcConfig.InsecureFlag
 		if !insecure {
 			vcConfig.InsecureFlag = cfg.Global.InsecureFlag
+		}
+		if setCfgGlobalvCenter && cfg.Global.VCenterIP == "" {
+			cfg.Global.VCenterIP = vcServer
 		}
 		// Print out the config. WARNING: This will print the password used in plain text.
 		log.Debugf("vc server %s config: %+v", vcServer, vcConfig)
@@ -493,6 +527,10 @@ func GetCnsconfig(ctx context.Context, cfgPath string) (*Config, error) {
 		}
 		if cfg.Global.SupervisorID != "" {
 			cfg.Global.SupervisorID = supervisorIDPrefix + cfg.Global.SupervisorID
+		}
+
+		if GeneratedVanillaClusterID != "" {
+			cfg.Global.ClusterID = GeneratedVanillaClusterID
 		}
 	}
 	return cfg, nil
@@ -636,4 +674,64 @@ func GetClusterFlavor(ctx context.Context) (cnstypes.CnsClusterFlavor, error) {
 	errMsg := "unrecognized value set for CLUSTER_FLAVOR"
 	log.Error(errMsg)
 	return "", fmt.Errorf(errMsg)
+}
+
+// GetConfig loads configuration from secret and returns config object.
+func GetConfig(ctx context.Context) (*Config, error) {
+	var cfg *Config
+	log := logger.GetLogger(ctx)
+	var err error
+	cfgPath := GetConfigPath(ctx)
+	if cfgPath == DefaultGCConfigPath {
+		cfg, err = GetGCconfig(ctx, cfgPath)
+		if err != nil {
+			log.Errorf("GetGCconfig failed with err: %v", err)
+			return cfg, err
+		}
+	} else {
+		cfg, err = GetCnsconfig(ctx, cfgPath)
+		if err != nil {
+			log.Errorf("GetCnsconfig failed with err: %v", err)
+			return cfg, err
+		}
+	}
+	return cfg, err
+}
+
+// InitConfigInfo initializes the ConfigurationInfo struct.
+func InitConfigInfo(ctx context.Context) (*ConfigurationInfo, error) {
+	log := logger.GetLogger(ctx)
+	cfg, err := GetConfig(ctx)
+	if err != nil {
+		log.Errorf("failed to read config. Error: %+v", err)
+		return nil, err
+	}
+	configInfo := &ConfigurationInfo{
+		Cfg: cfg,
+	}
+	return configInfo, nil
+}
+
+// GetConfigPath returns ConfigPath depending on the environment variable
+// specified and the cluster flavor set.
+func GetConfigPath(ctx context.Context) string {
+	var cfgPath string
+	clusterFlavor := cnstypes.CnsClusterFlavor(os.Getenv(EnvClusterFlavor))
+	if strings.TrimSpace(string(clusterFlavor)) == "" {
+		clusterFlavor = cnstypes.CnsClusterFlavorVanilla
+	}
+	if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
+		// Config path for Guest Cluster.
+		cfgPath = os.Getenv(EnvGCConfig)
+		if cfgPath == "" {
+			cfgPath = DefaultGCConfigPath
+		}
+	} else {
+		// Config path for SuperVisor and Vanilla Cluster.
+		cfgPath = os.Getenv(EnvVSphereCSIConfig)
+		if cfgPath == "" {
+			cfgPath = DefaultCloudConfigPath
+		}
+	}
+	return cfgPath
 }

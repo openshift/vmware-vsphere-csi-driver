@@ -40,18 +40,18 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	csifault "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/fault"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/prometheus"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/utils"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco/types"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/types"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	csifault "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/fault"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/prometheus"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
 const (
@@ -69,6 +69,7 @@ var (
 		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 	}
+	checkCompatibleDataStores = true
 )
 
 var getCandidateDatastores = cnsvsphere.GetCandidateDatastoresInCluster
@@ -144,10 +145,18 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 			return err
 		}
 	}
+
+	tasksListViewEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		common.ListViewPerf)
+	volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore, idempotencyHandlingEnabled,
+		false, false, tasksListViewEnabled)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
+	}
 	c.manager = &common.Manager{
 		VcenterConfig:  vcenterconfig,
 		CnsConfig:      config,
-		VolumeManager:  cnsvolume.GetManager(ctx, vcenter, operationStore, idempotencyHandlingEnabled),
+		VolumeManager:  volumeManager,
 		VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 	}
 
@@ -165,7 +174,10 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		return err
 	}
 	go cnsvolume.ClearTaskInfoObjects()
-	cfgPath := common.GetConfigPath(ctx)
+	if tasksListViewEnabled {
+		go cnsvolume.ClearInvalidTasksFromListView(false)
+	}
+	cfgPath := cnsconfig.GetConfigPath(ctx)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		log.Errorf("failed to create fsnotify watcher. err=%v", err)
@@ -288,7 +300,7 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error {
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Info("Reloading Configuration")
-	cfg, err := common.GetConfig(ctx)
+	cfg, err := cnsconfig.GetConfig(ctx)
 	if err != nil {
 		log.Errorf("failed to read config. Error: %+v", err)
 		return err
@@ -348,10 +360,20 @@ func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error 
 				return err
 			}
 		}
-		c.manager.VolumeManager.ResetManager(ctx, vcenter)
+		err := c.manager.VolumeManager.ResetManager(ctx, vcenter)
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to reset volume manager. err=%v", err)
+		}
 		c.manager.VcenterConfig = newVCConfig
-		c.manager.VolumeManager = cnsvolume.GetManager(ctx, vcenter, operationStore,
-			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIVolumeManagerIdempotency))
+
+		tasksListViewEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+			common.ListViewPerf)
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore,
+			idempotencyHandlingEnabled, false, false, tasksListViewEnabled)
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
+		}
+		c.manager.VolumeManager = volumeManager
 		if c.authMgr != nil {
 			c.authMgr.ResetvCenterInstance(ctx, vcenter)
 			log.Debugf("Updated vCenter in auth manager")
@@ -369,7 +391,6 @@ func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error 
 func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolumeRequest) (
 	*csi.CreateVolumeResponse, string, error) {
 	log := logger.GetLogger(ctx)
-
 	var (
 		storagePolicyID      string
 		affineToHost         string
@@ -385,7 +406,6 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		zoneLabelPresent     bool
 		err                  error
 	)
-
 	// Support case insensitive parameters.
 	for paramName := range req.Parameters {
 		param := strings.ToLower(paramName)
@@ -573,7 +593,8 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 	}
 
 	volumeInfo, faultType, err := common.CreateBlockVolumeUtil(ctx, cnstypes.CnsClusterFlavorWorkload,
-		c.manager, &createVolumeSpec, candidateDatastores, filterSuspendedDatastores, isTKGSHAEnabled)
+		c.manager, &createVolumeSpec, candidateDatastores, filterSuspendedDatastores,
+		isTKGSHAEnabled, checkCompatibleDataStores)
 	if err != nil {
 		return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to create volume. Error: %+v", err)
@@ -606,7 +627,7 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 					},
 				}
 				querySelection := cnstypes.CnsQuerySelection{
-					Names: []string{utils.CnsQuerySelectionName_DATASTORE_URL},
+					Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
 				}
 				queryResult, err := utils.QueryVolumeUtil(ctx, c.manager.VolumeManager, queryFilter, &querySelection,
 					true)
@@ -704,7 +725,6 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 	if req.GetAccessibilityRequirements() != nil {
 		log.Info("Ignoring TopologyRequirement for file volume")
 	}
-
 	// Volume Size - Default is 10 GiB.
 	volSizeBytes := int64(common.DefaultGbDiskSize * common.GbInBytes)
 	if req.GetCapacityRange() != nil && req.GetCapacityRange().RequiredBytes != 0 {
@@ -749,13 +769,21 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 	}
 
 	if len(filteredDatastores) == 0 {
-		return nil, csifault.CSIInternalFault, logger.LogNewErrorCode(log, codes.Internal,
-			"no datastores found to create file volume")
+		// when len(filteredDatastore)==0, it means vsan file service is not enabled on any vsan cluster specfified
+		// by VcenterConfig.TargetvSANFileShareClusters
+		return nil, csifault.CSIVSanFileServiceDisabledFault, logger.LogNewErrorCode(log, codes.FailedPrecondition,
+			"no datastores found to create file volume, vsan file service may be disabled")
 	}
 	filterSuspendedDatastores := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CnsMgrSuspendCreateVolume)
 	isTKGSHAEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
-	volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorWorkload,
-		c.manager, &createVolumeSpec, filteredDatastores, filterSuspendedDatastores, isTKGSHAEnabled)
+	vc, err := c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
+	if err != nil {
+		return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to get vCenter. Error: %+v", err)
+	}
+	volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorWorkload, vc,
+		c.manager.VolumeManager, c.manager.CnsConfig, &createVolumeSpec, filteredDatastores,
+		filterSuspendedDatastores, isTKGSHAEnabled, checkCompatibleDataStores)
 	if err != nil {
 		return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 			"failed to create volume. Error: %+v", err)
@@ -782,11 +810,15 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	start := time.Now()
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
+	if chkDataStoreCompatibility := req.Parameters["checkCompatibleDatastores"]; chkDataStoreCompatibility == "false" {
+		checkCompatibleDataStores = false
+		delete(req.Parameters, "checkCompatibleDatastores")
+	}
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	createVolumeInternal := func() (
 		*csi.CreateVolumeResponse, string, error) {
 		log.Infof("CreateVolume: called with args %+v", *req)
-		//TODO: If the err is returned by invoking CNS API, then faultType should be
+		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -813,6 +845,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 				return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCode(log, codes.Unimplemented,
 					"file volume feature is disabled on the cluster")
 			}
+
 			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
 				if len(clusterComputeResourceMoIds) > 1 {
 					return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCode(log, codes.Unimplemented,
@@ -853,7 +886,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	deleteVolumeInternal := func() (
 		*csi.DeleteVolumeResponse, string, error) {
 		log.Infof("DeleteVolume: called with args: %+v", *req)
-		//TODO: If the err is returned by invoking CNS API, then faultType should be
+		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// For all other cases, the faultType will be set to "csi.fault.Internal" for now.
 		// Later we may need to define different csi faults.
@@ -866,7 +899,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 			return nil, csifault.CSIInvalidArgumentFault, err
 		}
 		if cnsVolumeType == common.UnknownVolumeType {
-			cnsVolumeType, err = common.GetCnsVolumeType(ctx, c.manager, req.VolumeId)
+			cnsVolumeType, err = common.GetCnsVolumeType(ctx, c.manager.VolumeManager, req.VolumeId)
 			if err != nil {
 				if err.Error() == common.ErrNotFound.Error() {
 					// The volume couldn't be found during query, assuming the delete operation as success
@@ -944,7 +977,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 	controllerPublishVolumeInternal := func() (
 		*csi.ControllerPublishVolumeResponse, string, error) {
 		log.Infof("ControllerPublishVolume: called with args %+v", *req)
-		//TODO: If the err is returned by invoking CNS API, then faultType should be
+		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -1008,7 +1041,8 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 
 		// Attach the volume to the node.
 		// faultType is returned from manager.AttachVolume.
-		diskUUID, faultType, err := common.AttachVolumeUtil(ctx, c.manager, podVM, req.VolumeId, true)
+		diskUUID, faultType, err := common.AttachVolumeUtil(ctx, c.manager.VolumeManager, podVM,
+			req.VolumeId, true)
 		if err != nil {
 			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FakeAttach) {
 				log.Infof("Volume attachment failed. Checking if it can be fake attached")
@@ -1087,7 +1121,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 	controllerUnpublishVolumeInternal := func() (
 		*csi.ControllerUnpublishVolumeResponse, string, error) {
 		log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
-		//TODO: If the err is returned by invoking CNS API, then faultType should be
+		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -1251,7 +1285,17 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 	var err error
 	// ListVolumes FSS is disabled so, return nil and an unimplemented error
 	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ListVolumes) {
-		return nil, status.Error(codes.Unimplemented, "")
+		return nil, status.Error(codes.Unimplemented, "list volumes FSS disabled")
+	}
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+		clusterComputeResourceMoIds, err = common.GetClusterComputeResourceMoIds(ctx)
+		if err != nil {
+			log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
+			return nil, status.Error(codes.Internal, "failed to get clusterComputeResourceMoIds")
+		}
+		if len(clusterComputeResourceMoIds) > 1 {
+			return nil, status.Error(codes.Unimplemented, "list volumes is not supported on Stretched Cluster")
+		}
 	}
 	controllerListVolumeInternal := func() (*csi.ListVolumesResponse, string, error) {
 		log.Debugf("ListVolumes called with args %+v, expectedStartingIndex %v", *req, expectedStartingIndex)
@@ -1481,7 +1525,8 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		// sign. That is, a string of "<UUID>+<UUID>". Because, all other CNS snapshot APIs still require both
 		// VolumeID and SnapshotID as the input, while corresponding snapshot APIs in upstream CSI require SnapshotID.
 		// So, we need to bridge the gap in vSphere CSI driver and return a combined SnapshotID to CSI Snapshotter.
-		snapshotID, snapshotCreateTimePtr, err := common.CreateSnapshotUtil(ctx, c.manager, volumeID, req.Name)
+		snapshotID, snapshotCreateTimePtr, err := common.CreateSnapshotUtil(ctx, c.manager.VolumeManager,
+			volumeID, req.Name)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to create snapshot on volume %q: %v", volumeID, err)
@@ -1545,7 +1590,7 @@ func (c *controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshot
 	}
 	deleteSnapshotInternal := func() (*csi.DeleteSnapshotResponse, error) {
 		csiSnapshotID := req.GetSnapshotId()
-		err := common.DeleteSnapshotUtil(ctx, c.manager, csiSnapshotID)
+		err := common.DeleteSnapshotUtil(ctx, c.manager.VolumeManager, csiSnapshotID)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"Failed to delete WCP snapshot %q. Error: %+v",
@@ -1633,7 +1678,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 				"expandVolume feature is disabled on the cluster")
 		}
 		log.Infof("ControllerExpandVolume: called with args %+v", *req)
-		//TODO: If the err is returned by invoking CNS API, then faultType should be
+		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -1641,7 +1686,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		// Later we may need to define different csi faults.
 		// Check if the volume contains CNS snapshots only for block volumes.
 		if cnsVolumeType == common.UnknownVolumeType {
-			cnsVolumeType, err = common.GetCnsVolumeType(ctx, c.manager, req.VolumeId)
+			cnsVolumeType, err = common.GetCnsVolumeType(ctx, c.manager.VolumeManager, req.VolumeId)
 			if err != nil {
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to determine CNS volume type for volume: %q. Error: %+v", req.VolumeId, err)
@@ -1677,7 +1722,8 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		volSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
 		volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
 		var faultType string
-		faultType, err = common.ExpandVolumeUtil(ctx, c.manager, volumeID, volSizeMB,
+		faultType, err = common.ExpandVolumeUtil(ctx, c.manager.VcenterManager,
+			c.manager.VcenterConfig.Host, c.manager.VolumeManager, volumeID, volSizeMB,
 			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AsyncQueryVolume))
 		if err != nil {
 			return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,

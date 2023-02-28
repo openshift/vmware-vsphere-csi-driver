@@ -38,15 +38,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	apis "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/cnsoperator"
-	volumes "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
-	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v2/pkg/kubernetes"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/syncer"
+	apis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	triggercsifullsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsoperator/triggercsifullsync/v1alpha1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 )
 
 const (
@@ -82,6 +82,12 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		log.Infof("Not initializing the TriggerCsiFullSync Controller as this feature is disabled on the cluster")
 		return nil
 	}
+
+	if coCommonInterface.IsFSSEnabled(ctx, common.MultiVCenterCSITopology) && len(configInfo.Cfg.VirtualCenter) > 1 {
+		log.Infof("Not initializing the TriggerCsiFullSync Controller as it is a multi VC deployment.")
+		return nil
+	}
+
 	// Initializes kubernetes client.
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -245,7 +251,7 @@ func (r *ReconcileTriggerCsiFullSync) Reconcile(ctx context.Context,
 	if r.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		fullSyncErr = syncer.PvcsiFullSync(ctx, syncer.MetadataSyncer)
 	} else {
-		fullSyncErr = syncer.CsiFullSync(ctx, syncer.MetadataSyncer)
+		fullSyncErr = syncer.CsiFullSync(ctx, syncer.MetadataSyncer, r.configInfo.Cfg.Global.VCenterIP)
 	}
 	err = r.client.Get(ctx, request.NamespacedName, instance)
 	if err != nil {

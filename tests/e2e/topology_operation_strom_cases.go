@@ -59,6 +59,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		powerOffHostsList       []string
 		sshClientConfig         *ssh.ClientConfig
 		k8sVersion              string
+		nimbusGeneratedK8sVmPwd string
 	)
 	ginkgo.BeforeEach(func() {
 		client = f.ClientSet
@@ -89,10 +90,12 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		topologyClusterNames := GetAndExpectStringEnvVar(topologyCluster)
 		topologyClusterList = ListTopologyClusterNames(topologyClusterNames)
 		readVcEsxIpsViaTestbedInfoJson(GetAndExpectStringEnvVar(envTestbedInfoJsonPath))
+		nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
+
 		sshClientConfig = &ssh.ClientConfig{
 			User: "root",
 			Auth: []ssh.AuthMethod{
-				ssh.Password(k8sVmPasswd),
+				ssh.Password(nimbusGeneratedK8sVmPwd),
 			},
 			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		}
@@ -510,16 +513,6 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		}
 		wg.Wait()
 
-		/* Get newly elected leader Csi-Controller-Pod where CSI Provisioner is running" +
-		find new master node IP where this Csi-Controller-Pod is running */
-		ginkgo.By("Get newly Leader Csi-Controller-Pod where CSI Provisioner is running and " +
-			"find the master node IP where this Csi-Controller-Pod is running")
-		controller_name, k8sMasterIP, err = getK8sMasterNodeIPWhereContainerLeaderIsRunning(ctx,
-			client, sshClientConfig, containerName)
-		framework.Logf("CSI-Provisioner is running on newly elected Leader Pod %s "+
-			"which is running on master node %s", controller_name, k8sMasterIP)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
 		// Bring up all ESXi host which were powered off in zone2
 		ginkgo.By("Bring up all ESXi host which were powered off in zone2")
 		for i := 0; i < len(powerOffHostsList); i++ {
@@ -550,6 +543,16 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}
+
+		/* Get newly elected leader Csi-Controller-Pod where CSI Provisioner is running" +
+		find new master node IP where this Csi-Controller-Pod is running */
+		ginkgo.By("Get newly Leader Csi-Controller-Pod where CSI Provisioner is running and " +
+			"find the master node IP where this Csi-Controller-Pod is running")
+		controller_name, k8sMasterIP, err = getK8sMasterNodeIPWhereContainerLeaderIsRunning(ctx,
+			client, sshClientConfig, containerName)
+		framework.Logf("CSI-Provisioner is running on newly elected Leader Pod %s "+
+			"which is running on master node %s", controller_name, k8sMasterIP)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Wait for testbed to be back to normal
 		time.Sleep(pollTimeoutShort)

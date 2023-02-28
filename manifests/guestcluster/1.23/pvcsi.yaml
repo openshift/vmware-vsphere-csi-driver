@@ -239,6 +239,9 @@ spec:
           image: vmware.io/syncer:<image_tag>
           args:
             - "--leader-election"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
             - "--supervisor-fss-name=csi-feature-states"
             - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
@@ -382,7 +385,9 @@ spec:
             - --kubelet-registration-path=$(DRIVER_REG_SOCK_PATH)
             - --mode=kubelet-registration-probe
           initialDelaySeconds: 30
-          timeoutSeconds: 15
+          timeoutSeconds: 10
+          periodSeconds: 180
+          failureThreshold: 3
       - name: vsphere-csi-node
         image: vmware.io/vsphere-csi:<image_tag>
         args:

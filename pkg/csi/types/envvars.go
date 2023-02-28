@@ -17,9 +17,6 @@ limitations under the License.
 package types
 
 const (
-	// EnvClusterFlavor is the k8s cluster type on which CSI Driver is being deployed
-	EnvClusterFlavor = "CLUSTER_FLAVOR"
-
 	// EnvSupervisorClientQPS  is the QPS for all clients to the supervisor cluster API server
 	EnvSupervisorClientQPS = "SUPERVISOR_CLIENT_QPS"
 
@@ -34,6 +31,9 @@ const (
 
 	// EnvVarEndpoint specifies the CSI endpoint for CSI driver.
 	EnvVarEndpoint = "CSI_ENDPOINT"
+
+	// EnvVarNamespace specifies the namespace in which CSI driver is installed.
+	EnvVarNamespace = "CSI_NAMESPACE"
 
 	// EnvVarMode is the name of the environment variable used to specify
 	// the service mode of the plugin. Valid values are:

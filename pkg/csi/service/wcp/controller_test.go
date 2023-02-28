@@ -42,12 +42,13 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 	v1 "k8s.io/api/core/v1"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/unittestcommon"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/common/commonco"
+
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/unittestcommon"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 )
 
 const (
@@ -177,10 +178,15 @@ func getControllerTest(t *testing.T) *controllerTest {
 			t.Fatalf("Failed to create co agnostic interface. err=%v", err)
 		}
 
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true, false, false, false)
+		if err != nil {
+			t.Fatalf("failed to create an instance of volume manager. err=%v", err)
+		}
+
 		manager := &common.Manager{
 			VcenterConfig:  vcenterconfig,
 			CnsConfig:      config,
-			VolumeManager:  cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true),
+			VolumeManager:  volumeManager,
 			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 		}
 
@@ -309,6 +315,7 @@ func TestWCPCreateVolumeWithStoragePolicy(t *testing.T) {
 			},
 		},
 	}
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -421,6 +428,7 @@ func TestWCPCreateVolumeWithZonalLabelPresentButNoStorageTopoType(t *testing.T) 
 			},
 		},
 	}
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -517,6 +525,7 @@ func TestWCPCreateDeleteSnapshot(t *testing.T) {
 			},
 		},
 	}
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -634,7 +643,7 @@ func TestListSnapshots(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -755,7 +764,7 @@ func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -877,7 +886,7 @@ func TestListSnapshotsWithToken(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -1008,7 +1017,7 @@ func TestListSnapshotsOnSpecificVolumeAndSnapshot(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -1127,7 +1136,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -1333,7 +1342,7 @@ func TestWCPDeleteVolumeWithSnapshots(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{
@@ -1439,7 +1448,7 @@ func TestWCPExpandVolumeWithSnapshots(t *testing.T) {
 			},
 		},
 	}
-
+	params["checkCompatibleDatastores"] = "false"
 	reqCreate := &csi.CreateVolumeRequest{
 		Name: testVolumeName + "-" + uuid.New().String(),
 		CapacityRange: &csi.CapacityRange{

@@ -20,15 +20,17 @@ import (
 	"context"
 	"sync"
 
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/migration"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/internalapis/cnsvolumeoperationrequest"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
 )
 
 // FakeK8SOrchestrator is used to mock common K8S Orchestrator instance to store FSS values
 type FakeK8SOrchestrator struct {
-	featureStates map[string]string
+	// RWMutex to synchronize access to 'featureStates' field from multiple callers
+	featureStatesLock *sync.RWMutex
+	featureStates     map[string]string
 }
 
 // volumeMigration holds mocked migrated volume information

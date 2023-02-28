@@ -24,9 +24,9 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
-	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/volume"
-	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
-	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/csi/service/logger"
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -34,10 +34,6 @@ const (
 	// However, using that constant creates an import cycle.
 	// TODO: Refactor to move all the constants into a top level directory.
 	DefaultQuerySnapshotLimit = int64(128)
-	// CnsQuerySelectionName_DATASTORE_URL is the name used to
-	// retrieve datastore URL during a QueryVolumeAsync call.
-	// TODO: Add this constant to govmomi along with the rest of the strings.
-	CnsQuerySelectionName_DATASTORE_URL = "DATASTORE_URL"
 )
 
 // QueryVolumeUtil helps to invoke query volume API based on the feature
@@ -187,19 +183,17 @@ type CnsVolumeDetails struct {
 	VolumeType   string
 }
 
-// Query Capacity in MB and datastore URL for the source volume with expected volume type
+// QueryVolumeDetailsUtil queries Capacity in MB and datastore URL for the source volume with expected volume type.
 func QueryVolumeDetailsUtil(ctx context.Context, m cnsvolume.Manager, volumeIds []cnstypes.CnsVolumeId) (
 	map[string]*CnsVolumeDetails, error) {
 	log := logger.GetLogger(ctx)
 	volumeDetailsMap := make(map[string]*CnsVolumeDetails)
-	// TODO: Update govmomi to have datastore url as selection criteria as a enum
-	datastoreSelection := "DATASTORE_URL"
 	// Select only the backing object details, volume type and datastore.
 	querySelection := &cnstypes.CnsQuerySelection{
 		Names: []string{
 			string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
 			string(cnstypes.QuerySelectionNameTypeVolumeType),
-			datastoreSelection,
+			string(cnstypes.QuerySelectionNameTypeDataStoreUrl),
 		},
 	}
 	queryFilter := cnstypes.CnsQueryFilter{
@@ -231,15 +225,15 @@ func QueryVolumeDetailsUtil(ctx context.Context, m cnsvolume.Manager, volumeIds 
 	return volumeDetailsMap, nil
 }
 
-// Get the datastore reference by datastore URL from a list of datastore references.
+// GetDatastoreRefByURLFromGivenDatastoreList fetches the datastore reference by datastore URL
+// from a list of datastore references.
 // If the datastore with dsURL can be found in the same datacenter as the given VC
 // and it is also found in the given datastoreList, return the reference of the datastore.
 // Otherwise, return error.
-func GetDatastoreRefByURLFromGivenDatastoreList(
-	ctx context.Context, vc *cnsvsphere.VirtualCenter, datastoreList []types.ManagedObjectReference, dsURL string) (
-	*types.ManagedObjectReference, error) {
+func GetDatastoreRefByURLFromGivenDatastoreList(ctx context.Context, vc *cnsvsphere.VirtualCenter,
+	datastoreList []types.ManagedObjectReference, dsURL string) (*types.ManagedObjectReference, error) {
 	log := logger.GetLogger(ctx)
-	// get all datacenters in the virtualcenter
+	// Get all datacenters in the virtualcenter
 	datacenters, err := vc.GetDatacenters(ctx)
 	if err != nil {
 		log.Errorf("failed to find datacenters from VC: %q, Error: %+v", vc.Config.Host, err)
@@ -257,7 +251,6 @@ func GetDatastoreRefByURLFromGivenDatastoreList(
 		candidateDsObj = candidateDsInfoObj.Datastore
 		break
 	}
-
 	if candidateDsObj == nil {
 		// fail if the candidate datastore is not found in the virtualcenter
 		return nil, logger.LogNewErrorf(log,
@@ -270,7 +263,6 @@ func GetDatastoreRefByURLFromGivenDatastoreList(
 			return &datastoreRef, nil
 		}
 	}
-
 	return nil, logger.LogNewErrorf(log,
 		"failed to find datastore with URL %q from the input datastore list, %v", dsURL, datastoreList)
 }
