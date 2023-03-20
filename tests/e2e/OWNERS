@@ -1,10 +1,4 @@
-# See the OWNERS docs at https://go.k8s.io/owners
-
-
-reviewers:
-- sashrith
-- kavyashree-r
-
 approvers:
-- sashrith
-- kavyashree-r
+- openshift-storage-maintainers
+component: "Storage"
+subcomponent: Kubernetes External Components
