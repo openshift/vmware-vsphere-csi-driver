@@ -1,0 +1,2 @@
+# Keep Windows EOL in these files to have pristine vendor/ dir.
+vendor/github.com/MakeNowJust/heredoc/README.md text eol=crlf
