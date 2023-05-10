@@ -221,6 +221,8 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 	cnsCreationMap = make(map[string]map[string]bool)
 	// Initialize volumeOperationsLock map
 	volumeOperationsLock = make(map[string]*sync.Mutex)
+	// Initialize volumeInfoCrDeletionMap used by Full Sync.
+	volumeInfoCrDeletionMap = make(map[string]map[string]bool)
 
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		// Initialize client to supervisor cluster, if metadata syncer is being
@@ -250,6 +252,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 
 		cnsDeletionMap[metadataSyncer.host] = make(map[string]bool)
 		cnsCreationMap[metadataSyncer.host] = make(map[string]bool)
+		volumeInfoCrDeletionMap[metadataSyncer.host] = make(map[string]bool)
 		volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
 
 		volumeManager, err := volumes.GetManager(ctx, vCenter, nil,
@@ -289,6 +292,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 
 			cnsDeletionMap[metadataSyncer.host] = make(map[string]bool)
 			cnsCreationMap[metadataSyncer.host] = make(map[string]bool)
+			volumeInfoCrDeletionMap[metadataSyncer.host] = make(map[string]bool)
 			volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
 
 			volumeManager, err := volumes.GetManager(ctx, vCenter, nil, false, false, false, tasksListViewEnabled)
@@ -322,6 +326,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 				metadataSyncer.volumeManagers[vcconfig.Host] = volumeManager
 				cnsDeletionMap[vcconfig.Host] = make(map[string]bool)
 				cnsCreationMap[vcconfig.Host] = make(map[string]bool)
+				volumeInfoCrDeletionMap[vcconfig.Host] = make(map[string]bool)
 				volumeOperationsLock[vcconfig.Host] = &sync.Mutex{}
 			}
 			// If it is a multi VC deployment, initialize volumeInfoService
@@ -546,7 +551,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 							log.Infof("CSI full sync failed with error: %+v", err)
 						}
 					} else {
-						vcconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, configInfo.Cfg)
+						vcconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, metadataSyncer.configInfo.Cfg)
 						if err != nil {
 							log.Errorf("Failed to get all virtual configs for CSI full sync. Error: %+v", err)
 						}
@@ -1032,7 +1037,7 @@ func ReloadConfiguration(metadataSyncer *metadataSyncInformer, reconnectToVCFrom
 				// Verify if new configuration has valid credentials by connecting
 				// to vCenter. Proceed only if the connection succeeds, else return
 				// error.
-				newVC := &cnsvsphere.VirtualCenter{Config: newVCConfig}
+				newVC := &cnsvsphere.VirtualCenter{Config: newVCConfig, ClientMutex: &sync.Mutex{}}
 				if err = newVC.Connect(ctx); err != nil {
 					return logger.LogNewErrorf(log,
 						"failed to connect to VirtualCenter host: %s using new credentials, Err: %+v",
