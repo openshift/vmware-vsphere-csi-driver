@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -33,11 +33,13 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("[csi-file-vanilla] File Volume statefulset", func() {
 
 	f := framework.NewDefaultFramework("e2e-vsphere-statefulset")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		namespace    string
 		client       clientset.Interface
@@ -571,6 +573,9 @@ var _ = ginkgo.Describe("[csi-file-vanilla] File Volume statefulset", func() {
 		list_of_pods, err := fpod.GetPodsInNamespace(client, csiSystemNamespace, ignoreLabels)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		num_csi_pods := len(list_of_pods)
+
+		// Collecting csi pod logs before restrating CSI daemonset
+		collectPodLogs(ctx, client, csiSystemNamespace)
 
 		// Restart CSI daemonset
 		ginkgo.By("Restart Daemonset")

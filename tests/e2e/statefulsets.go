@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -31,6 +31,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 const (
@@ -58,6 +59,7 @@ const (
 var _ = ginkgo.Describe("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] statefulset", func() {
 
 	f := framework.NewDefaultFramework("e2e-vsphere-statefulset")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		namespace         string
 		client            clientset.Interface

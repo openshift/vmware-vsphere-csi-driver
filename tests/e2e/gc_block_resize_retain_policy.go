@@ -25,7 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
@@ -40,10 +40,12 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation policy retain", func() {
 	f := framework.NewDefaultFramework("gc-resize-reclaim-policy-retain")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client              clientset.Interface
 		clientNewGc         clientset.Interface
