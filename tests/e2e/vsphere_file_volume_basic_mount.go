@@ -20,7 +20,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -30,11 +30,13 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("[csi-file-vanilla] Verify Two Pods can read write files "+
 	"when created with same PVC (dynamically provisioned) with access mode ReadWriteMany", func() {
 	f := framework.NewDefaultFramework("file-volume-basic")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client    clientset.Interface
 		namespace string

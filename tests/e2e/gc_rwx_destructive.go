@@ -20,7 +20,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/onsi/ginkgo"
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
@@ -31,10 +31,12 @@ import (
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 var _ = ginkgo.Describe("[rwm-csi-destructive-tkg] Statefulsets with File Volumes and Delete Guest Cluster", func() {
 	f := framework.NewDefaultFramework("rwx-delete-tkg")
+	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		scParameters        map[string]string
 		storagePolicyName   string

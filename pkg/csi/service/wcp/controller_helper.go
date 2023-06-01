@@ -31,12 +31,14 @@ import (
 	vimtypes "github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
+
 	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v2/pkg/apis/storagepool/cns/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v2/pkg/common/config"
@@ -179,11 +181,59 @@ func validateWCPControllerExpandVolumeRequest(ctx context.Context, req *csi.Cont
 	return nil
 }
 
+// validateWCPCreateSnapshotRequest is the helper function to
+// validate CreateSnapshotRequest for CSI driver.
+// Function returns error if validation fails otherwise returns nil.
+func validateWCPCreateSnapshotRequest(ctx context.Context, req *csi.CreateSnapshotRequest) error {
+	log := logger.GetLogger(ctx)
+	volumeID := req.GetSourceVolumeId()
+	if len(volumeID) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument,
+			"CreateSnapshot Source Volume ID must be provided")
+	}
+
+	if len(req.Name) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument,
+			"Snapshot name must be provided")
+	}
+	return nil
+}
+
+// validateWCPListSnapshotRequest validates ListSnapshotRequest on supervisor
+func validateWCPListSnapshotRequest(ctx context.Context, req *csi.ListSnapshotsRequest) error {
+	log := logger.GetLogger(ctx)
+	maxEntries := req.MaxEntries
+	if maxEntries < 0 {
+		return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+			"ListSnapshots MaxEntries: %d cannot be negative", maxEntries)
+	}
+	// validate the starting token by verifying that it can be converted to a int
+	if req.StartingToken != "" {
+		_, err := strconv.Atoi(req.StartingToken)
+		if err != nil {
+			return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"ListSnapshots StartingToken: %s cannot be parsed", req.StartingToken)
+		}
+	}
+	// validate snapshot-id conforms to vSphere CSI driver format if specified.
+	// The expected format is "fcd-id+snapshot-id"
+	if req.SnapshotId != "" {
+		// check for the delimiter "+" in the snapshot-id.
+		check := strings.Contains(req.SnapshotId, common.VSphereCSISnapshotIdDelimiter)
+		if !check {
+			return logger.LogNewErrorCodef(log, codes.InvalidArgument,
+				"ListSnapshots SnapshotId: %s is incorrectly formatted for vSphere CSI driver",
+				req.SnapshotId)
+		}
+	}
+	return nil
+}
+
 // getK8sCloudOperatorClientConnection is a helper function that creates a
 // clientConnection to k8sCloudOperator GRPC service running on syncer container.
 func getK8sCloudOperatorClientConnection(ctx context.Context) (*grpc.ClientConn, error) {
 	var opts []grpc.DialOption
-	opts = append(opts, grpc.WithInsecure())
+	opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	port := common.GetK8sCloudOperatorServicePort(ctx)
 	k8sCloudOperatorServiceAddr := "127.0.0.1:" + strconv.Itoa(port)
 	// Connect to k8s cloud operator gRPC service.
@@ -525,9 +575,12 @@ func (c *controller) GetVolumeToHostMapping(ctx context.Context) (map[string]str
 	for _, info := range vmMoList {
 		vmMoID := info.Reference().Value
 
-		host := info.Runtime.Host
-		vmMoIDToHostMoID[vmMoID] = host.Reference().Value
-
+		if info.Runtime.Host != nil {
+			vmMoIDToHostMoID[vmMoID] = info.Runtime.Host.Reference().Value
+		}
+		if info.Config == nil {
+			continue
+		}
 		devices := info.Config.Hardware.Device
 		vmDevices := object.VirtualDeviceList(devices)
 		for _, device := range vmDevices {

@@ -61,6 +61,7 @@ func connect(ctx context.Context, vs *vSphere) {
 	var err error
 	defer clientLock.Unlock()
 	if vs.Client == nil {
+		framework.Logf("Creating new VC session")
 		vs.Client = newClient(ctx, vs)
 	}
 	manager := session.NewManager(vs.Client.Client)
@@ -69,9 +70,12 @@ func connect(ctx context.Context, vs *vSphere) {
 	if userSession != nil {
 		return
 	}
-	framework.Logf("Creating new client session since the existing session is not valid or not authenticated")
+	framework.Logf("Current session is not valid or not authenticated, trying to logout from it")
 	err = vs.Client.Logout(ctx)
-	framework.Logf("Error from logging out from session is: %v", err)
+	if err != nil {
+		framework.Logf("Ignoring the log out error: %v", err)
+	}
+	framework.Logf("Creating new client session after attempting to logout from existing session")
 	vs.Client = newClient(ctx, vs)
 }
 
