@@ -587,18 +587,55 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		defer pvToBackingDiskObjectIdMappingTicker.Stop()
 
 		var pvToBackingDiskObjectIdSupportCheck bool
-		vCenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, configInfo, false)
-		if err != nil {
-			return err
+		if !isMultiVCenterFssEnabled {
+			vCenter, err := cnsvsphere.GetVirtualCenterInstance(ctx, configInfo, false)
+			if err != nil {
+				return err
+			}
+			pvToBackingDiskObjectIdSupportCheck = common.CheckPVtoBackingDiskObjectIdSupport(ctx, vCenter)
+
+		} else {
+			vcconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, configInfo.Cfg)
+			if err != nil {
+				return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err: %v", err)
+			}
+			var pvToBackingDiskObjectIdSupportedByVc bool
+			for _, vcconfig := range vcconfigs {
+				vCenter, err := cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcconfig, false)
+				if err != nil {
+					return logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter Host: %q, err: %v", vcconfig.Host, err)
+				}
+				// All VCs in the deployment must support PV to Backing Disk Object ID feature.
+				pvToBackingDiskObjectIdSupportedByVc = common.CheckPVtoBackingDiskObjectIdSupport(ctx, vCenter)
+				if !pvToBackingDiskObjectIdSupportedByVc {
+					pvToBackingDiskObjectIdSupportCheck = false
+					break
+				} else {
+					pvToBackingDiskObjectIdSupportCheck = true
+				}
+			}
 		}
-		pvToBackingDiskObjectIdSupportCheck = common.CheckPVtoBackingDiskObjectIdSupport(ctx, vCenter)
 
 		if pvToBackingDiskObjectIdSupportCheck {
 			go func() {
 				for ; true; <-pvToBackingDiskObjectIdMappingTicker.C {
 					ctx, log = logger.GetNewContextWithLogger()
 					log.Info("get pv to backingDiskObjectId mapping is triggered")
-					csiGetPVtoBackingDiskObjectIdMapping(ctx, k8sClient, metadataSyncer)
+
+					if !isMultiVCenterFssEnabled {
+						csiGetPVtoBackingDiskObjectIdMapping(ctx, k8sClient, metadataSyncer,
+							metadataSyncer.configInfo.Cfg.Global.VCenterIP)
+					} else {
+						vcconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, configInfo.Cfg)
+						if err != nil {
+							log.Error(log, "failed to get VirtualCenterConfigs. err: %v", err)
+							return
+						}
+						// Update mapping for all VCs.
+						for _, vcconfig := range vcconfigs {
+							csiGetPVtoBackingDiskObjectIdMapping(ctx, k8sClient, metadataSyncer, vcconfig.Host)
+						}
+					}
 				}
 			}()
 		}
@@ -1534,6 +1571,12 @@ func csiPVCUpdated(ctx context.Context, pvc *v1.PersistentVolumeClaim,
 		if err != nil {
 			log.Errorf("PVC Updated: Failed to get VolumeID from volumeMigrationService for migration VolumeSpec: %v "+
 				"with error %+v", migrationVolumeSpec, err)
+			return
+		}
+		vcHost, cnsVolumeMgr, err = getVcHostAndVolumeManagerForVolumeID(ctx, metadataSyncer, volumeHandle)
+		if err != nil {
+			log.Errorf("PVCUpdated: Failed to get VC host and volume manager for the given volume: %v. "+
+				"Error occoured: %+v", volumeHandle, err)
 			return
 		}
 	} else {
