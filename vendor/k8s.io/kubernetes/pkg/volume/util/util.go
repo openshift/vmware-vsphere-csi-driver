@@ -75,6 +75,9 @@ const (
 	// VolumeDynamicallyCreatedByKey is the key of the annotation on PersistentVolume
 	// object created dynamically
 	VolumeDynamicallyCreatedByKey = "kubernetes.io/createdby"
+
+	// kubernetesPluginPathPrefix is the prefix of kubernetes plugin mount paths.
+	kubernetesPluginPathPrefix = "/plugins/kubernetes.io/"
 )
 
 // IsReady checks for the existence of a regular file
@@ -635,12 +638,30 @@ func FsUserFrom(pod *v1.Pod) *int64 {
 // In GCI cluster, if gci mounter is used for mounting, the container started by mounter
 // script will cause additional mounts created in the container. Since these mounts are
 // irrelevant to the original mounts, they should be not considered when checking the
-// mount references. Current solution is to filter out those mount paths that contain
-// the string of original mount path.
-// Plan to work on better approach to solve this issue.
+// mount references. The current solution is to filter out those mount paths that contain
+// the k8s plugin suffix of original mount path.
 func HasMountRefs(mountPath string, mountRefs []string) bool {
+	// A mountPath typically is like
+	//   /var/lib/kubelet/plugins/kubernetes.io/some-plugin/mounts/volume-XXXX
+	// Mount refs can look like
+	//   /home/somewhere/var/lib/kubelet/plugins/kubernetes.io/some-plugin/...
+	// but if /var/lib/kubelet is mounted to a different device a ref might be like
+	//   /mnt/some-other-place/kubelet/plugins/kubernetes.io/some-plugin/...
+	// Neither of the above should be counted as a mount ref as those are handled
+	// by the kubelet. What we're concerned about is a path like
+	//   /data/local/some/manual/mount
+	// As unmonting could interrupt usage from that mountpoint.
+	//
+	// So instead of looking for the entire /var/lib/... path, the plugins/kuberentes.io/
+	// suffix is trimmed off and searched for.
+	//
+	// If there isn't a /plugins/... path, the whole mountPath is used instead.
+	pathToFind := mountPath
+	if i := strings.Index(mountPath, kubernetesPluginPathPrefix); i > -1 {
+		pathToFind = mountPath[i:]
+	}
 	for _, ref := range mountRefs {
-		if !strings.Contains(ref, mountPath) {
+		if !strings.Contains(ref, pathToFind) {
 			return true
 		}
 	}
@@ -651,11 +672,15 @@ func HasMountRefs(mountPath string, mountRefs []string) bool {
 func WriteVolumeCache(deviceMountPath string, exec utilexec.Interface) error {
 	// If runtime os is windows, execute Write-VolumeCache powershell command on the disk
 	if runtime.GOOS == "windows" {
-		cmd := fmt.Sprintf("Get-Volume -FilePath %s | Write-Volumecache", deviceMountPath)
-		output, err := exec.Command("powershell", "/c", cmd).CombinedOutput()
-		klog.Infof("command (%q) execeuted: %v, output: %q", cmd, err, string(output))
+		cmdString := "Get-Volume -FilePath $env:mountpath | Write-Volumecache"
+		cmd := exec.Command("powershell", "/c", cmdString)
+		env := append(os.Environ(), fmt.Sprintf("mountpath=%s", deviceMountPath))
+		cmd.SetEnv(env)
+		klog.V(8).Infof("Executing command: %q", cmdString)
+		output, err := cmd.CombinedOutput()
+		klog.Infof("command (%q) execeuted: %v, output: %q", cmdString, err, string(output))
 		if err != nil {
-			return fmt.Errorf("command (%q) failed: %v, output: %q", cmd, err, string(output))
+			return fmt.Errorf("command (%q) failed: %v, output: %q", cmdString, err, string(output))
 		}
 	}
 	// For linux runtime, it skips because unmount will automatically flush disk data
