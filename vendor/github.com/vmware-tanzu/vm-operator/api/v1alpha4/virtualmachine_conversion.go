@@ -1,0 +1,222 @@
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
+
+package v1alpha4
+
+import (
+	"slices"
+
+	apiconversion "k8s.io/apimachinery/pkg/conversion"
+	ctrlconversion "sigs.k8s.io/controller-runtime/pkg/conversion"
+
+	"github.com/vmware-tanzu/vm-operator/api/utilconversion"
+
+	vmopv1a4common "github.com/vmware-tanzu/vm-operator/api/v1alpha4/common"
+	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+)
+
+func Convert_v1alpha5_VirtualMachineBootstrapCloudInitSpec_To_v1alpha4_VirtualMachineBootstrapCloudInitSpec(
+	in *vmopv1.VirtualMachineBootstrapCloudInitSpec, out *VirtualMachineBootstrapCloudInitSpec, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_VirtualMachineBootstrapCloudInitSpec_To_v1alpha4_VirtualMachineBootstrapCloudInitSpec(in, out, s)
+}
+
+func Convert_v1alpha4_VirtualMachineCdromSpec_To_v1alpha5_VirtualMachineCdromSpec(
+	in *VirtualMachineCdromSpec, out *vmopv1.VirtualMachineCdromSpec, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha4_VirtualMachineCdromSpec_To_v1alpha5_VirtualMachineCdromSpec(in, out, s)
+}
+
+func Convert_v1alpha5_VirtualMachineCdromSpec_To_v1alpha4_VirtualMachineCdromSpec(
+	in *vmopv1.VirtualMachineCdromSpec, out *VirtualMachineCdromSpec, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_VirtualMachineCdromSpec_To_v1alpha4_VirtualMachineCdromSpec(in, out, s)
+}
+
+func Convert_v1alpha5_PersistentVolumeClaimVolumeSource_To_v1alpha4_PersistentVolumeClaimVolumeSource(
+	in *vmopv1.PersistentVolumeClaimVolumeSource, out *PersistentVolumeClaimVolumeSource, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_PersistentVolumeClaimVolumeSource_To_v1alpha4_PersistentVolumeClaimVolumeSource(in, out, s)
+}
+
+func Convert_v1alpha5_VirtualMachineVolumeStatus_To_v1alpha4_VirtualMachineVolumeStatus(
+	in *vmopv1.VirtualMachineVolumeStatus, out *VirtualMachineVolumeStatus, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_VirtualMachineVolumeStatus_To_v1alpha4_VirtualMachineVolumeStatus(in, out, s)
+}
+
+func Convert_v1alpha5_VirtualMachineSpec_To_v1alpha4_VirtualMachineSpec(
+	in *vmopv1.VirtualMachineSpec, out *VirtualMachineSpec, s apiconversion.Scope) error {
+
+	if err := autoConvert_v1alpha5_VirtualMachineSpec_To_v1alpha4_VirtualMachineSpec(in, out, s); err != nil {
+		return err
+	}
+
+	switch {
+	case in.Hardware == nil:
+		out.Cdrom = nil
+	case len(in.Hardware.Cdrom) == 0:
+		out.Cdrom = nil
+	default:
+		out.Cdrom = make([]VirtualMachineCdromSpec, len(in.Hardware.Cdrom))
+		for i := range in.Hardware.Cdrom {
+			if err := autoConvert_v1alpha5_VirtualMachineCdromSpec_To_v1alpha4_VirtualMachineCdromSpec(
+				&in.Hardware.Cdrom[i], &out.Cdrom[i], s); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func Convert_v1alpha4_VirtualMachineSpec_To_v1alpha5_VirtualMachineSpec(
+	in *VirtualMachineSpec, out *vmopv1.VirtualMachineSpec, s apiconversion.Scope) error {
+
+	if err := autoConvert_v1alpha4_VirtualMachineSpec_To_v1alpha5_VirtualMachineSpec(in, out, s); err != nil {
+		return err
+	}
+
+	if len(in.Cdrom) > 0 {
+		if out.Hardware == nil {
+			out.Hardware = &vmopv1.VirtualMachineHardwareSpec{}
+		}
+		out.Hardware.Cdrom = make([]vmopv1.VirtualMachineCdromSpec, len(in.Cdrom))
+		for i := range in.Cdrom {
+			if err := autoConvert_v1alpha4_VirtualMachineCdromSpec_To_v1alpha5_VirtualMachineCdromSpec(&in.Cdrom[i], &out.Hardware.Cdrom[i], s); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+func Convert_v1alpha5_VirtualMachineStatus_To_v1alpha4_VirtualMachineStatus(
+	in *vmopv1.VirtualMachineStatus, out *VirtualMachineStatus, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_VirtualMachineStatus_To_v1alpha4_VirtualMachineStatus(in, out, s)
+}
+
+func Convert_v1alpha5_VirtualMachineCryptoStatus_To_v1alpha4_VirtualMachineCryptoStatus(
+	in *vmopv1.VirtualMachineCryptoStatus, out *VirtualMachineCryptoStatus, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_VirtualMachineCryptoStatus_To_v1alpha4_VirtualMachineCryptoStatus(in, out, s)
+}
+
+func restore_v1alpha5_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, src *vmopv1.VirtualMachine) {
+	if bs := src.Spec.Bootstrap; bs != nil {
+		if ci := bs.CloudInit; ci != nil {
+			if ci.WaitOnNetwork4 != nil || ci.WaitOnNetwork6 != nil {
+				// Only restore these values if dst still has a CloudInit spec.
+				if dst.Spec.Bootstrap != nil && dst.Spec.Bootstrap.CloudInit != nil {
+					dst.Spec.Bootstrap.CloudInit.WaitOnNetwork4 = ci.WaitOnNetwork4
+					dst.Spec.Bootstrap.CloudInit.WaitOnNetwork6 = ci.WaitOnNetwork6
+				}
+			}
+		}
+	}
+}
+
+func restore_v1alpha5_VirtualMachineHardware(dst, src *vmopv1.VirtualMachine) {
+	if src.Spec.Hardware == nil {
+		// There is nothing to restore so return early.
+		return
+	}
+
+	// Create a copy of the CD-ROMs currently stored on the dst VM.
+	var cdromChanges []vmopv1.VirtualMachineCdromSpec
+	if dst.Spec.Hardware != nil && len(dst.Spec.Hardware.Cdrom) > 0 {
+		cdromChanges = dst.Spec.Hardware.Cdrom
+	}
+
+	// Restore the missing hardware.
+	dst.Spec.Hardware = src.Spec.Hardware.DeepCopy()
+	dst.Spec.Hardware.Cdrom = cdromChanges
+
+	// Restore the old CD-ROM device information.
+	for i := range dst.Spec.Hardware.Cdrom {
+		dstCdrom := &dst.Spec.Hardware.Cdrom[i]
+
+		// Find the matching CD-ROM from the source.
+		for _, srcCdrom := range src.Spec.Hardware.Cdrom {
+			if srcCdrom.Name == dstCdrom.Name {
+				dstCdrom.ControllerBusNumber = srcCdrom.ControllerBusNumber
+				dstCdrom.ControllerType = srcCdrom.ControllerType
+				dstCdrom.UnitNumber = srcCdrom.UnitNumber
+				break
+			}
+		}
+	}
+}
+
+func restore_v1alpha5_VirtualMachinePolicies(dst, src *vmopv1.VirtualMachine) {
+	dst.Spec.Policies = slices.Clone(src.Spec.Policies)
+}
+
+func Convert_common_LocalObjectRef_To_v1alpha5_VirtualMachineSnapshotReference(
+	in *vmopv1a4common.LocalObjectRef, out *vmopv1.VirtualMachineSnapshotReference, s apiconversion.Scope) error {
+	if in == nil {
+		return nil
+	}
+
+	// Convert LocalObjectRef to simplified VirtualMachineSnapshotReference
+	out.Type = vmopv1.VirtualMachineSnapshotReferenceTypeManaged
+	out.Name = in.Name
+
+	return nil
+}
+
+func Convert_v1alpha5_VirtualMachineSnapshotReference_To_common_LocalObjectRef(
+	in *vmopv1.VirtualMachineSnapshotReference, out *vmopv1a4common.LocalObjectRef, s apiconversion.Scope) error {
+	if in == nil {
+		return nil
+	}
+
+	// Convert simplified VirtualMachineSnapshotReference back to LocalObjectRef
+	// For managed snapshots, assume it's a VirtualMachineSnapshot resource
+	out.APIVersion = "vmoperator.vmware.com/v1alpha5"
+	out.Kind = "VirtualMachineSnapshot"
+	out.Name = in.Name
+
+	return nil
+}
+
+
+// ConvertTo converts this VirtualMachine to the Hub version.
+func (src *VirtualMachine) ConvertTo(dstRaw ctrlconversion.Hub) error {
+	dst := dstRaw.(*vmopv1.VirtualMachine)
+	if err := Convert_v1alpha4_VirtualMachine_To_v1alpha5_VirtualMachine(src, dst, nil); err != nil {
+		return err
+	}
+
+	// Manually restore data.
+	restored := &vmopv1.VirtualMachine{}
+	if ok, err := utilconversion.UnmarshalData(src, restored); err != nil || !ok {
+		return err
+	}
+
+	// BEGIN RESTORE
+
+	restore_v1alpha5_VirtualMachineHardware(dst, restored)
+	restore_v1alpha5_VirtualMachinePolicies(dst, restored)
+	restore_v1alpha5_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, restored)
+
+	// END RESTORE
+
+	dst.Status = restored.Status
+
+	return nil
+}
+
+// ConvertFrom converts the hub version to this VirtualMachine.
+func (dst *VirtualMachine) ConvertFrom(srcRaw ctrlconversion.Hub) error {
+	src := srcRaw.(*vmopv1.VirtualMachine)
+	if err := Convert_v1alpha5_VirtualMachine_To_v1alpha4_VirtualMachine(src, dst, nil); err != nil {
+		return err
+	}
+
+	// Preserve Hub data on down-conversion except for metadata
+	return utilconversion.MarshalData(src, dst)
+}
