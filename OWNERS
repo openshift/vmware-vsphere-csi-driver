@@ -1,30 +1,3 @@
-# See the OWNERS docs at https://go.k8s.io/owners
-
-reviewers:
-- divyenpatel
-- xing-yang
-- chethanv28
-- deepakkinni
-- gnufied
-- akankshapanse
-- kolluria
-
 approvers:
-- divyenpatel
-- xing-yang
-- chethanv28
-- deepakkinni
-- akankshapanse
-- gohilankit
-- RaunakShah
-- kolluria
-
-emeritus_approvers:
-- codenrhoden
-- dougm
-- dvonthenen
-- frapposelli
-- BaluDontu
-- adikul30
-- shalini-b
-- SandeepPissay
+- openshift-storage-maintainers
+component: "Storage / Kubernetes External Components"

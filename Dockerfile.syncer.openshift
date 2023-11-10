@@ -1,0 +1,8 @@
+FROM registry.ci.openshift.org/ocp/builder:rhel-9-golang-1.24-openshift-4.21 AS builder
+WORKDIR /go/src/github.com/kubernetes-sigs/vsphere-csi-driver
+COPY . .
+RUN make build # TODO: build only driver
+
+FROM registry.ci.openshift.org/ocp/4.21:base-rhel9
+COPY --from=builder /go/src/github.com/kubernetes-sigs/vsphere-csi-driver/.build/bin/syncer.linux_amd64  /usr/bin/vmware-vsphere-csi-driver-syncer
+ENTRYPOINT ["/usr/bin/vmware-vsphere-csi-driver-syncer"]
