@@ -157,7 +157,7 @@ github.com/docker/distribution/reference
 # github.com/docker/go-units v0.4.0
 ## explicit
 github.com/docker/go-units
-# github.com/elazarl/goproxy v0.0.0-20200710112657-153946a5f232
+# github.com/elazarl/goproxy v0.0.0-20230731152917-f99041a5c027
 ## explicit
 # github.com/emicklei/go-restful/v3 v3.9.0
 ## explicit; go 1.13
