@@ -40,10 +40,6 @@ var (
 type Manager interface {
 	// SetKubernetesClient sets kubernetes client for node manager.
 	SetKubernetesClient(client clientset.Interface)
-	// SetUseNodeUuid sets whether the node manager should use
-	// K8s CSINode API object or the K8s Node API object to retrieve
-	// the node UUID.
-	SetUseNodeUuid(useNodeUuid bool)
 	// RegisterNode registers a node given its UUID, name.
 	RegisterNode(ctx context.Context, nodeUUID string, nodeName string) error
 	// DiscoverNode discovers a registered node given its UUID. This method
@@ -56,13 +52,16 @@ type Manager interface {
 	// given its UUID. If datacenter is present, GetNode will search within this
 	// datacenter given its UUID. If not, it will search in all registered
 	// datacenters.
-	GetNode(ctx context.Context, nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error)
-	// GetNodeByName refreshes and returns the VirtualMachine for a registered
+	GetNodeVMAndUpdateCache(ctx context.Context, nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error)
+	// GetNodeVMByUuid returns the VirtualMachine for a registered node
+	// given its UUID.
+	GetNodeVMByUuid(ctx context.Context, nodeUUID string) (*vsphere.VirtualMachine, error)
+	// GetNodeVMByNameAndUpdateCache refreshes and returns the VirtualMachine for a registered
 	// node given its name.
-	GetNodeByName(ctx context.Context, nodeName string) (*vsphere.VirtualMachine, error)
-	// GetNodeByNameOrUUID refreshes and returns VirtualMachine for a registered node
+	GetNodeVMByNameAndUpdateCache(ctx context.Context, nodeName string) (*vsphere.VirtualMachine, error)
+	// GetNodeVMByNameOrUUID refreshes and returns VirtualMachine for a registered node
 	// using either its name or UUID.
-	GetNodeByNameOrUUID(ctx context.Context, nodeName string) (*vsphere.VirtualMachine, error)
+	GetNodeVMByNameOrUUID(ctx context.Context, nodeNameOrUuid string) (*vsphere.VirtualMachine, error)
 	// GetNodeNameByUUID fetches the name of the node given the VM UUID.
 	GetNodeNameByUUID(ctx context.Context, nodeUUID string) (string, error)
 	// GetAllNodes refreshes and returns VirtualMachine for all registered
@@ -108,21 +107,11 @@ type defaultManager struct {
 	nodeNameToUUID sync.Map
 	// k8s client.
 	k8sClient clientset.Interface
-	// useNodeUuid uses K8s CSINode API instead of
-	// K8s Node to retrieve the node UUID.
-	useNodeUuid bool
 }
 
 // SetKubernetesClient sets specified kubernetes client to defaultManager.k8sClient
 func (m *defaultManager) SetKubernetesClient(client clientset.Interface) {
 	m.k8sClient = client
-}
-
-// SetUseNodeUuid sets whether the node manager should use
-// K8s CSINode API object or the K8s Node API object to retrieve
-// node UUID.
-func (m *defaultManager) SetUseNodeUuid(useNodeUuid bool) {
-	m.useNodeUuid = useNodeUuid
 }
 
 // RegisterNode registers a node with node manager using its UUID, name.
@@ -155,27 +144,27 @@ func (m *defaultManager) DiscoverNode(ctx context.Context, nodeUUID string) erro
 	return nil
 }
 
-// GetNodeByName refreshes and returns the VirtualMachine for a registered node
+// GetNodeVMByNameAndUpdateCache refreshes and returns the VirtualMachine for a registered node
 // given its name.
-func (m *defaultManager) GetNodeByName(ctx context.Context, nodeName string) (*vsphere.VirtualMachine, error) {
+func (m *defaultManager) GetNodeVMByNameAndUpdateCache(ctx context.Context,
+	nodeName string) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
 	nodeUUID, found := m.nodeNameToUUID.Load(nodeName)
 	if found && nodeUUID != nil && nodeUUID.(string) != "" {
-		return m.GetNode(ctx, nodeUUID.(string), nil)
+		return m.GetNodeVMAndUpdateCache(ctx, nodeUUID.(string), nil)
 	}
 	log.Infof("Empty nodeUUID observed in cache for the node: %q", nodeName)
-	k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeName,
-		m.useNodeUuid)
+	k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeName)
 	if err != nil {
 		log.Errorf("failed to get node UUID from node: %q. Err: %v", nodeName, err)
 		return nil, err
 	}
 	m.nodeNameToUUID.Store(nodeName, k8snodeUUID)
-	return m.GetNode(ctx, k8snodeUUID, nil)
+	return m.GetNodeVMAndUpdateCache(ctx, k8snodeUUID, nil)
 
 }
 
-func (m *defaultManager) GetNodeByNameOrUUID(
+func (m *defaultManager) GetNodeVMByNameOrUUID(
 	ctx context.Context, nodeNameOrUUID string) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
 	nodeUUID, found := m.nodeNameToUUID.Load(nodeNameOrUUID)
@@ -184,16 +173,15 @@ func (m *defaultManager) GetNodeByNameOrUUID(
 		return nil, ErrNodeNotFound
 	}
 	if nodeUUID != nil && nodeUUID.(string) != "" {
-		return m.GetNode(ctx, nodeUUID.(string), nil)
+		return m.GetNodeVMAndUpdateCache(ctx, nodeUUID.(string), nil)
 	}
 	log.Infof("Empty nodeUUID observed in cache for the node: %q", nodeNameOrUUID)
-	k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeNameOrUUID, m.useNodeUuid)
+	k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeNameOrUUID)
 	if err != nil {
 		log.Errorf("failed to get node UUID from node: %q. Err: %v", nodeNameOrUUID, err)
 		return nil, err
 	}
-	m.nodeNameToUUID.Store(nodeNameOrUUID, k8snodeUUID)
-	return m.GetNode(ctx, k8snodeUUID, nil)
+	return m.GetNodeVMAndUpdateCache(ctx, k8snodeUUID, nil)
 }
 
 // GetNodeNameByUUID fetches the name of the node given the VM UUID.
@@ -226,7 +214,7 @@ func (m *defaultManager) GetK8sNode(ctx context.Context, nodename string) (*v1.N
 
 // GetNode refreshes and returns the VirtualMachine for a registered node
 // given its UUID.
-func (m *defaultManager) GetNode(ctx context.Context,
+func (m *defaultManager) GetNodeVMAndUpdateCache(ctx context.Context,
 	nodeUUID string, dc *vsphere.Datacenter) (*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
 	vmInf, discovered := m.nodeVMs.Load(nodeUUID)
@@ -266,6 +254,27 @@ func (m *defaultManager) GetNode(ctx context.Context,
 	return vm, nil
 }
 
+// GetNodeVMByUuid returns the VirtualMachine for a registered node
+// given its UUID. This is called by ControllerPublishVolume and
+// ControllerUnpublishVolume to perform attach and detach operations.
+func (m *defaultManager) GetNodeVMByUuid(ctx context.Context,
+	nodeUUID string) (*vsphere.VirtualMachine, error) {
+	log := logger.GetLogger(ctx)
+	vmInf, discovered := m.nodeVMs.Load(nodeUUID)
+	if !discovered {
+		log.Infof("Node VM not found with nodeUUID %s", nodeUUID)
+		vm, err := vsphere.GetVirtualMachineByUUID(ctx, nodeUUID, false)
+		if err != nil {
+			log.Errorf("Couldn't find VM instance with nodeUUID %s, failed to discover with err: %v", nodeUUID, err)
+			return nil, err
+		}
+		log.Infof("Node was successfully found with nodeUUID %s in vm %v", nodeUUID, vm)
+		return vm, nil
+	}
+	vm := vmInf.(*vsphere.VirtualMachine)
+	return vm, nil
+}
+
 // GetAllNodes refreshes and returns VirtualMachine for all registered nodes.
 func (m *defaultManager) GetAllNodes(ctx context.Context) ([]*vsphere.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
@@ -276,8 +285,7 @@ func (m *defaultManager) GetAllNodes(ctx context.Context) ([]*vsphere.VirtualMac
 	m.nodeNameToUUID.Range(func(nodeName, nodeUUID interface{}) bool {
 		if nodeName != nil && nodeUUID != nil && nodeUUID.(string) == "" {
 			log.Infof("Empty node UUID observed for the node: %q", nodeName)
-			k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient,
-				nodeName.(string), m.useNodeUuid)
+			k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeName.(string))
 			if err != nil {
 				log.Errorf("failed to get node UUID from node: %q. Err: %v", nodeName, err)
 				return true
@@ -343,8 +351,7 @@ func (m *defaultManager) GetAllNodesByVC(ctx context.Context, vcHost string) ([]
 	m.nodeNameToUUID.Range(func(nodeName, nodeUUID interface{}) bool {
 		if nodeName != nil && nodeUUID != nil && nodeUUID.(string) == "" {
 			log.Infof("Empty node UUID observed for the node: %q", nodeName)
-			k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient,
-				nodeName.(string), m.useNodeUuid)
+			k8snodeUUID, err := k8s.GetNodeUUID(ctx, m.k8sClient, nodeName.(string))
 			if err != nil {
 				log.Errorf("failed to get node UUID from node: %q. Err: %v", nodeName, err)
 				return true

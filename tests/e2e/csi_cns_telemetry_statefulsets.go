@@ -90,6 +90,11 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] [csi-supervisor]
 		if vanillaCluster {
 			// Reset the cluster distribution value to default value "CSI-Vanilla".
 			setClusterDistribution(ctx, client, vanillaClusterDistribution)
+		} else if supervisorCluster {
+			dumpSvcNsEventsOnTestFailure(client, namespace)
+		} else {
+			svcClient, svNamespace := getSvcClientAndNamespace()
+			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 		}
 	})
 
@@ -138,7 +143,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] [csi-supervisor]
 		statefulset := GetStatefulSetFromManifest(namespace)
 		ginkgo.By("Creating statefulset")
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Annotations["volume.beta.kubernetes.io/storage-class"] = sc.Name
+			Spec.StorageClassName = &sc.Name
 		CreateStatefulSet(namespace, statefulset, client)
 		replicas := *(statefulset.Spec.Replicas)
 		// Waiting for pods status to be Ready.

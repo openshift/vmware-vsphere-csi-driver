@@ -312,6 +312,11 @@ const (
 	// on the VolumeSnapshot CR
 	VolumeSnapshotInfoKey = "csi.vsphere.volume/snapshot"
 
+	// SupervisorVolumeSnapshotAnnotationKey represents the annotation key on VolumeSnapshot CR
+	// in Supervisor cluster which is used to indicate that snapshot operation is initiated from
+	// Guest cluster.
+	SupervisorVolumeSnapshotAnnotationKey = "csi.vsphere.guest-initiated-csi-snapshot"
+
 	// AttributeSupervisorVolumeSnapshotClass represents name of VolumeSnapshotClass
 	AttributeSupervisorVolumeSnapshotClass = "svvolumesnapshotclass"
 
@@ -366,10 +371,6 @@ const (
 	// CSIWindowsSupport is the feature to support csi block volumes for windows
 	// node.
 	CSIWindowsSupport = "csi-windows-support"
-	// UseCSINodeId is the feature to make sure CSI will no longer use
-	// ProviderID on K8s Node API object set by CPI. If not set, CSI
-	// will continue to use the Provider ID from K8s Node API object.
-	UseCSINodeId = "use-csinode-id"
 	// TKGsHA is the feature gate to check whether TKGS HA feature
 	// is enabled.
 	TKGsHA = "tkgs-ha"

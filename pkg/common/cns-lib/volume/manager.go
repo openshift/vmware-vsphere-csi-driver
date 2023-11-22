@@ -35,6 +35,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	csifault "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/fault"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/prometheus"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
@@ -53,6 +54,11 @@ const (
 	// timeout duration for a http request
 	// used only for listView
 	noTimeout = 0 * time.Minute
+
+	// VolumeOperationTimeoutInSeconds specifies the default CSI operation timeout in seconds
+	VolumeOperationTimeoutInSeconds = 300
+
+	listviewAdditionError = "failed to add task to list view"
 
 	// defaultOpsExpirationTimeInHours is expiration time for create volume operations.
 	// TODO: This timeout will be configurable in future releases
@@ -132,6 +138,8 @@ type Manager interface {
 		task *object.Task, volNameFromInputSpec string, clusterID string) (*CnsVolumeInfo, string, error)
 	// GetOperationStore returns the VolumeOperationRequest interface
 	GetOperationStore() cnsvolumeoperationrequest.VolumeOperationRequest
+	// LogoutListViewVCSession logout current vCenter session for list-view
+	LogoutListViewVCSession(ctx context.Context) error
 }
 
 // CnsVolumeInfo hold information related to volume created by CNS.
@@ -305,10 +313,7 @@ func (m *defaultManager) ResetManager(ctx context.Context, vcenter *cnsvsphere.V
 	log.Infof("Re-initializing defaultManager.virtualCenter")
 	managerInstance.virtualCenter = vcenter
 	if m.tasksListViewEnabled {
-		err := m.listViewIf.SetVirtualCenter(ctx, managerInstance.virtualCenter)
-		if err != nil {
-			return logger.LogNewErrorf(log, "failed to set virtual center to listView instance. err: %v", err)
-		}
+		m.listViewIf.SetVirtualCenter(ctx, managerInstance.virtualCenter)
 	}
 	if m.virtualCenter.Client != nil {
 		m.virtualCenter.Client.Timeout = time.Duration(vcenter.Config.VCClientTimeout) * time.Minute
@@ -386,6 +391,7 @@ func (m *defaultManager) MonitorCreateVolumeTask(ctx context.Context,
 
 			return nil, ExtractFaultTypeFromErr(ctx, err), err
 		}
+
 		// WaitForResult can fail for many reasons, including:
 		// - CNS restarted and marked "InProgress" tasks as "Failed".
 		// - Any failures from CNS.
@@ -494,9 +500,9 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 					},
 				}, "", nil
 			}
+
 			// Validate if previous operation is pending.
-			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
-				volumeOperationDetails.OperationDetails.TaskID != "" {
+			if IsTaskPending(volumeOperationDetails) {
 				log.Infof("Volume with name %s has CreateVolume task %s pending on CNS.",
 					volNameFromInputSpec,
 					volumeOperationDetails.OperationDetails.TaskID)
@@ -563,6 +569,21 @@ func (m *defaultManager) createVolumeWithImprovedIdempotency(ctx context.Context
 	return resp, faultType, err
 }
 
+// IsTaskPending returns true in two cases -
+// 1. if the task status was in progress
+// 2. if the status was an error but the error was for adding the task to the listview
+// (as we don't know the status of the task on CNS)
+func IsTaskPending(volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails) bool {
+	if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
+		volumeOperationDetails.OperationDetails.TaskID != "" {
+		return true
+	} else if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusError &&
+		strings.Contains(volumeOperationDetails.OperationDetails.Error, listviewAdditionError) {
+		return true
+	}
+	return false
+}
+
 func (m *defaultManager) waitOnTask(csiOpContext context.Context,
 	taskMoRef vim25types.ManagedObjectReference) (*vim25types.TaskInfo, error) {
 	log := logger.GetLogger(csiOpContext)
@@ -575,7 +596,7 @@ func (m *defaultManager) waitOnTask(csiOpContext context.Context,
 	ch := make(chan TaskResult)
 	err := m.listViewIf.AddTask(csiOpContext, taskMoRef, ch)
 	if err != nil {
-		return nil, logger.LogNewErrorf(log, "failed to add task to list view. err: %v", err)
+		return nil, logger.LogNewErrorf(log, "%s. err: %v", listviewAdditionError, err)
 	}
 
 	// deferring removal of task after response from CNS
@@ -590,7 +611,6 @@ func (m *defaultManager) waitOnTask(csiOpContext context.Context,
 			}
 		}
 	}()
-
 	return waitForResultOrTimeout(csiOpContext, taskMoRef, ch)
 }
 
@@ -614,6 +634,7 @@ func waitForResultOrTimeout(csiOpContext context.Context, taskMoRef vim25types.M
 
 func (m *defaultManager) initListView() error {
 	ctx := logger.NewContextWithLogger(context.Background())
+
 	log := logger.GetLogger(ctx)
 	log.Debugf("Initializing new listView object for vc: %+v", m.virtualCenter)
 	if m.virtualCenter.Client == nil {
@@ -624,7 +645,18 @@ func (m *defaultManager) initListView() error {
 		}
 	}
 
-	govmomiClient, err := m.virtualCenter.NewClient(ctx)
+	err := cnsvsphere.ReadVCConfigs(ctx, m.virtualCenter)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to read VC config. err: %v", err)
+	}
+
+	useragent, err := config.GetSessionUserAgent(ctx)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get useragent for vCenter session. error: %+v", err)
+	}
+	useragent = useragent + "-listview"
+
+	govmomiClient, err := m.virtualCenter.NewClient(ctx, useragent)
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to create a separate govmomi client for listView. error: %+v", err)
 	}
@@ -740,6 +772,8 @@ func (m *defaultManager) createVolume(ctx context.Context, spec *cnstypes.CnsVol
 // CreateVolume creates a new volume given its spec.
 func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec) (*CnsVolumeInfo,
 	string, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalCreateVolume := func() (*CnsVolumeInfo, string, error) {
 		log := logger.GetLogger(ctx)
 		var faultType string
@@ -776,9 +810,23 @@ func (m *defaultManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVol
 	return resp, faultType, err
 }
 
+// ensureOperationContextHasATimeout checks if the passed context has a timeout associated with it.
+// If there is no timeout set, we set it to 300 seconds. This is the same as set by sidecars.
+// If a timeout is already set, we don't change it.
+func ensureOperationContextHasATimeout(ctx context.Context) (context.Context, context.CancelFunc) {
+	_, ok := ctx.Deadline()
+	if !ok {
+		// no timeout is set, so we need to set it
+		return context.WithTimeout(ctx, VolumeOperationTimeoutInSeconds*time.Second)
+	}
+	return context.WithCancel(ctx)
+}
+
 // AttachVolume attaches a volume to a virtual machine given the spec.
 func (m *defaultManager) AttachVolume(ctx context.Context,
 	vm *cnsvsphere.VirtualMachine, volumeID string, checkNVMeController bool) (string, string, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalAttachVolume := func() (string, string, error) {
 		log := logger.GetLogger(ctx)
 		var faultType string
@@ -885,6 +933,8 @@ func (m *defaultManager) AttachVolume(ctx context.Context,
 // DetachVolume detaches a volume from the virtual machine given the spec.
 func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID string) (string,
 	error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalDetachVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
 		var faultType string
@@ -1025,6 +1075,8 @@ func (m *defaultManager) DetachVolume(ctx context.Context, vm *cnsvsphere.Virtua
 
 // DeleteVolume deletes a volume given its spec.
 func (m *defaultManager) DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) (string, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalDeleteVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
 		var faultType string
@@ -1115,6 +1167,12 @@ func (m *defaultManager) deleteVolume(ctx context.Context, volumeID string, dele
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
 		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
+		// If volume is not found on host, but is present in CNS DB, we will get vim.fault.NotFound fault.
+		// Send back success as the volume is already deleted.
+		if IsNotFoundFault(ctx, faultType) {
+			log.Infof("DeleteVolume: VolumeID %q, not found, thus returning success", volumeID)
+			return "", nil
+		}
 		return faultType, logger.LogNewErrorf(log, "failed to delete volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 	}
@@ -1157,8 +1215,7 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 				return "", nil
 			}
 			// Validate if previous operation is pending.
-			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
-				volumeOperationDetails.OperationDetails.TaskID != "" {
+			if IsTaskPending(volumeOperationDetails) {
 				taskMoRef := vim25types.ManagedObjectReference{
 					Type:  "Task",
 					Value: volumeOperationDetails.OperationDetails.TaskID,
@@ -1275,6 +1332,14 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 	volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
 	if volumeOperationRes.Fault != nil {
 		faultType = ExtractFaultTypeFromVolumeResponseResult(ctx, volumeOperationRes)
+
+		// If volume is not found on host, but is present in CNS DB, we will get vim.fault.NotFound fault.
+		// In such a case, send back success as the volume is already deleted.
+		if IsNotFoundFault(ctx, faultType) {
+			log.Infof("DeleteVolume: VolumeID %q, not found, thus returning success", volumeID)
+			return "", nil
+		}
+
 		msg := fmt.Sprintf("failed to delete volume: %q, fault: %q, opID: %q",
 			volumeID, spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
 		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0,
@@ -1293,6 +1358,8 @@ func (m *defaultManager) deleteVolumeWithImprovedIdempotency(ctx context.Context
 
 // UpdateVolumeMetadata updates a volume given its spec.
 func (m *defaultManager) UpdateVolumeMetadata(ctx context.Context, spec *cnstypes.CnsVolumeMetadataUpdateSpec) error {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalUpdateVolumeMetadata := func() error {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1382,6 +1449,8 @@ func (m *defaultManager) UpdateVolumeMetadata(ctx context.Context, spec *cnstype
 
 // ExpandVolume expands a volume given its spec.
 func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size int64) (string, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalExpandVolume := func() (string, error) {
 		log := logger.GetLogger(ctx)
 		var faultType string
@@ -1513,8 +1582,7 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 				log.Infof("Volume with ID %s already expanded to size %v", volumeID, size)
 				return "", nil
 			}
-			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
-				volumeOperationDetails.OperationDetails.TaskID != "" {
+			if IsTaskPending(volumeOperationDetails) {
 				log.Infof("Volume with ID %s has ExtendVolume task %s pending on CNS.",
 					volumeID,
 					volumeOperationDetails.OperationDetails.TaskID)
@@ -1671,6 +1739,8 @@ func (m *defaultManager) expandVolumeWithImprovedIdempotency(ctx context.Context
 // QueryVolume returns volumes matching the given filter.
 func (m *defaultManager) QueryVolume(ctx context.Context,
 	queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalQueryVolume := func() (*cnstypes.CnsQueryResult, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1707,6 +1777,8 @@ func (m *defaultManager) QueryVolume(ctx context.Context,
 // QueryAllVolume returns all volumes matching the given filter and selection.
 func (m *defaultManager) QueryAllVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter,
 	querySelection cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalQueryAllVolume := func() (*cnstypes.CnsQueryResult, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1744,6 +1816,8 @@ func (m *defaultManager) QueryAllVolume(ctx context.Context, queryFilter cnstype
 // which CnsQueryVolumeInfoResult is extracted.
 func (m *defaultManager) QueryVolumeInfo(ctx context.Context,
 	volumeIDList []cnstypes.CnsVolumeId) (*cnstypes.CnsQueryVolumeInfoResult, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalQueryVolumeInfo := func() (*cnstypes.CnsQueryVolumeInfoResult, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1811,6 +1885,8 @@ func (m *defaultManager) QueryVolumeInfo(ctx context.Context,
 
 func (m *defaultManager) RelocateVolume(ctx context.Context,
 	relocateSpecList ...cnstypes.BaseCnsVolumeRelocateSpec) (*object.Task, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalRelocateVolume := func() (*object.Task, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1846,6 +1922,8 @@ func (m *defaultManager) RelocateVolume(ctx context.Context,
 
 // ConfigureVolumeACLs configures net permissions for a given CnsVolumeACLConfigureSpec.
 func (m *defaultManager) ConfigureVolumeACLs(ctx context.Context, spec cnstypes.CnsVolumeACLConfigureSpec) error {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalConfigureVolumeACLs := func() error {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -1982,6 +2060,8 @@ func (m *defaultManager) RetrieveVStorageObject(ctx context.Context,
 // parameters are not specified.
 func (m *defaultManager) QueryVolumeAsync(ctx context.Context, queryFilter cnstypes.CnsQueryFilter,
 	querySelection *cnstypes.CnsQuerySelection) (*cnstypes.CnsQueryResult, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	log := logger.GetLogger(ctx)
 	err := validateManager(ctx, m)
 	if err != nil {
@@ -2046,6 +2126,8 @@ func (m *defaultManager) QueryVolumeAsync(ctx context.Context, queryFilter cnsty
 
 func (m *defaultManager) QuerySnapshots(ctx context.Context, snapshotQueryFilter cnstypes.CnsSnapshotQueryFilter) (
 	*cnstypes.CnsSnapshotQueryResult, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalQuerySnapshots := func() (*cnstypes.CnsSnapshotQueryResult, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -2134,8 +2216,7 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 				}, nil
 			}
 			// Validate if previous operation is pending.
-			if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
-				volumeOperationDetails.OperationDetails.TaskID != "" {
+			if IsTaskPending(volumeOperationDetails) {
 				log.Infof("Snapshot with name %s has CreateSnapshot task %s pending on CNS.",
 					instanceName,
 					volumeOperationDetails.OperationDetails.TaskID)
@@ -2320,6 +2401,8 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 // which is generated by the CSI snapshotter sidecar.
 func (m *defaultManager) CreateSnapshot(
 	ctx context.Context, volumeID string, snapshotName string) (*CnsSnapshotInfo, error) {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalCreateSnapshot := func() (*CnsSnapshotInfo, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -2379,8 +2462,7 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 					return nil
 				}
 				// Validate if previous operation is pending.
-				if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusInProgress &&
-					volumeOperationDetails.OperationDetails.TaskID != "" {
+				if IsTaskPending(volumeOperationDetails) {
 					taskMoRef := vim25types.ManagedObjectReference{
 						Type:  "Task",
 						Value: volumeOperationDetails.OperationDetails.TaskID,
@@ -2544,6 +2626,8 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 }
 
 func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string) error {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
 	internalDeleteSnapshot := func() error {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
@@ -2595,4 +2679,24 @@ func (m *defaultManager) ProtectVolumeFromVMDeletion(ctx context.Context, volume
 	}
 	log.Infof("Successfully set keepAfterDeleteVm control flag for volumeID: %q", volumeID)
 	return nil
+}
+
+func (m *defaultManager) LogoutListViewVCSession(ctx context.Context) error {
+	log := logger.GetLogger(ctx)
+	if m.listViewIf != nil {
+		log.Info("Logging out list view vCenter session")
+		return m.listViewIf.LogoutSession(ctx)
+	}
+	return nil
+}
+
+// GetAllManagerInstances returns all Manager instances
+func GetAllManagerInstances(ctx context.Context) map[string]*defaultManager {
+	newManagerInstanceMap := make(map[string]*defaultManager)
+	if len(managerInstanceMap) != 0 {
+		newManagerInstanceMap = managerInstanceMap
+	} else if managerInstance != nil {
+		newManagerInstanceMap[managerInstance.virtualCenter.Config.Host] = managerInstance
+	}
+	return newManagerInstanceMap
 }

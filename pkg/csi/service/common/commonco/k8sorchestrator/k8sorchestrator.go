@@ -27,7 +27,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
 	v1 "k8s.io/api/core/v1"
@@ -1067,7 +1067,7 @@ func (c *K8sOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) 
 			}
 			if !supervisorFeatureState {
 				// If FSS set to false, return.
-				log.Infof("%s feature state set to false in %s ConfigMap", featureName, c.supervisorFSS.configMapName)
+				log.Infof("%s feature state is set to false in %s ConfigMap", featureName, c.supervisorFSS.configMapName)
 				return supervisorFeatureState
 			}
 		} else {
@@ -1543,4 +1543,9 @@ func (c *K8sOrchestrator) CreateConfigMap(ctx context.Context, name string, name
 	}
 
 	return nil
+}
+
+// GetPVNameFromCSIVolumeID retrieves the pv name from volumeID using volumeIDToNameMap.
+func (c *K8sOrchestrator) GetPVNameFromCSIVolumeID(volumeID string) (string, bool) {
+	return c.volumeIDToNameMap.get(volumeID)
 }

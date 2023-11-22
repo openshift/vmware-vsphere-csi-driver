@@ -116,6 +116,11 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 	ginkgo.AfterEach(func() {
 		if supervisorCluster {
 			deleteResourceQuota(client, namespace)
+			dumpSvcNsEventsOnTestFailure(client, namespace)
+		}
+		if guestCluster {
+			svcClient, svNamespace := getSvcClientAndNamespace()
+			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 		}
 	})
 
@@ -467,10 +472,13 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		ginkgo.By(fmt.Sprintf("Deleting pvc %s in namespace %s", pvc.Name, pvc.Namespace))
 		err = client.CoreV1().PersistentVolumeClaims(namespace).Delete(ctx, pvc.Name, *metav1.NewDeleteOptions(0))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		// Waiting for some time for PVC to be deleted correctly
-		ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow PVC deletion", oneMinuteWaitTimeInSeconds))
-		time.Sleep(time.Duration(oneMinuteWaitTimeInSeconds) * time.Second)
 
+		// Waiting for PVC to be deleted correctly
+		ginkgo.By("Verify if PVC is deleted from namespace")
+		err = waitForPvcToBeDeleted(ctx, client, pvc.Name, pvc.Namespace)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Verify labels are not present in cns")
 		_, err = e2eVSphere.getLabelsForCNSVolume(pv.Spec.CSI.VolumeHandle,
 			string(cnstypes.CnsKubernetesEntityTypePVC), pvc.Name, namespace)
 		gomega.Expect(err).To(gomega.HaveOccurred())
@@ -679,7 +687,7 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		ginkgo.By("Creating statefulset")
 		statefulset := GetStatefulSetFromManifest(namespace)
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Annotations["volume.beta.kubernetes.io/storage-class"] = storageClassName
+			Spec.StorageClassName = &storageClassName
 		CreateStatefulSet(namespace, statefulset, client)
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))

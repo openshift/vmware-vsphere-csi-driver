@@ -243,6 +243,10 @@ spec:
               value: {{ .PVCSINamespace }}
             - name: X_CSI_SERIAL_VOL_ACCESS_TIMEOUT
               value: 3m
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /etc/cloud/pvcsi-provider
               name: pvcsi-provider-volume
@@ -279,6 +283,10 @@ spec:
               value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
             - name: CSI_NAMESPACE
               value: {{ .PVCSINamespace }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
           - mountPath: /etc/cloud/pvcsi-provider
             name: pvcsi-provider-volume
@@ -323,6 +331,24 @@ spec:
             - "--v=4"
             - "--timeout=300s"
             - "--handle-volume-inuse-error=false"  # Set this to true if used in vSphere 7.0U1
+            - "--csi-address=$(ADDRESS)"
+            - "--leader-election"
+            - "--kube-api-qps=100"
+            - "--kube-api-burst=100"
+            - "--leader-election-lease-duration=120s"
+            - "--leader-election-renew-deadline=60s"
+            - "--leader-election-retry-period=30s"
+          env:
+            - name: ADDRESS
+              value: /csi/csi.sock
+          volumeMounts:
+            - mountPath: /csi
+              name: socket-dir
+        - name: csi-snapshotter
+          image: vmware.io/csi-snapshotter/csi-snapshotter:<image_tag>
+          args:
+            - "--v=4"
+            - "--timeout=300s"
             - "--csi-address=$(ADDRESS)"
             - "--leader-election"
             - "--kube-api-qps=100"
@@ -505,7 +531,7 @@ data:
   "online-volume-extend": "true"
   "file-volume": "true"
   "csi-sv-feature-states-replication": "false" # Do not enable for guest cluster, Refer PR#2386 for details
-  "block-volume-snapshot": "false"
+  "block-volume-snapshot": "true"
   "tkgs-ha": "true"
   "cnsmgr-suspend-create-volume": "true"
 kind: ConfigMap

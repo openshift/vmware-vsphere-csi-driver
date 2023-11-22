@@ -28,23 +28,23 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vmware/govmomi/cns"
-	"github.com/vmware/govmomi/property"
-	"github.com/vmware/govmomi/vsan"
-	"github.com/vmware/govmomi/vslm"
-	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
-	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
-
 	"github.com/vmware/govmomi"
+	"github.com/vmware/govmomi/cns"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/pbm"
+	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/sts"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
+	"github.com/vmware/govmomi/vsan"
+	"github.com/vmware/govmomi/vslm"
+
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -141,7 +141,7 @@ type VirtualCenterConfig struct {
 }
 
 // NewClient creates a new govmomi Client instance.
-func (vc *VirtualCenter) NewClient(ctx context.Context) (*govmomi.Client, error) {
+func (vc *VirtualCenter) NewClient(ctx context.Context, useragent string) (*govmomi.Client, error) {
 	log := logger.GetLogger(ctx)
 	if vc.Config.Scheme == "" {
 		vc.Config.Scheme = DefaultScheme
@@ -177,7 +177,7 @@ func (vc *VirtualCenter) NewClient(ctx context.Context) (*govmomi.Client, error)
 		log.Errorf("Failed to set vimClient service version to vsan. err: %v", err)
 		return nil, err
 	}
-	vimClient.UserAgent = "k8s-csi-useragent"
+	vimClient.UserAgent = useragent
 	client := &govmomi.Client{
 		Client:         vimClient,
 		SessionManager: session.NewManager(vimClient),
@@ -185,6 +185,7 @@ func (vc *VirtualCenter) NewClient(ctx context.Context) (*govmomi.Client, error)
 
 	err = vc.login(ctx, client)
 	if err != nil {
+		log.Errorf("failed to login to vc. err: %v", err)
 		return nil, err
 	}
 
@@ -279,9 +280,20 @@ func (vc *VirtualCenter) connect(ctx context.Context, requestNewSession bool) er
 
 	// If client was never initialized, initialize one.
 	var err error
+	useragent, err := config.GetSessionUserAgent(ctx)
+	if err != nil {
+		log.Errorf("failed to get useragent for vCenter session. error: %+v", err)
+		return err
+	}
 	if vc.Client == nil {
+		if vc.Config.ReloadVCConfigForNewClient {
+			err = ReadVCConfigs(ctx, vc)
+			if err != nil {
+				return err
+			}
+		}
 		log.Infof("VirtualCenter.connect() creating new client")
-		if vc.Client, err = vc.NewClient(ctx); err != nil {
+		if vc.Client, err = vc.NewClient(ctx, useragent); err != nil {
 			log.Errorf("failed to create govmomi client with err: %v", err)
 			if !vc.Config.Insecure {
 				log.Errorf("failed to connect to vCenter using CA file: %q", vc.Config.CAFile)
@@ -307,30 +319,12 @@ func (vc *VirtualCenter) connect(ctx context.Context, requestNewSession bool) er
 	// If session has expired, create a new instance.
 	log.Infof("Creating a new client session as the existing one isn't valid or not authenticated")
 	if vc.Config.ReloadVCConfigForNewClient {
-		log.Info("Reloading latest VC config from vSphere Config Secret")
-		cfg, err := config.GetConfig(ctx)
+		err = ReadVCConfigs(ctx, vc)
 		if err != nil {
-			return logger.LogNewErrorf(log, "failed to read config. Error: %+v", err)
-		}
-		var foundVCConfig bool
-		newVcenterConfigs, err := GetVirtualCenterConfigs(ctx, cfg)
-		if err != nil {
-			return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
-		}
-		for _, newvcconfig := range newVcenterConfigs {
-			if newvcconfig.Host == vc.Config.Host {
-				newvcconfig.ReloadVCConfigForNewClient = true
-				vc.Config = newvcconfig
-				log.Infof("Successfully set latest VC config for vcenter: %q", vc.Config.Host)
-				foundVCConfig = true
-				break
-			}
-		}
-		if !foundVCConfig {
-			return logger.LogNewErrorf(log, "failed to get vCenter config for Host: %q", vc.Config.Host)
+			return err
 		}
 	}
-	if vc.Client, err = vc.NewClient(ctx); err != nil {
+	if vc.Client, err = vc.NewClient(ctx, useragent); err != nil {
 		log.Errorf("failed to create govmomi client with err: %v", err)
 		if !vc.Config.Insecure {
 			log.Errorf("failed to connect to vCenter using CA file: %q", vc.Config.CAFile)
@@ -367,6 +361,37 @@ func (vc *VirtualCenter) connect(ctx context.Context, requestNewSession bool) er
 			return err
 		}
 	}
+	return nil
+}
+
+// ReadVCConfigs will ensure we are always reading the latest config
+// before attempting to create a new govmomi client.
+// It works in case of both vanilla (including multi-vc) and wcp
+func ReadVCConfigs(ctx context.Context, vc *VirtualCenter) error {
+	log := logger.GetLogger(ctx)
+	log.Infof("Reloading latest VC config from vSphere Config Secret for vcenter: %q", vc.Config.Host)
+	cfg, err := config.GetConfig(ctx)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to read config. Error: %+v", err)
+	}
+	var foundVCConfig bool
+	newVcenterConfigs, err := GetVirtualCenterConfigs(ctx, cfg)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
+	}
+	for _, newvcconfig := range newVcenterConfigs {
+		if newvcconfig.Host == vc.Config.Host {
+			newvcconfig.ReloadVCConfigForNewClient = true
+			vc.Config = newvcconfig
+			log.Infof("Successfully set latest VC config for vcenter: %q", vc.Config.Host)
+			foundVCConfig = true
+			break
+		}
+	}
+	if !foundVCConfig {
+		return logger.LogNewErrorf(log, "failed to get vCenter config for Host: %q", vc.Config.Host)
+	}
+
 	return nil
 }
 

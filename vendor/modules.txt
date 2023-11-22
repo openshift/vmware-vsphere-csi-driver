@@ -42,12 +42,6 @@ github.com/Microsoft/hcsshim/osversion
 # github.com/NYTimes/gziphandler v1.1.1
 ## explicit; go 1.11
 github.com/NYTimes/gziphandler
-# github.com/PuerkitoBio/purell v1.1.1
-## explicit
-github.com/PuerkitoBio/purell
-# github.com/PuerkitoBio/urlesc v0.0.0-20170810143723-de5bf2ad4578
-## explicit
-github.com/PuerkitoBio/urlesc
 # github.com/agiledragon/gomonkey/v2 v2.3.1
 ## explicit; go 1.14
 github.com/agiledragon/gomonkey/v2
@@ -191,11 +185,12 @@ github.com/go-logr/logr/funcr
 # github.com/go-openapi/jsonpointer v0.19.5
 ## explicit; go 1.13
 github.com/go-openapi/jsonpointer
-# github.com/go-openapi/jsonreference v0.19.5
+# github.com/go-openapi/jsonreference v0.20.0
 ## explicit; go 1.13
 github.com/go-openapi/jsonreference
-# github.com/go-openapi/swag v0.19.14
-## explicit; go 1.11
+github.com/go-openapi/jsonreference/internal
+# github.com/go-openapi/swag v0.22.3
+## explicit; go 1.18
 github.com/go-openapi/swag
 # github.com/go-task/slim-sprig v0.0.0-20210107165309-348f09dbbbc0
 ## explicit; go 1.13
@@ -281,7 +276,7 @@ github.com/google/cadvisor/utils/sysfs
 github.com/google/cadvisor/utils/sysinfo
 github.com/google/cadvisor/version
 github.com/google/cadvisor/watcher
-# github.com/google/gnostic v0.5.7-v3refs
+# github.com/google/gnostic v0.6.9
 ## explicit; go 1.12
 github.com/google/gnostic/compiler
 github.com/google/gnostic/extensions
@@ -352,21 +347,18 @@ github.com/kubernetes-csi/csi-proxy/client/groups/disk/v1
 github.com/kubernetes-csi/csi-proxy/client/groups/filesystem/v1
 github.com/kubernetes-csi/csi-proxy/client/groups/system/v1alpha1
 github.com/kubernetes-csi/csi-proxy/client/groups/volume/v1
-# github.com/kubernetes-csi/external-snapshotter/client/v4 v4.1.0
-## explicit; go 1.15
-github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1
-github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1beta1
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/fake
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/scheme
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/typed/volumesnapshot/v1
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/typed/volumesnapshot/v1/fake
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/typed/volumesnapshot/v1beta1
-github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned/typed/volumesnapshot/v1beta1/fake
+# github.com/kubernetes-csi/external-snapshotter/client/v6 v6.1.0
+## explicit; go 1.18
+github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1
+github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned
+github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned/fake
+github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned/scheme
+github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned/typed/volumesnapshot/v1
+github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned/typed/volumesnapshot/v1/fake
 # github.com/liggitt/tabwriter v0.0.0-20181228230101-89fcab3d43de
 ## explicit
 github.com/liggitt/tabwriter
-# github.com/mailru/easyjson v0.7.6
+# github.com/mailru/easyjson v0.7.7
 ## explicit; go 1.12
 github.com/mailru/easyjson/buffer
 github.com/mailru/easyjson/jlexer
@@ -551,7 +543,7 @@ github.com/vishvananda/netns
 # github.com/vmware-tanzu/vm-operator-api v0.1.4-0.20211202183846-992b48c128ae
 ## explicit; go 1.13
 github.com/vmware-tanzu/vm-operator-api/api/v1alpha1
-# github.com/vmware/govmomi v0.30.0
+# github.com/vmware/govmomi v0.30.4
 ## explicit; go 1.17
 github.com/vmware/govmomi
 github.com/vmware/govmomi/cns
@@ -778,7 +770,6 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-golang.org/x/text/width
 # golang.org/x/time v0.0.0-20220609170525-579cf78fd858
 ## explicit
 golang.org/x/time/rate
@@ -1447,7 +1438,7 @@ k8s.io/klog/v2/internal/clock
 k8s.io/klog/v2/internal/dbg
 k8s.io/klog/v2/internal/serialize
 k8s.io/klog/v2/internal/severity
-# k8s.io/kube-openapi v0.0.0-20220803162953-67bda5d908f1
+# k8s.io/kube-openapi v0.0.0-20220803164354-a70c9af30aea
 ## explicit; go 1.18
 k8s.io/kube-openapi/pkg/builder
 k8s.io/kube-openapi/pkg/builder3

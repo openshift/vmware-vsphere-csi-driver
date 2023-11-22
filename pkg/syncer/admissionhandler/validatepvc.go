@@ -6,7 +6,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapshotv1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,7 +21,7 @@ const (
 )
 
 // validatePVC helps validate AdmissionReview requests for PersistentVolumeClaim.
-func validatePVC(ctx context.Context, ar *admissionv1.AdmissionReview) *admissionv1.AdmissionResponse {
+func validatePVC(ctx context.Context, req *admissionv1.AdmissionRequest) *admissionv1.AdmissionResponse {
 	if !featureGateBlockVolumeSnapshotEnabled {
 		// If CSI block volume snapshot is disabled and webhook is running,
 		// skip validation for PersistentVolumeClaim.
@@ -30,7 +30,7 @@ func validatePVC(ctx context.Context, ar *admissionv1.AdmissionReview) *admissio
 		}
 	}
 
-	if ar.Request.Operation != admissionv1.Update && ar.Request.Operation != admissionv1.Delete {
+	if req.Operation != admissionv1.Update && req.Operation != admissionv1.Delete {
 		// If AdmissionReview request operation is out of expectation,
 		// skip validation for PersistentVolumeClaim.
 		return &admissionv1.AdmissionResponse{
@@ -39,7 +39,6 @@ func validatePVC(ctx context.Context, ar *admissionv1.AdmissionReview) *admissio
 	}
 
 	log := logger.GetLogger(ctx)
-	req := ar.Request
 	var result *metav1.Status
 	allowed := true
 
@@ -49,7 +48,7 @@ func validatePVC(ctx context.Context, ar *admissionv1.AdmissionReview) *admissio
 		log.Debugf("JSON req.OldObject.Raw: %v", string(req.OldObject.Raw))
 		// req.OldObject is null for CREATE and CONNECT operations.
 		if err := json.Unmarshal(req.OldObject.Raw, &oldPVC); err != nil {
-			log.Warnf("error deserializing old pvc: %v. skipping validation.", err)
+			log.Errorf("error deserializing old pvc: %v. skipping validation.", err)
 			return &admissionv1.AdmissionResponse{
 				// skip validation if there is pvc deserialization error
 				Allowed: true,
@@ -71,7 +70,7 @@ func validatePVC(ctx context.Context, ar *admissionv1.AdmissionReview) *admissio
 			log.Debugf("JSON req.Object.Raw: %v", string(req.Object.Raw))
 			// req.Object is null for DELETE operations.
 			if err := json.Unmarshal(req.Object.Raw, &newPVC); err != nil {
-				log.Warnf("error deserializing old pvc: %v. skipping validation.", err)
+				log.Errorf("error deserializing old pvc: %v. skipping validation.", err)
 				return &admissionv1.AdmissionResponse{
 					// skip validation if there is pvc deserialization error
 					Allowed: true,
@@ -152,7 +151,7 @@ func getPVReclaimPolicyForPVC(ctx context.Context, pvc corev1.PersistentVolumeCl
 	pv, err := kubeClient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
 	if err != nil {
 		return result, logger.LogNewErrorf(log, "failed to get PV %v with error: %v. "+
-			"Stopping getting reclaim policy for PVC, %s/%s", err, pvc.Spec.VolumeName, pvc.Namespace, pvc.Name)
+			"Stopping getting reclaim policy for PVC, %s/%s", pvc.Spec.VolumeName, err, pvc.Namespace, pvc.Name)
 	}
 
 	return pv.Spec.PersistentVolumeReclaimPolicy, nil
