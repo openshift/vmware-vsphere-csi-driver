@@ -10,28 +10,51 @@ The Go [OpenTelemetry](https://opentelemetry.io/) implementation.
 
 ## Project Status
 
+<<<<<<< HEAD
 **Warning**: this project is currently in a pre-GA phase. Backwards
 incompatible changes may be introduced in subsequent minor version releases as
 we work to track the evolving OpenTelemetry specification and user feedback.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+| Signal  | Status     | Project |
+| ------- | ---------- | ------- |
+| Traces  | Stable     | N/A     |
+| Metrics | Alpha      | N/A     |
+| Logs    | Frozen [1] | N/A     |
+=======
+| Signal  | Status     |
+|---------|------------|
+| Traces  | Stable     |
+| Metrics | Stable     |
+| Logs    | Design [1] |
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
+<<<<<<< HEAD
 Our progress towards a GA release candidate is tracked in [this project
 board](https://github.com/orgs/open-telemetry/projects/5). This release
 candidate will follow semantic versioning and will be released with a major
 version greater than zero.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+- [1]: The Logs signal development is halted for this project while we develop both Traces and Metrics.
+   No Logs Pull Requests are currently being accepted.
+=======
+- [1]: Currently the logs signal development is in a design phase ([#4696](https://github.com/open-telemetry/opentelemetry-go/issues/4696)).
+   No Logs Pull Requests are currently being accepted.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
-Progress and status specific to this repository is tracked in our local
+Progress and status specific to this repository is tracked in our
 [project boards](https://github.com/open-telemetry/opentelemetry-go/projects)
 and
 [milestones](https://github.com/open-telemetry/opentelemetry-go/milestones).
 
 Project versioning information and stability guarantees can be found in the
-[versioning documentation](./VERSIONING.md).
+[versioning documentation](VERSIONING.md).
 
 ### Compatibility
 
 This project is tested on the following systems.
 
 | OS      | Go Version | Architecture |
+<<<<<<< HEAD
 | ------- | ---------- | ------------ |
 | Ubuntu  | 1.15       | amd64        |
 | Ubuntu  | 1.14       | amd64        |
@@ -43,6 +66,36 @@ This project is tested on the following systems.
 | Windows | 1.14       | amd64        |
 | Windows | 1.15       | 386          |
 | Windows | 1.14       | 386          |
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+| ------- | ---------- | ------------ |
+| Ubuntu  | 1.19       | amd64        |
+| Ubuntu  | 1.18       | amd64        |
+| Ubuntu  | 1.17       | amd64        |
+| Ubuntu  | 1.19       | 386          |
+| Ubuntu  | 1.18       | 386          |
+| Ubuntu  | 1.17       | 386          |
+| MacOS   | 1.19       | amd64        |
+| MacOS   | 1.18       | amd64        |
+| MacOS   | 1.17       | amd64        |
+| Windows | 1.19       | amd64        |
+| Windows | 1.18       | amd64        |
+| Windows | 1.17       | amd64        |
+| Windows | 1.19       | 386          |
+| Windows | 1.18       | 386          |
+| Windows | 1.17       | 386          |
+=======
+|---------|------------|--------------|
+| Ubuntu  | 1.21       | amd64        |
+| Ubuntu  | 1.20       | amd64        |
+| Ubuntu  | 1.21       | 386          |
+| Ubuntu  | 1.20       | 386          |
+| MacOS   | 1.21       | amd64        |
+| MacOS   | 1.20       | amd64        |
+| Windows | 1.21       | amd64        |
+| Windows | 1.20       | amd64        |
+| Windows | 1.21       | 386          |
+| Windows | 1.20       | 386          |
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 While this project should work for other systems, no compatibility guarantees
 are made for those systems currently.
@@ -77,6 +130,7 @@ practical uses of this process.
 Now that your application is instrumented to collect telemetry, it needs an
 export pipeline to send that telemetry to an observability platform.
 
+<<<<<<< HEAD
 You can find officially supported exporters [here](./exporters/) and in the
 companion [contrib
 repository](https://github.com/open-telemetry/opentelemetry-go-contrib/tree/main/exporters/metric).
@@ -86,6 +140,26 @@ OpenTelemetry. These exporters are broken down by
 and
 [metric](https://pkg.go.dev/go.opentelemetry.io/otel/sdk/export/metric?tab=importedby)
 support.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+All officially supported exporters for the OpenTelemetry project are contained in the [exporters directory](./exporters).
+
+| Exporter                              | Metrics | Traces |
+| :-----------------------------------: | :-----: | :----: |
+| [Jaeger](./exporters/jaeger/)         |         | ✓      |
+| [OTLP](./exporters/otlp/)             | ✓       | ✓      |
+| [Prometheus](./exporters/prometheus/) | ✓       |        |
+| [stdout](./exporters/stdout/)         | ✓       | ✓      |
+| [Zipkin](./exporters/zipkin/)         |         | ✓      |
+=======
+All officially supported exporters for the OpenTelemetry project are contained in the [exporters directory](./exporters).
+
+| Exporter                              | Metrics | Traces |
+|---------------------------------------|:-------:|:------:|
+| [OTLP](./exporters/otlp/)             |    ✓    |   ✓    |
+| [Prometheus](./exporters/prometheus/) |    ✓    |        |
+| [stdout](./exporters/stdout/)         |    ✓    |   ✓    |
+| [Zipkin](./exporters/zipkin/)         |         |   ✓    |
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 ## Contributing
 

@@ -21,11 +21,28 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"go.opentelemetry.io/otel/sdk/instrumentation"
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	"go.opentelemetry.io/otel/trace"
+=======
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 type tracer struct {
+<<<<<<< HEAD
 	provider               *TracerProvider
 	instrumentationLibrary instrumentation.Library
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	provider             *TracerProvider
+	instrumentationScope instrumentation.Scope
+=======
+	embedded.Tracer
+
+	provider             *TracerProvider
+	instrumentationScope instrumentation.Scope
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 var _ trace.Tracer = &tracer{}
@@ -46,6 +63,7 @@ func (tr *tracer) Start(ctx context.Context, name string, options ...trace.SpanO
 		}
 	}
 
+<<<<<<< HEAD
 	span := startSpanInternal(ctx, tr, name, config)
 	for _, l := range config.Links {
 		span.addLink(l)
@@ -56,6 +74,15 @@ func (tr *tracer) Start(ctx context.Context, name string, options ...trace.SpanO
 
 	if span.IsRecording() {
 		sps, _ := tr.provider.spanProcessors.Load().(spanProcessorStates)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	s := tr.newSpan(ctx, name, &config)
+	if rw, ok := s.(ReadWriteSpan); ok && s.IsRecording() {
+		sps, _ := tr.provider.spanProcessors.Load().(spanProcessorStates)
+=======
+	s := tr.newSpan(ctx, name, &config)
+	if rw, ok := s.(ReadWriteSpan); ok && s.IsRecording() {
+		sps := tr.provider.getSpanProcessors()
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		for _, sp := range sps {
 			sp.sp.OnStart(ctx, span)
 		}

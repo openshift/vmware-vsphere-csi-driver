@@ -15,13 +15,22 @@
 package otel // import "go.opentelemetry.io/otel"
 
 import (
+<<<<<<< HEAD
 	"log"
 	"os"
 	"sync"
 	"sync/atomic"
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	"log"
+	"os"
+	"sync"
+=======
+	"go.opentelemetry.io/otel/internal/global"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 var (
+<<<<<<< HEAD
 	// globalErrorHandler provides an ErrorHandler that can be used
 	// throughout an OpenTelemetry instrumented project. When a user
 	// specified ErrorHandler is registered (`SetErrorHandler`) all calls to
@@ -36,8 +45,26 @@ var (
 
 	// Comiple time check that loggingErrorHandler implements ErrorHandler.
 	_ ErrorHandler = (*loggingErrorHandler)(nil)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	// globalErrorHandler provides an ErrorHandler that can be used
+	// throughout an OpenTelemetry instrumented project. When a user
+	// specified ErrorHandler is registered (`SetErrorHandler`) all calls to
+	// `Handle` and will be delegated to the registered ErrorHandler.
+	globalErrorHandler = defaultErrorHandler()
+
+	// Compile-time check that delegator implements ErrorHandler.
+	_ ErrorHandler = (*delegator)(nil)
+	// Compile-time check that errLogger implements ErrorHandler.
+	_ ErrorHandler = (*errLogger)(nil)
+=======
+	// Compile-time check global.ErrDelegator implements ErrorHandler.
+	_ ErrorHandler = (*global.ErrDelegator)(nil)
+	// Compile-time check global.ErrLogger implements ErrorHandler.
+	_ ErrorHandler = (*global.ErrLogger)(nil)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
+<<<<<<< HEAD
 // loggingErrorHandler logs all errors to STDERR.
 type loggingErrorHandler struct {
 	delegate atomic.Value
@@ -69,7 +96,68 @@ func (h *loggingErrorHandler) Handle(err error) {
 func GetErrorHandler() ErrorHandler {
 	return globalErrorHandler
 }
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+type delegator struct {
+	lock *sync.RWMutex
+	eh   ErrorHandler
+}
 
+func (d *delegator) Handle(err error) {
+	d.lock.RLock()
+	defer d.lock.RUnlock()
+	d.eh.Handle(err)
+}
+
+// setDelegate sets the ErrorHandler delegate.
+func (d *delegator) setDelegate(eh ErrorHandler) {
+	d.lock.Lock()
+	defer d.lock.Unlock()
+	d.eh = eh
+}
+
+func defaultErrorHandler() *delegator {
+	return &delegator{
+		lock: &sync.RWMutex{},
+		eh:   &errLogger{l: log.New(os.Stderr, "", log.LstdFlags)},
+	}
+}
+
+// errLogger logs errors if no delegate is set, otherwise they are delegated.
+type errLogger struct {
+	l *log.Logger
+}
+
+// Handle logs err if no delegate is set, otherwise it is delegated.
+func (h *errLogger) Handle(err error) {
+	h.l.Print(err)
+}
+
+// GetErrorHandler returns the global ErrorHandler instance.
+//
+// The default ErrorHandler instance returned will log all errors to STDERR
+// until an override ErrorHandler is set with SetErrorHandler. All
+// ErrorHandler returned prior to this will automatically forward errors to
+// the set instance instead of logging.
+//
+// Subsequent calls to SetErrorHandler after the first will not forward errors
+// to the new ErrorHandler for prior returned instances.
+func GetErrorHandler() ErrorHandler {
+	return globalErrorHandler
+}
+=======
+// GetErrorHandler returns the global ErrorHandler instance.
+//
+// The default ErrorHandler instance returned will log all errors to STDERR
+// until an override ErrorHandler is set with SetErrorHandler. All
+// ErrorHandler returned prior to this will automatically forward errors to
+// the set instance instead of logging.
+//
+// Subsequent calls to SetErrorHandler after the first will not forward errors
+// to the new ErrorHandler for prior returned instances.
+func GetErrorHandler() ErrorHandler { return global.GetErrorHandler() }
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+<<<<<<< HEAD
 // SetErrorHandler sets the global ErrorHandler to be h.
 func SetErrorHandler(h ErrorHandler) {
 	delegateErrorHandlerOnce.Do(func() {
@@ -82,8 +170,37 @@ func SetErrorHandler(h ErrorHandler) {
 		}
 	})
 }
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// SetErrorHandler sets the global ErrorHandler to h.
+//
+// The first time this is called all ErrorHandler previously returned from
+// GetErrorHandler will send errors to h instead of the default logging
+// ErrorHandler. Subsequent calls will set the global ErrorHandler, but not
+// delegate errors to h.
+func SetErrorHandler(h ErrorHandler) {
+	globalErrorHandler.setDelegate(h)
+}
+=======
+// SetErrorHandler sets the global ErrorHandler to h.
+//
+// The first time this is called all ErrorHandler previously returned from
+// GetErrorHandler will send errors to h instead of the default logging
+// ErrorHandler. Subsequent calls will set the global ErrorHandler, but not
+// delegate errors to h.
+func SetErrorHandler(h ErrorHandler) { global.SetErrorHandler(h) }
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
+<<<<<<< HEAD
 // Handle is a convience function for ErrorHandler().Handle(err)
 func Handle(err error) {
 	GetErrorHandler().Handle(err)
 }
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// Handle is a convenience function for ErrorHandler().Handle(err).
+func Handle(err error) {
+	GetErrorHandler().Handle(err)
+}
+=======
+// Handle is a convenience function for ErrorHandler().Handle(err).
+func Handle(err error) { global.Handle(err) }
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

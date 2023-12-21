@@ -82,6 +82,32 @@ func (j *JSONPb) marshalNonProtoField(v interface{}) ([]byte, error) {
 
 		if rv.Type().Elem().Implements(protoMessageType) {
 			var buf bytes.Buffer
+			if err := buf.WriteByte('['); err != nil {
+				return nil, err
+			}
+			for i := 0; i < rv.Len(); i++ {
+				if i != 0 {
+					if err := buf.WriteByte(','); err != nil {
+						return nil, err
+					}
+				}
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/marshal_jsonpb.go
+				if err = (*jsonpb.Marshaler)(j).Marshal(&buf, rv.Index(i).Interface().(proto.Message)); err != nil {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
+				if err = j.marshalTo(&buf, rv.Index(i).Interface().(proto.Message)); err != nil {
+					return nil, err
+				}
+			}
+			err = buf.WriteByte(']')
+			if err != nil {
+				return nil, err
+			}
+
+			return buf.Bytes(), nil
+		}
+
+		if rv.Type().Elem().Implements(typeProtoEnum) {
+			var buf bytes.Buffer
 			err := buf.WriteByte('[')
 			if err != nil {
 				return nil, err
@@ -93,12 +119,47 @@ func (j *JSONPb) marshalNonProtoField(v interface{}) ([]byte, error) {
 						return nil, err
 					}
 				}
-				if err = (*jsonpb.Marshaler)(j).Marshal(&buf, rv.Index(i).Interface().(proto.Message)); err != nil {
+				if j.UseEnumNumbers {
+					_, err = buf.WriteString(strconv.FormatInt(rv.Index(i).Int(), 10))
+				} else {
+					_, err = buf.WriteString("\"" + rv.Index(i).Interface().(protoEnum).String() + "\"")
+				}
+				if err != nil {
+=======
+				if err := j.marshalTo(&buf, rv.Index(i).Interface().(proto.Message)); err != nil {
 					return nil, err
 				}
 			}
-			err = buf.WriteByte(']')
-			if err != nil {
+			if err := buf.WriteByte(']'); err != nil {
+				return nil, err
+			}
+
+			return buf.Bytes(), nil
+		}
+
+		if rv.Type().Elem().Implements(typeProtoEnum) {
+			var buf bytes.Buffer
+			if err := buf.WriteByte('['); err != nil {
+				return nil, err
+			}
+			for i := 0; i < rv.Len(); i++ {
+				if i != 0 {
+					if err := buf.WriteByte(','); err != nil {
+						return nil, err
+					}
+				}
+				var err error
+				if j.UseEnumNumbers {
+					_, err = buf.WriteString(strconv.FormatInt(rv.Index(i).Int(), 10))
+				} else {
+					_, err = buf.WriteString("\"" + rv.Index(i).Interface().(protoEnum).String() + "\"")
+				}
+				if err != nil {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
+					return nil, err
+				}
+			}
+			if err := buf.WriteByte(']'); err != nil {
 				return nil, err
 			}
 
@@ -172,8 +233,29 @@ func decodeJSONPb(d *json.Decoder, v interface{}) error {
 	if !ok {
 		return decodeNonProtoField(d, v)
 	}
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/marshal_jsonpb.go
 	unmarshaler := &jsonpb.Unmarshaler{AllowUnknownFields: allowUnknownFields}
 	return unmarshaler.UnmarshalNext(d, p)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
+
+	// Decode into bytes for marshalling
+	var b json.RawMessage
+	err := d.Decode(&b)
+	if err != nil {
+		return err
+	}
+
+	return unmarshaler.Unmarshal([]byte(b), p)
+=======
+
+	// Decode into bytes for marshalling
+	var b json.RawMessage
+	if err := d.Decode(&b); err != nil {
+		return err
+	}
+
+	return unmarshaler.Unmarshal([]byte(b), p)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
 }
 
 func decodeNonProtoField(d *json.Decoder, v interface{}) error {
@@ -186,8 +268,27 @@ func decodeNonProtoField(d *json.Decoder, v interface{}) error {
 			rv.Set(reflect.New(rv.Type().Elem()))
 		}
 		if rv.Type().ConvertibleTo(typeProtoMessage) {
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/marshal_jsonpb.go
 			unmarshaler := &jsonpb.Unmarshaler{AllowUnknownFields: allowUnknownFields}
 			return unmarshaler.UnmarshalNext(d, rv.Interface().(proto.Message))
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
+			// Decode into bytes for marshalling
+			var b json.RawMessage
+			err := d.Decode(&b)
+			if err != nil {
+				return err
+			}
+
+			return unmarshaler.Unmarshal([]byte(b), rv.Interface().(proto.Message))
+=======
+			// Decode into bytes for marshalling
+			var b json.RawMessage
+			if err := d.Decode(&b); err != nil {
+				return err
+			}
+
+			return unmarshaler.Unmarshal([]byte(b), rv.Interface().(proto.Message))
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
 		}
 		rv = rv.Elem()
 	}
@@ -218,6 +319,55 @@ func decodeNonProtoField(d *json.Decoder, v interface{}) error {
 		}
 		return nil
 	}
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/marshal_jsonpb.go
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
+	if rv.Kind() == reflect.Slice {
+		var sl []json.RawMessage
+		if err := d.Decode(&sl); err != nil {
+			return err
+		}
+		if sl != nil {
+			rv.Set(reflect.MakeSlice(rv.Type(), 0, 0))
+		}
+		for _, item := range sl {
+			bv := reflect.New(rv.Type().Elem())
+			if err := unmarshalJSONPb([]byte(item), unmarshaler, bv.Interface()); err != nil {
+				return err
+			}
+			rv.Set(reflect.Append(rv, bv.Elem()))
+		}
+		return nil
+	}
+=======
+	if rv.Kind() == reflect.Slice {
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			var sl []byte
+			if err := d.Decode(&sl); err != nil {
+				return err
+			}
+			if sl != nil {
+				rv.SetBytes(sl)
+			}
+			return nil
+		}
+
+		var sl []json.RawMessage
+		if err := d.Decode(&sl); err != nil {
+			return err
+		}
+		if sl != nil {
+			rv.Set(reflect.MakeSlice(rv.Type(), 0, 0))
+		}
+		for _, item := range sl {
+			bv := reflect.New(rv.Type().Elem())
+			if err := unmarshalJSONPb([]byte(item), unmarshaler, bv.Interface()); err != nil {
+				return err
+			}
+			rv.Set(reflect.Append(rv, bv.Elem()))
+		}
+		return nil
+	}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_jsonpb.go
 	if _, ok := rv.Interface().(protoEnum); ok {
 		var repr interface{}
 		if err := d.Decode(&repr); err != nil {

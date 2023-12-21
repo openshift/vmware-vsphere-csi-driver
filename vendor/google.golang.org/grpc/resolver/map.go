@@ -20,7 +20,7 @@ package resolver
 
 type addressMapEntry struct {
 	addr  Address
-	value interface{}
+	value any
 }
 
 // AddressMap is a map of addresses to arbitrary values taking into account
@@ -54,8 +54,18 @@ func (l addressMapEntryList) find(addr Address) int {
 }
 
 // Get returns the value for the address in the map, if present.
+<<<<<<< HEAD
 func (a *AddressMap) Get(addr Address) (value interface{}, ok bool) {
 	entryList := a.m[addr.Addr]
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+func (a *AddressMap) Get(addr Address) (value interface{}, ok bool) {
+	addrKey := toMapKey(&addr)
+	entryList := a.m[addrKey]
+=======
+func (a *AddressMap) Get(addr Address) (value any, ok bool) {
+	addrKey := toMapKey(&addr)
+	entryList := a.m[addrKey]
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	if entry := entryList.find(addr); entry != -1 {
 		return entryList[entry].value, true
 	}
@@ -63,8 +73,18 @@ func (a *AddressMap) Get(addr Address) (value interface{}, ok bool) {
 }
 
 // Set updates or adds the value to the address in the map.
+<<<<<<< HEAD
 func (a *AddressMap) Set(addr Address, value interface{}) {
 	entryList := a.m[addr.Addr]
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+func (a *AddressMap) Set(addr Address, value interface{}) {
+	addrKey := toMapKey(&addr)
+	entryList := a.m[addrKey]
+=======
+func (a *AddressMap) Set(addr Address, value any) {
+	addrKey := toMapKey(&addr)
+	entryList := a.m[addrKey]
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	if entry := entryList.find(addr); entry != -1 {
 		a.m[addr.Addr][entry].value = value
 		return
@@ -107,3 +127,29 @@ func (a *AddressMap) Keys() []Address {
 	}
 	return ret
 }
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+// Values returns a slice of all current map values.
+func (a *AddressMap) Values() []interface{} {
+	ret := make([]interface{}, 0, a.Len())
+	for _, entryList := range a.m {
+		for _, entry := range entryList {
+			ret = append(ret, entry.value)
+		}
+	}
+	return ret
+}
+=======
+
+// Values returns a slice of all current map values.
+func (a *AddressMap) Values() []any {
+	ret := make([]any, 0, a.Len())
+	for _, entryList := range a.m {
+		for _, entry := range entryList {
+			ret = append(ret, entry.value)
+		}
+	}
+	return ret
+}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

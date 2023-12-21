@@ -2,18 +2,29 @@
 Thumbs.db
 
 .tools/
+venv/
 .idea/
 .vscode/
 *.iml
 *.so
 coverage.*
+go.work
+go.work.sum
 
 gen/
 
+<<<<<<< HEAD
 /example/jaeger/jaeger
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+/example/fib/fib
+/example/fib/traces.txt
+/example/jaeger/jaeger
+=======
+/example/dice/dice
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 /example/namedtracer/namedtracer
+/example/otel-collector/otel-collector
 /example/opencensus/opencensus
 /example/prometheus/prometheus
 /example/prom-collector/prom-collector
 /example/zipkin/zipkin
-/example/otel-collector/otel-collector

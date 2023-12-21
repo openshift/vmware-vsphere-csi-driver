@@ -29,6 +29,15 @@ import (
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/internal"
 	"go.opentelemetry.io/otel/sdk/resource"
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+	"go.opentelemetry.io/otel/trace"
+=======
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 // ReadOnlySpan allows reading information from the data structure underlying a
@@ -70,9 +79,21 @@ type ReadWriteSpan interface {
 	ReadOnlySpan
 }
 
+<<<<<<< HEAD
 // span is an implementation of the OpenTelemetry Span API representing the
 // individual component of a trace.
 type span struct {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// recordingSpan is an implementation of the OpenTelemetry Span API
+// representing the individual component of a trace that is sampled.
+type recordingSpan struct {
+=======
+// recordingSpan is an implementation of the OpenTelemetry Span API
+// representing the individual component of a trace that is sampled.
+type recordingSpan struct {
+	embedded.Span
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	// mu protects the contents of this span.
 	mu sync.Mutex
 
@@ -132,7 +153,17 @@ type span struct {
 	spanLimits SpanLimits
 }
 
+<<<<<<< HEAD
 var _ trace.Span = &span{}
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+var _ ReadWriteSpan = (*recordingSpan)(nil)
+var _ runtimeTracer = (*recordingSpan)(nil)
+=======
+var (
+	_ ReadWriteSpan = (*recordingSpan)(nil)
+	_ runtimeTracer = (*recordingSpan)(nil)
+)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 // SpanContext returns the SpanContext of this span.
 func (s *span) SpanContext() trace.SpanContext {
@@ -162,12 +193,37 @@ func (s *span) SetStatus(code codes.Code, msg string) {
 	if !s.IsRecording() {
 		return
 	}
+<<<<<<< HEAD
 	s.mu.Lock()
 	s.statusCode = code
 	if code == codes.Error {
 		s.statusMessage = msg
 	}
 	s.mu.Unlock()
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+	status := Status{Code: code}
+	if code == codes.Error {
+		status.Description = description
+	}
+
+	s.mu.Lock()
+	s.status = status
+	s.mu.Unlock()
+=======
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.status.Code > code {
+		return
+	}
+
+	status := Status{Code: code}
+	if code == codes.Error {
+		status.Description = description
+	}
+
+	s.status = status
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // SetAttributes sets attributes of this span.
@@ -180,7 +236,290 @@ func (s *span) SetAttributes(attributes ...attribute.KeyValue) {
 	if !s.IsRecording() {
 		return
 	}
+<<<<<<< HEAD
 	s.copyToCappedAttributes(attributes...)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := s.tracer.provider.spanLimits.AttributeCountLimit
+	if limit == 0 {
+		// No attributes allowed.
+		s.droppedAttributes += len(attributes)
+		return
+	}
+
+	// If adding these attributes could exceed the capacity of s perform a
+	// de-duplication and truncation while adding to avoid over allocation.
+	if limit > 0 && len(s.attributes)+len(attributes) > limit {
+		s.addOverCapAttrs(limit, attributes)
+		return
+	}
+
+	// Otherwise, add without deduplication. When attributes are read they
+	// will be deduplicated, optimizing the operation.
+	for _, a := range attributes {
+		if !a.Valid() {
+			// Drop all invalid attributes.
+			s.droppedAttributes++
+			continue
+		}
+		a = truncateAttr(s.tracer.provider.spanLimits.AttributeValueLengthLimit, a)
+		s.attributes = append(s.attributes, a)
+	}
+}
+
+// addOverCapAttrs adds the attributes attrs to the span s while
+// de-duplicating the attributes of s and attrs and dropping attributes that
+// exceed the limit.
+//
+// This method assumes s.mu.Lock is held by the caller.
+//
+// This method should only be called when there is a possibility that adding
+// attrs to s will exceed the limit. Otherwise, attrs should be added to s
+// without checking for duplicates and all retrieval methods of the attributes
+// for s will de-duplicate as needed.
+//
+// This method assumes limit is a value > 0. The argument should be validated
+// by the caller.
+func (s *recordingSpan) addOverCapAttrs(limit int, attrs []attribute.KeyValue) {
+	// In order to not allocate more capacity to s.attributes than needed,
+	// prune and truncate this addition of attributes while adding.
+
+	// Do not set a capacity when creating this map. Benchmark testing has
+	// showed this to only add unused memory allocations in general use.
+	exists := make(map[attribute.Key]int)
+	s.dedupeAttrsFromRecord(&exists)
+
+	// Now that s.attributes is deduplicated, adding unique attributes up to
+	// the capacity of s will not over allocate s.attributes.
+	for _, a := range attrs {
+		if !a.Valid() {
+			// Drop all invalid attributes.
+			s.droppedAttributes++
+			continue
+		}
+
+		if idx, ok := exists[a.Key]; ok {
+			// Perform all updates before dropping, even when at capacity.
+			s.attributes[idx] = a
+			continue
+		}
+
+		if len(s.attributes) >= limit {
+			// Do not just drop all of the remaining attributes, make sure
+			// updates are checked and performed.
+			s.droppedAttributes++
+		} else {
+			a = truncateAttr(s.tracer.provider.spanLimits.AttributeValueLengthLimit, a)
+			s.attributes = append(s.attributes, a)
+			exists[a.Key] = len(s.attributes) - 1
+		}
+	}
+}
+
+// truncateAttr returns a truncated version of attr. Only string and string
+// slice attribute values are truncated. String values are truncated to at
+// most a length of limit. Each string slice value is truncated in this fashion
+// (the slice length itself is unaffected).
+//
+// No truncation is perfromed for a negative limit.
+func truncateAttr(limit int, attr attribute.KeyValue) attribute.KeyValue {
+	if limit < 0 {
+		return attr
+	}
+	switch attr.Value.Type() {
+	case attribute.STRING:
+		if v := attr.Value.AsString(); len(v) > limit {
+			return attr.Key.String(safeTruncate(v, limit))
+		}
+	case attribute.STRINGSLICE:
+		// Do no mutate the original, make a copy.
+		trucated := attr.Key.StringSlice(attr.Value.AsStringSlice())
+		// Do not do this.
+		//
+		//   v := trucated.Value.AsStringSlice()
+		//   cp := make([]string, len(v))
+		//   /* Copy and truncate values to cp ... */
+		//   trucated.Value = attribute.StringSliceValue(cp)
+		//
+		// Copying the []string and then assigning it back as a new value with
+		// attribute.StringSliceValue will copy the data twice. Instead, we
+		// already made a copy above that only this function owns, update the
+		// underlying slice data of our copy.
+		v := trucated.Value.AsStringSlice()
+		for i := range v {
+			if len(v[i]) > limit {
+				v[i] = safeTruncate(v[i], limit)
+			}
+		}
+		return trucated
+	}
+	return attr
+}
+
+// safeTruncate truncates the string and guarantees valid UTF-8 is returned.
+func safeTruncate(input string, limit int) string {
+	if trunc, ok := safeTruncateValidUTF8(input, limit); ok {
+		return trunc
+	}
+	trunc, _ := safeTruncateValidUTF8(strings.ToValidUTF8(input, ""), limit)
+	return trunc
+}
+
+// safeTruncateValidUTF8 returns a copy of the input string safely truncated to
+// limit. The truncation is ensured to occur at the bounds of complete UTF-8
+// characters. If invalid encoding of UTF-8 is encountered, input is returned
+// with false, otherwise, the truncated input will be returned with true.
+func safeTruncateValidUTF8(input string, limit int) (string, bool) {
+	for cnt := 0; cnt <= limit; {
+		r, size := utf8.DecodeRuneInString(input[cnt:])
+		if r == utf8.RuneError {
+			return input, false
+		}
+
+		if cnt+size > limit {
+			return input[:cnt], true
+		}
+		cnt += size
+	}
+	return input, true
+=======
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := s.tracer.provider.spanLimits.AttributeCountLimit
+	if limit == 0 {
+		// No attributes allowed.
+		s.droppedAttributes += len(attributes)
+		return
+	}
+
+	// If adding these attributes could exceed the capacity of s perform a
+	// de-duplication and truncation while adding to avoid over allocation.
+	if limit > 0 && len(s.attributes)+len(attributes) > limit {
+		s.addOverCapAttrs(limit, attributes)
+		return
+	}
+
+	// Otherwise, add without deduplication. When attributes are read they
+	// will be deduplicated, optimizing the operation.
+	for _, a := range attributes {
+		if !a.Valid() {
+			// Drop all invalid attributes.
+			s.droppedAttributes++
+			continue
+		}
+		a = truncateAttr(s.tracer.provider.spanLimits.AttributeValueLengthLimit, a)
+		s.attributes = append(s.attributes, a)
+	}
+}
+
+// addOverCapAttrs adds the attributes attrs to the span s while
+// de-duplicating the attributes of s and attrs and dropping attributes that
+// exceed the limit.
+//
+// This method assumes s.mu.Lock is held by the caller.
+//
+// This method should only be called when there is a possibility that adding
+// attrs to s will exceed the limit. Otherwise, attrs should be added to s
+// without checking for duplicates and all retrieval methods of the attributes
+// for s will de-duplicate as needed.
+//
+// This method assumes limit is a value > 0. The argument should be validated
+// by the caller.
+func (s *recordingSpan) addOverCapAttrs(limit int, attrs []attribute.KeyValue) {
+	// In order to not allocate more capacity to s.attributes than needed,
+	// prune and truncate this addition of attributes while adding.
+
+	// Do not set a capacity when creating this map. Benchmark testing has
+	// showed this to only add unused memory allocations in general use.
+	exists := make(map[attribute.Key]int)
+	s.dedupeAttrsFromRecord(&exists)
+
+	// Now that s.attributes is deduplicated, adding unique attributes up to
+	// the capacity of s will not over allocate s.attributes.
+	for _, a := range attrs {
+		if !a.Valid() {
+			// Drop all invalid attributes.
+			s.droppedAttributes++
+			continue
+		}
+
+		if idx, ok := exists[a.Key]; ok {
+			// Perform all updates before dropping, even when at capacity.
+			s.attributes[idx] = a
+			continue
+		}
+
+		if len(s.attributes) >= limit {
+			// Do not just drop all of the remaining attributes, make sure
+			// updates are checked and performed.
+			s.droppedAttributes++
+		} else {
+			a = truncateAttr(s.tracer.provider.spanLimits.AttributeValueLengthLimit, a)
+			s.attributes = append(s.attributes, a)
+			exists[a.Key] = len(s.attributes) - 1
+		}
+	}
+}
+
+// truncateAttr returns a truncated version of attr. Only string and string
+// slice attribute values are truncated. String values are truncated to at
+// most a length of limit. Each string slice value is truncated in this fashion
+// (the slice length itself is unaffected).
+//
+// No truncation is performed for a negative limit.
+func truncateAttr(limit int, attr attribute.KeyValue) attribute.KeyValue {
+	if limit < 0 {
+		return attr
+	}
+	switch attr.Value.Type() {
+	case attribute.STRING:
+		if v := attr.Value.AsString(); len(v) > limit {
+			return attr.Key.String(safeTruncate(v, limit))
+		}
+	case attribute.STRINGSLICE:
+		v := attr.Value.AsStringSlice()
+		for i := range v {
+			if len(v[i]) > limit {
+				v[i] = safeTruncate(v[i], limit)
+			}
+		}
+		return attr.Key.StringSlice(v)
+	}
+	return attr
+}
+
+// safeTruncate truncates the string and guarantees valid UTF-8 is returned.
+func safeTruncate(input string, limit int) string {
+	if trunc, ok := safeTruncateValidUTF8(input, limit); ok {
+		return trunc
+	}
+	trunc, _ := safeTruncateValidUTF8(strings.ToValidUTF8(input, ""), limit)
+	return trunc
+}
+
+// safeTruncateValidUTF8 returns a copy of the input string safely truncated to
+// limit. The truncation is ensured to occur at the bounds of complete UTF-8
+// characters. If invalid encoding of UTF-8 is encountered, input is returned
+// with false, otherwise, the truncated input will be returned with true.
+func safeTruncateValidUTF8(input string, limit int) (string, bool) {
+	for cnt := 0; cnt <= limit; {
+		r, size := utf8.DecodeRuneInString(input[cnt:])
+		if r == utf8.RuneError {
+			return input, false
+		}
+
+		if cnt+size > limit {
+			return input[:cnt], true
+		}
+		cnt += size
+	}
+	return input, true
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // End ends the span. This method does nothing if the span is already ended or
@@ -214,10 +553,32 @@ func (s *span) End(options ...trace.SpanOption) {
 		s.addEvent(
 			semconv.ExceptionEventName,
 			trace.WithAttributes(
-				semconv.ExceptionTypeKey.String(typeStr(recovered)),
-				semconv.ExceptionMessageKey.String(fmt.Sprint(recovered)),
+				semconv.ExceptionType(typeStr(recovered)),
+				semconv.ExceptionMessage(fmt.Sprint(recovered)),
 			),
+<<<<<<< HEAD
 		)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+		}
+
+		if config.StackTrace() {
+			opts = append(opts, trace.WithAttributes(
+				semconv.ExceptionStacktraceKey.String(recordStackTrace()),
+			))
+		}
+
+		s.addEvent(semconv.ExceptionEventName, opts...)
+=======
+		}
+
+		if config.StackTrace() {
+			opts = append(opts, trace.WithAttributes(
+				semconv.ExceptionStacktrace(recordStackTrace()),
+			))
+		}
+
+		s.addEvent(semconv.ExceptionEventName, opts...)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 
 	if s.executionTracerTaskEnd != nil {
@@ -235,12 +596,31 @@ func (s *span) End(options ...trace.SpanOption) {
 	}
 	s.mu.Unlock()
 
+<<<<<<< HEAD
 	sps, ok := s.tracer.provider.spanProcessors.Load().(spanProcessorStates)
 	mustExportOrProcess := ok && len(sps) > 0
 	if mustExportOrProcess {
 		for _, sp := range sps {
 			sp.sp.OnEnd(s)
 		}
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	if sps, ok := s.tracer.provider.spanProcessors.Load().(spanProcessorStates); ok {
+		if len(sps) == 0 {
+			return
+		}
+		snap := s.snapshot()
+		for _, sp := range sps {
+			sp.sp.OnEnd(snap)
+		}
+=======
+	sps := s.tracer.provider.getSpanProcessors()
+	if len(sps) == 0 {
+		return
+	}
+	snap := s.snapshot()
+	for _, sp := range sps {
+		sp.sp.OnEnd(snap)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 }
 
@@ -254,9 +634,29 @@ func (s *span) RecordError(err error, opts ...trace.EventOption) {
 	}
 
 	opts = append(opts, trace.WithAttributes(
-		semconv.ExceptionTypeKey.String(typeStr(err)),
-		semconv.ExceptionMessageKey.String(err.Error()),
+		semconv.ExceptionType(typeStr(err)),
+		semconv.ExceptionMessage(err.Error()),
 	))
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+	c := trace.NewEventConfig(opts...)
+	if c.StackTrace() {
+		opts = append(opts, trace.WithAttributes(
+			semconv.ExceptionStacktraceKey.String(recordStackTrace()),
+		))
+	}
+
+=======
+
+	c := trace.NewEventConfig(opts...)
+	if c.StackTrace() {
+		opts = append(opts, trace.WithAttributes(
+			semconv.ExceptionStacktrace(recordStackTrace()),
+		))
+	}
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	s.addEvent(semconv.ExceptionEventName, opts...)
 }
 
@@ -572,6 +972,96 @@ func startSpanInternal(ctx context.Context, tr *tracer, name string, o *trace.Sp
 	return span
 }
 
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// nonRecordingSpan is a minimal implementation of the OpenTelemetry Span API
+// that wraps a SpanContext. It performs no operations other than to return
+// the wrapped SpanContext or TracerProvider that created it.
+type nonRecordingSpan struct {
+	// tracer is the SDK tracer that created this span.
+	tracer *tracer
+	sc     trace.SpanContext
+}
+
+var _ trace.Span = nonRecordingSpan{}
+
+// SpanContext returns the wrapped SpanContext.
+func (s nonRecordingSpan) SpanContext() trace.SpanContext { return s.sc }
+
+// IsRecording always returns false.
+func (nonRecordingSpan) IsRecording() bool { return false }
+
+// SetStatus does nothing.
+func (nonRecordingSpan) SetStatus(codes.Code, string) {}
+
+// SetError does nothing.
+func (nonRecordingSpan) SetError(bool) {}
+
+// SetAttributes does nothing.
+func (nonRecordingSpan) SetAttributes(...attribute.KeyValue) {}
+
+// End does nothing.
+func (nonRecordingSpan) End(...trace.SpanEndOption) {}
+
+// RecordError does nothing.
+func (nonRecordingSpan) RecordError(error, ...trace.EventOption) {}
+
+// AddEvent does nothing.
+func (nonRecordingSpan) AddEvent(string, ...trace.EventOption) {}
+
+// SetName does nothing.
+func (nonRecordingSpan) SetName(string) {}
+
+// TracerProvider returns the trace.TracerProvider that provided the Tracer
+// that created this span.
+func (s nonRecordingSpan) TracerProvider() trace.TracerProvider { return s.tracer.provider }
+
+=======
+// nonRecordingSpan is a minimal implementation of the OpenTelemetry Span API
+// that wraps a SpanContext. It performs no operations other than to return
+// the wrapped SpanContext or TracerProvider that created it.
+type nonRecordingSpan struct {
+	embedded.Span
+
+	// tracer is the SDK tracer that created this span.
+	tracer *tracer
+	sc     trace.SpanContext
+}
+
+var _ trace.Span = nonRecordingSpan{}
+
+// SpanContext returns the wrapped SpanContext.
+func (s nonRecordingSpan) SpanContext() trace.SpanContext { return s.sc }
+
+// IsRecording always returns false.
+func (nonRecordingSpan) IsRecording() bool { return false }
+
+// SetStatus does nothing.
+func (nonRecordingSpan) SetStatus(codes.Code, string) {}
+
+// SetError does nothing.
+func (nonRecordingSpan) SetError(bool) {}
+
+// SetAttributes does nothing.
+func (nonRecordingSpan) SetAttributes(...attribute.KeyValue) {}
+
+// End does nothing.
+func (nonRecordingSpan) End(...trace.SpanEndOption) {}
+
+// RecordError does nothing.
+func (nonRecordingSpan) RecordError(error, ...trace.EventOption) {}
+
+// AddEvent does nothing.
+func (nonRecordingSpan) AddEvent(string, ...trace.EventOption) {}
+
+// SetName does nothing.
+func (nonRecordingSpan) SetName(string) {}
+
+// TracerProvider returns the trace.TracerProvider that provided the Tracer
+// that created this span.
+func (s nonRecordingSpan) TracerProvider() trace.TracerProvider { return s.tracer.provider }
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 func isRecording(s SamplingResult) bool {
 	return s.Decision == RecordOnly || s.Decision == RecordAndSample
 }

@@ -25,6 +25,14 @@ import (
 
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	"go.opentelemetry.io/otel/sdk/resource"
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	"go.opentelemetry.io/otel/trace"
+=======
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/embedded"
+	"go.opentelemetry.io/otel/trace/noop"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 const (
@@ -54,13 +62,39 @@ type TracerProviderConfig struct {
 type TracerProviderOption func(*TracerProviderConfig)
 
 type TracerProvider struct {
+	embedded.TracerProvider
+
 	mu             sync.Mutex
+<<<<<<< HEAD
 	namedTracer    map[instrumentation.Library]*tracer
 	spanProcessors atomic.Value
 	sampler        Sampler
 	idGenerator    IDGenerator
 	spanLimits     SpanLimits
 	resource       *resource.Resource
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	namedTracer    map[instrumentation.Scope]*tracer
+	spanProcessors atomic.Value
+
+	// These fields are not protected by the lock mu. They are assumed to be
+	// immutable after creation of the TracerProvider.
+	sampler     Sampler
+	idGenerator IDGenerator
+	spanLimits  SpanLimits
+	resource    *resource.Resource
+=======
+	namedTracer    map[instrumentation.Scope]*tracer
+	spanProcessors atomic.Pointer[spanProcessorStates]
+
+	isShutdown atomic.Bool
+
+	// These fields are not protected by the lock mu. They are assumed to be
+	// immutable after creation of the TracerProvider.
+	sampler     Sampler
+	idGenerator IDGenerator
+	spanLimits  SpanLimits
+	resource    *resource.Resource
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 var _ trace.TracerProvider = &TracerProvider{}
@@ -91,10 +125,21 @@ func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
 		spanLimits:  o.spanLimits,
 		resource:    o.resource,
 	}
+<<<<<<< HEAD
 
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+	global.Info("TracerProvider created", "config", o)
+
+=======
+	global.Info("TracerProvider created", "config", o)
+
+	spss := make(spanProcessorStates, 0, len(o.processors))
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	for _, sp := range o.processors {
-		tp.RegisterSpanProcessor(sp)
+		spss = append(spss, newSpanProcessorState(sp))
 	}
+	tp.spanProcessors.Store(&spss)
 
 	return tp
 }
@@ -107,10 +152,11 @@ func NewTracerProvider(opts ...TracerProviderOption) *TracerProvider {
 //
 // This method is safe to be called concurrently.
 func (p *TracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
+	// This check happens before the mutex is acquired to avoid deadlocking if Tracer() is called from within Shutdown().
+	if p.isShutdown.Load() {
+		return noop.NewTracerProvider().Tracer(name, opts...)
+	}
 	c := trace.NewTracerConfig(opts...)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
 	if name == "" {
 		name = defaultTracerName
 	}
@@ -118,33 +164,112 @@ func (p *TracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.T
 		Name:    name,
 		Version: c.InstrumentationVersion,
 	}
+<<<<<<< HEAD
 	t, ok := p.namedTracer[il]
 	if !ok {
 		t = &tracer{
 			provider:               p,
 			instrumentationLibrary: il,
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	t, ok := p.namedTracer[is]
+	if !ok {
+		t = &tracer{
+			provider:             p,
+			instrumentationScope: is,
+=======
+
+	t, ok := func() (trace.Tracer, bool) {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		// Must check the flag after acquiring the mutex to avoid returning a valid tracer if Shutdown() ran
+		// after the first check above but before we acquired the mutex.
+		if p.isShutdown.Load() {
+			return noop.NewTracerProvider().Tracer(name, opts...), true
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		}
+<<<<<<< HEAD
 		p.namedTracer[il] = t
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+		p.namedTracer[is] = t
+		global.Info("Tracer created", "name", name, "version", c.InstrumentationVersion(), "schemaURL", c.SchemaURL())
+=======
+		t, ok := p.namedTracer[is]
+		if !ok {
+			t = &tracer{
+				provider:             p,
+				instrumentationScope: is,
+			}
+			p.namedTracer[is] = t
+		}
+		return t, ok
+	}()
+	if !ok {
+		// This code is outside the mutex to not hold the lock while calling third party logging code:
+		// - That code may do slow things like I/O, which would prolong the duration the lock is held,
+		//   slowing down all tracing consumers.
+		// - Logging code may be instrumented with tracing and deadlock because it could try
+		//   acquiring the same non-reentrant mutex.
+		global.Info("Tracer created", "name", name, "version", is.Version, "schemaURL", is.SchemaURL)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	return t
 }
 
+<<<<<<< HEAD
 // RegisterSpanProcessor adds the given SpanProcessor to the list of SpanProcessors
 func (p *TracerProvider) RegisterSpanProcessor(s SpanProcessor) {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// RegisterSpanProcessor adds the given SpanProcessor to the list of SpanProcessors.
+func (p *TracerProvider) RegisterSpanProcessor(s SpanProcessor) {
+=======
+// RegisterSpanProcessor adds the given SpanProcessor to the list of SpanProcessors.
+func (p *TracerProvider) RegisterSpanProcessor(sp SpanProcessor) {
+	// This check prevents calls during a shutdown.
+	if p.isShutdown.Load() {
+		return
+	}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	p.mu.Lock()
 	defer p.mu.Unlock()
+<<<<<<< HEAD
 	new := spanProcessorStates{}
 	if old, ok := p.spanProcessors.Load().(spanProcessorStates); ok {
 		new = append(new, old...)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	newSPS := spanProcessorStates{}
+	if old, ok := p.spanProcessors.Load().(spanProcessorStates); ok {
+		newSPS = append(newSPS, old...)
+=======
+	// This check prevents calls after a shutdown.
+	if p.isShutdown.Load() {
+		return
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
+<<<<<<< HEAD
 	newSpanSync := &spanProcessorState{
 		sp:    s,
 		state: &sync.Once{},
 	}
 	new = append(new, newSpanSync)
 	p.spanProcessors.Store(new)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	newSpanSync := &spanProcessorState{
+		sp:    s,
+		state: &sync.Once{},
+	}
+	newSPS = append(newSPS, newSpanSync)
+	p.spanProcessors.Store(newSPS)
+=======
+
+	current := p.getSpanProcessors()
+	newSPS := make(spanProcessorStates, 0, len(current)+1)
+	newSPS = append(newSPS, current...)
+	newSPS = append(newSPS, newSpanProcessorState(sp))
+	p.spanProcessors.Store(&newSPS)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
+<<<<<<< HEAD
 // UnregisterSpanProcessor removes the given SpanProcessor from the list of SpanProcessors
 func (p *TracerProvider) UnregisterSpanProcessor(s SpanProcessor) {
 	p.mu.Lock()
@@ -152,22 +277,47 @@ func (p *TracerProvider) UnregisterSpanProcessor(s SpanProcessor) {
 	spss := spanProcessorStates{}
 	old, ok := p.spanProcessors.Load().(spanProcessorStates)
 	if !ok || len(old) == 0 {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// UnregisterSpanProcessor removes the given SpanProcessor from the list of SpanProcessors.
+func (p *TracerProvider) UnregisterSpanProcessor(s SpanProcessor) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	spss := spanProcessorStates{}
+	old, ok := p.spanProcessors.Load().(spanProcessorStates)
+	if !ok || len(old) == 0 {
+=======
+// UnregisterSpanProcessor removes the given SpanProcessor from the list of SpanProcessors.
+func (p *TracerProvider) UnregisterSpanProcessor(sp SpanProcessor) {
+	// This check prevents calls during a shutdown.
+	if p.isShutdown.Load() {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		return
 	}
-	spss = append(spss, old...)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// This check prevents calls after a shutdown.
+	if p.isShutdown.Load() {
+		return
+	}
+	old := p.getSpanProcessors()
+	if len(old) == 0 {
+		return
+	}
+	spss := make(spanProcessorStates, len(old))
+	copy(spss, old)
 
 	// stop the span processor if it is started and remove it from the list
 	var stopOnce *spanProcessorState
 	var idx int
 	for i, sps := range spss {
-		if sps.sp == s {
+		if sps.sp == sp {
 			stopOnce = sps
 			idx = i
 		}
 	}
 	if stopOnce != nil {
 		stopOnce.state.Do(func() {
-			if err := s.Shutdown(context.Background()); err != nil {
+			if err := sp.Shutdown(context.Background()); err != nil {
 				otel.Handle(err)
 			}
 		})
@@ -178,16 +328,13 @@ func (p *TracerProvider) UnregisterSpanProcessor(s SpanProcessor) {
 	spss[len(spss)-1] = nil
 	spss = spss[:len(spss)-1]
 
-	p.spanProcessors.Store(spss)
+	p.spanProcessors.Store(&spss)
 }
 
 // ForceFlush immediately exports all spans that have not yet been exported for
 // all the registered span processors.
 func (p *TracerProvider) ForceFlush(ctx context.Context) error {
-	spss, ok := p.spanProcessors.Load().(spanProcessorStates)
-	if !ok {
-		return fmt.Errorf("failed to load span processors")
-	}
+	spss := p.getSpanProcessors()
 	if len(spss) == 0 {
 		return nil
 	}
@@ -206,17 +353,34 @@ func (p *TracerProvider) ForceFlush(ctx context.Context) error {
 	return nil
 }
 
-// Shutdown shuts down the span processors in the order they were registered.
+// Shutdown shuts down TracerProvider. All registered span processors are shut down
+// in the order they were registered and any held computational resources are released.
+// After Shutdown is called, all methods are no-ops.
 func (p *TracerProvider) Shutdown(ctx context.Context) error {
-	spss, ok := p.spanProcessors.Load().(spanProcessorStates)
-	if !ok {
-		return fmt.Errorf("failed to load span processors")
+	// This check prevents deadlocks in case of recursive shutdown.
+	if p.isShutdown.Load() {
+		return nil
 	}
+<<<<<<< HEAD
 	if len(spss) == 0 {
 		return nil
 	}
 
 	for _, sps := range spss {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	var retErr error
+	for _, sps := range spss {
+=======
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// This check prevents calls after a shutdown has already been done concurrently.
+	if !p.isShutdown.CompareAndSwap(false, true) { // did toggle?
+		return nil
+	}
+
+	var retErr error
+	for _, sps := range p.getSpanProcessors() {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -231,7 +395,40 @@ func (p *TracerProvider) Shutdown(ctx context.Context) error {
 			return err
 		}
 	}
+<<<<<<< HEAD
 	return nil
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	return retErr
+}
+
+// TracerProviderOption configures a TracerProvider.
+type TracerProviderOption interface {
+	apply(tracerProviderConfig) tracerProviderConfig
+}
+
+type traceProviderOptionFunc func(tracerProviderConfig) tracerProviderConfig
+
+func (fn traceProviderOptionFunc) apply(cfg tracerProviderConfig) tracerProviderConfig {
+	return fn(cfg)
+=======
+	p.spanProcessors.Store(&spanProcessorStates{})
+	return retErr
+}
+
+func (p *TracerProvider) getSpanProcessors() spanProcessorStates {
+	return *(p.spanProcessors.Load())
+}
+
+// TracerProviderOption configures a TracerProvider.
+type TracerProviderOption interface {
+	apply(tracerProviderConfig) tracerProviderConfig
+}
+
+type traceProviderOptionFunc func(tracerProviderConfig) tracerProviderConfig
+
+func (fn traceProviderOptionFunc) apply(cfg tracerProviderConfig) tracerProviderConfig {
+	return fn(cfg)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // WithSyncer registers the exporter with the TracerProvider using a

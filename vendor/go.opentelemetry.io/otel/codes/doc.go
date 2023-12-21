@@ -20,6 +20,6 @@ may be introduced in subsequent minor version releases as we work to track
 the evolving OpenTelemetry specification and user feedback.
 
 It conforms to [the OpenTelemetry
-specification](https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/api.md#statuscanonicalcode).
+specification](https://github.com/open-telemetry/opentelemetry-specification/blob/v1.20.0/specification/trace/api.md#set-status).
 */
 package codes // import "go.opentelemetry.io/otel/codes"

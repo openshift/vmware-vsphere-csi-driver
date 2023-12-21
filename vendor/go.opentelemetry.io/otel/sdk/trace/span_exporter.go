@@ -32,7 +32,7 @@ type SpanExporter interface {
 	// reported to a configured error Handler.
 	ExportSpans(ctx context.Context, ss []*SpanSnapshot) error
 	// Shutdown notifies the exporter of a pending halt to operations. The
-	// exporter is expected to preform any cleanup or synchronization it
+	// exporter is expected to perform any cleanup or synchronization it
 	// requires while honoring all timeouts and cancellations contained in
 	// the passed context.
 	Shutdown(ctx context.Context) error

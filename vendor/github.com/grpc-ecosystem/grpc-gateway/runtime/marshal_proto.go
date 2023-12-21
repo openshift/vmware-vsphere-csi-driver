@@ -1,11 +1,19 @@
 package runtime
 
 import (
-	"io"
-
 	"errors"
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/marshal_proto.go
 	"github.com/golang/protobuf/proto"
 	"io/ioutil"
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_proto.go
+	"io/ioutil"
+
+	"google.golang.org/protobuf/proto"
+=======
+	"io"
+
+	"google.golang.org/protobuf/proto"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/marshal_proto.go
 )
 
 // ProtoMarshaller is a Marshaller which marshals/unmarshals into/from serialize proto bytes
@@ -37,7 +45,7 @@ func (*ProtoMarshaller) Unmarshal(data []byte, value interface{}) error {
 // NewDecoder returns a Decoder which reads proto stream from "reader".
 func (marshaller *ProtoMarshaller) NewDecoder(reader io.Reader) Decoder {
 	return DecoderFunc(func(value interface{}) error {
-		buffer, err := ioutil.ReadAll(reader)
+		buffer, err := io.ReadAll(reader)
 		if err != nil {
 			return err
 		}
@@ -52,8 +60,7 @@ func (marshaller *ProtoMarshaller) NewEncoder(writer io.Writer) Encoder {
 		if err != nil {
 			return err
 		}
-		_, err = writer.Write(buffer)
-		if err != nil {
+		if _, err := writer.Write(buffer); err != nil {
 			return err
 		}
 

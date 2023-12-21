@@ -5,13 +5,74 @@ import (
 	"fmt"
 	"net/http"
 	"net/textproto"
+	"regexp"
 	"strings"
 
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/grpclog"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+	"google.golang.org/protobuf/proto"
 )
+
+// UnescapingMode defines the behavior of ServeMux when unescaping path parameters.
+type UnescapingMode int
+
+const (
+	// UnescapingModeLegacy is the default V2 behavior, which escapes the entire
+	// path string before doing any routing.
+	UnescapingModeLegacy UnescapingMode = iota
+
+	// EscapingTypeExceptReserved unescapes all path parameters except RFC 6570
+	// reserved characters.
+	UnescapingModeAllExceptReserved
+
+	// EscapingTypeExceptSlash unescapes URL path parameters except path
+	// seperators, which will be left as "%2F".
+	UnescapingModeAllExceptSlash
+
+	// URL path parameters will be fully decoded.
+	UnescapingModeAllCharacters
+
+	// UnescapingModeDefault is the default escaping type.
+	// TODO(v3): default this to UnescapingModeAllExceptReserved per grpc-httpjson-transcoding's
+	// reference implementation
+	UnescapingModeDefault = UnescapingModeLegacy
+=======
+	"google.golang.org/protobuf/proto"
+)
+
+// UnescapingMode defines the behavior of ServeMux when unescaping path parameters.
+type UnescapingMode int
+
+const (
+	// UnescapingModeLegacy is the default V2 behavior, which escapes the entire
+	// path string before doing any routing.
+	UnescapingModeLegacy UnescapingMode = iota
+
+	// UnescapingModeAllExceptReserved unescapes all path parameters except RFC 6570
+	// reserved characters.
+	UnescapingModeAllExceptReserved
+
+	// UnescapingModeAllExceptSlash unescapes URL path parameters except path
+	// separators, which will be left as "%2F".
+	UnescapingModeAllExceptSlash
+
+	// UnescapingModeAllCharacters unescapes all URL path parameters.
+	UnescapingModeAllCharacters
+
+	// UnescapingModeDefault is the default escaping type.
+	// TODO(v3): default this to UnescapingModeAllExceptReserved per grpc-httpjson-transcoding's
+	// reference implementation
+	UnescapingModeDefault = UnescapingModeLegacy
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+)
+
+var encodedPathSplitter = regexp.MustCompile("(/|%2F)")
 
 // A HandlerFunc handles a specific pair of path pattern and HTTP method.
 type HandlerFunc func(w http.ResponseWriter, r *http.Request, pathParams map[string]string)
@@ -55,6 +116,26 @@ func WithForwardResponseOption(forwardResponseOption func(context.Context, http.
 	}
 }
 
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+// WithEscapingType sets the escaping type. See the definitions of UnescapingMode
+// for more information.
+func WithUnescapingMode(mode UnescapingMode) ServeMuxOption {
+	return func(serveMux *ServeMux) {
+		serveMux.unescapingMode = mode
+	}
+}
+
+=======
+// WithUnescapingMode sets the escaping type. See the definitions of UnescapingMode
+// for more information.
+func WithUnescapingMode(mode UnescapingMode) ServeMuxOption {
+	return func(serveMux *ServeMux) {
+		serveMux.unescapingMode = mode
+	}
+}
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 // SetQueryParameterParser sets the query parameter parser, used to populate message from query parameters.
 // Configuring this will mean the generated swagger output is no longer correct, and it should be
 // done with careful consideration.
@@ -68,13 +149,14 @@ func SetQueryParameterParser(queryParameterParser QueryParameterParser) ServeMux
 type HeaderMatcherFunc func(string) (string, bool)
 
 // DefaultHeaderMatcher is used to pass http request headers to/from gRPC context. This adds permanent HTTP header
-// keys (as specified by the IANA) to gRPC context with grpcgateway- prefix. HTTP headers that start with
-// 'Grpc-Metadata-' are mapped to gRPC metadata after removing prefix 'Grpc-Metadata-'.
+// keys (as specified by the IANA, e.g: Accept, Cookie, Host) to the gRPC metadata with the grpcgateway- prefix. If you want to know which headers are considered permanent, you can view the isPermanentHTTPHeader function.
+// HTTP headers that start with 'Grpc-Metadata-' are mapped to gRPC metadata after removing the prefix 'Grpc-Metadata-'.
+// Other headers are not added to the gRPC metadata.
 func DefaultHeaderMatcher(key string) (string, bool) {
-	key = textproto.CanonicalMIMEHeaderKey(key)
-	if isPermanentHTTPHeader(key) {
+	switch key = textproto.CanonicalMIMEHeaderKey(key); {
+	case isPermanentHTTPHeader(key):
 		return MetadataPrefix + key, true
-	} else if strings.HasPrefix(key, MetadataHeaderPrefix) {
+	case strings.HasPrefix(key, MetadataHeaderPrefix):
 		return key[len(MetadataHeaderPrefix):], true
 	}
 	return "", false
@@ -85,9 +167,28 @@ func DefaultHeaderMatcher(key string) (string, bool) {
 // This matcher will be called with each header in http.Request. If matcher returns true, that header will be
 // passed to gRPC context. To transform the header before passing to gRPC context, matcher should return modified header.
 func WithIncomingHeaderMatcher(fn HeaderMatcherFunc) ServeMuxOption {
+	for _, header := range fn.matchedMalformedHeaders() {
+		grpclog.Warningf("The configured forwarding filter would allow %q to be sent to the gRPC server, which will likely cause errors. See https://github.com/grpc/grpc-go/pull/4803#issuecomment-986093310 for more information.", header)
+	}
+
 	return func(mux *ServeMux) {
 		mux.incomingHeaderMatcher = fn
 	}
+}
+
+// matchedMalformedHeaders returns the malformed headers that would be forwarded to gRPC server.
+func (fn HeaderMatcherFunc) matchedMalformedHeaders() []string {
+	if fn == nil {
+		return nil
+	}
+	headers := make([]string, 0)
+	for header := range malformedHTTPHeaders {
+		out, accept := fn(header)
+		if accept && isMalformedHTTPHeader(out) {
+			headers = append(headers, out)
+		}
+	}
+	return headers
 }
 
 // WithOutgoingHeaderMatcher returns a ServeMuxOption representing a headerMatcher for outgoing response from gateway.
@@ -129,6 +230,7 @@ func WithDisablePathLengthFallback() ServeMuxOption {
 	}
 }
 
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
 // WithStreamErrorHandler returns a ServeMuxOption that will use the given custom stream
 // error handler, which allows for customizing the error trailer for server-streaming
 // calls.
@@ -152,6 +254,59 @@ func WithLastMatchWins() ServeMuxOption {
 	}
 }
 
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+=======
+// WithHealthEndpointAt returns a ServeMuxOption that will add an endpoint to the created ServeMux at the path specified by endpointPath.
+// When called the handler will forward the request to the upstream grpc service health check (defined in the
+// gRPC Health Checking Protocol).
+//
+// See here https://grpc-ecosystem.github.io/grpc-gateway/docs/operations/health_check/ for more information on how
+// to setup the protocol in the grpc server.
+//
+// If you define a service as query parameter, this will also be forwarded as service in the HealthCheckRequest.
+func WithHealthEndpointAt(healthCheckClient grpc_health_v1.HealthClient, endpointPath string) ServeMuxOption {
+	return func(s *ServeMux) {
+		// error can be ignored since pattern is definitely valid
+		_ = s.HandlePath(
+			http.MethodGet, endpointPath, func(w http.ResponseWriter, r *http.Request, _ map[string]string,
+			) {
+				_, outboundMarshaler := MarshalerForRequest(s, r)
+
+				resp, err := healthCheckClient.Check(r.Context(), &grpc_health_v1.HealthCheckRequest{
+					Service: r.URL.Query().Get("service"),
+				})
+				if err != nil {
+					s.errorHandler(r.Context(), s, outboundMarshaler, w, r, err)
+					return
+				}
+
+				w.Header().Set("Content-Type", "application/json")
+
+				if resp.GetStatus() != grpc_health_v1.HealthCheckResponse_SERVING {
+					switch resp.GetStatus() {
+					case grpc_health_v1.HealthCheckResponse_NOT_SERVING, grpc_health_v1.HealthCheckResponse_UNKNOWN:
+						err = status.Error(codes.Unavailable, resp.String())
+					case grpc_health_v1.HealthCheckResponse_SERVICE_UNKNOWN:
+						err = status.Error(codes.NotFound, resp.String())
+					}
+
+					s.errorHandler(r.Context(), s, outboundMarshaler, w, r, err)
+					return
+				}
+
+				_ = outboundMarshaler.NewEncoder(w).Encode(resp)
+			})
+	}
+}
+
+// WithHealthzEndpoint returns a ServeMuxOption that will add a /healthz endpoint to the created ServeMux.
+//
+// See WithHealthEndpointAt for the general implementation.
+func WithHealthzEndpoint(healthCheckClient grpc_health_v1.HealthClient) ServeMuxOption {
+	return WithHealthEndpointAt(healthCheckClient, "/healthz")
+}
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 // NewServeMux returns a new ServeMux whose internal mapping is empty.
 func NewServeMux(opts ...ServeMuxOption) *ServeMux {
 	serveMux := &ServeMux{
@@ -187,7 +342,7 @@ func (s *ServeMux) Handle(meth string, pat Pattern, h HandlerFunc) {
 	}
 }
 
-// ServeHTTP dispatches the request to the first handler whose pattern matches to r.Method and r.Path.
+// ServeHTTP dispatches the request to the first handler whose pattern matches to r.Method and r.URL.Path.
 func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -203,6 +358,7 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
 	components := strings.Split(path[1:], "/")
 	l := len(components)
 	var verb string
@@ -219,6 +375,21 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		components[l-1], verb = c[:idx], c[idx+1:]
 	}
 
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+	// TODO(v3): remove UnescapingModeLegacy
+	if s.unescapingMode != UnescapingModeLegacy && r.URL.RawPath != "" {
+		path = r.URL.RawPath
+	}
+
+	components := strings.Split(path[1:], "/")
+
+=======
+	// TODO(v3): remove UnescapingModeLegacy
+	if s.unescapingMode != UnescapingModeLegacy && r.URL.RawPath != "" {
+		path = r.URL.RawPath
+	}
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 	if override := r.Header.Get("X-HTTP-Method-Override"); override != "" && s.isPathLengthFallback(r) {
 		r.Method = strings.ToUpper(override)
 		if err := r.ParseForm(); err != nil {
@@ -232,8 +403,89 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+
+	// Verb out here is to memoize for the fallback case below
+	var verb string
+
+=======
+
+	var pathComponents []string
+	// since in UnescapeModeLegacy, the URL will already have been fully unescaped, if we also split on "%2F"
+	// in this escaping mode we would be double unescaping but in UnescapingModeAllCharacters, we still do as the
+	// path is the RawPath (i.e. unescaped). That does mean that the behavior of this function will change its default
+	// behavior when the UnescapingModeDefault gets changed from UnescapingModeLegacy to UnescapingModeAllExceptReserved
+	if s.unescapingMode == UnescapingModeAllCharacters {
+		pathComponents = encodedPathSplitter.Split(path[1:], -1)
+	} else {
+		pathComponents = strings.Split(path[1:], "/")
+	}
+
+	lastPathComponent := pathComponents[len(pathComponents)-1]
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 	for _, h := range s.handlers[r.Method] {
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
 		pathParams, err := h.pat.Match(components, verb)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+		// If the pattern has a verb, explicitly look for a suffix in the last
+		// component that matches a colon plus the verb. This allows us to
+		// handle some cases that otherwise can't be correctly handled by the
+		// former LastIndex case, such as when the verb literal itself contains
+		// a colon. This should work for all cases that have run through the
+		// parser because we know what verb we're looking for, however, there
+		// are still some cases that the parser itself cannot disambiguate. See
+		// the comment there if interested.
+		patVerb := h.pat.Verb()
+		l := len(components)
+		lastComponent := components[l-1]
+		var idx int = -1
+		if patVerb != "" && strings.HasSuffix(lastComponent, ":"+patVerb) {
+			idx = len(lastComponent) - len(patVerb) - 1
+		}
+		if idx == 0 {
+			_, outboundMarshaler := MarshalerForRequest(s, r)
+			s.routingErrorHandler(ctx, s, outboundMarshaler, w, r, http.StatusNotFound)
+			return
+		}
+		if idx > 0 {
+			components[l-1], verb = lastComponent[:idx], lastComponent[idx+1:]
+		}
+
+		pathParams, err := h.pat.MatchAndEscape(components, verb, s.unescapingMode)
+=======
+		// If the pattern has a verb, explicitly look for a suffix in the last
+		// component that matches a colon plus the verb. This allows us to
+		// handle some cases that otherwise can't be correctly handled by the
+		// former LastIndex case, such as when the verb literal itself contains
+		// a colon. This should work for all cases that have run through the
+		// parser because we know what verb we're looking for, however, there
+		// are still some cases that the parser itself cannot disambiguate. See
+		// the comment there if interested.
+
+		var verb string
+		patVerb := h.pat.Verb()
+
+		idx := -1
+		if patVerb != "" && strings.HasSuffix(lastPathComponent, ":"+patVerb) {
+			idx = len(lastPathComponent) - len(patVerb) - 1
+		}
+		if idx == 0 {
+			_, outboundMarshaler := MarshalerForRequest(s, r)
+			s.routingErrorHandler(ctx, s, outboundMarshaler, w, r, http.StatusNotFound)
+			return
+		}
+
+		comps := make([]string, len(pathComponents))
+		copy(comps, pathComponents)
+
+		if idx > 0 {
+			comps[len(comps)-1], verb = lastPathComponent[:idx], lastPathComponent[idx+1:]
+		}
+
+		pathParams, err := h.pat.MatchAndEscape(comps, verb, s.unescapingMode)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 		if err != nil {
 			continue
 		}
@@ -241,19 +493,55 @@ func (s *ServeMux) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
 	// lookup other methods to handle fallback from GET to POST and
 	// to determine if it is MethodNotAllowed or NotFound.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+	// lookup other methods to handle fallback from GET to POST and
+	// to determine if it is NotImplemented or NotFound.
+=======
+	// if no handler has found for the request, lookup for other methods
+	// to handle POST -> GET fallback if the request is subject to path
+	// length fallback.
+	// Note we are not eagerly checking the request here as we want to return the
+	// right HTTP status code, and we need to process the fallback candidates in
+	// order to do that.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 	for m, handlers := range s.handlers {
 		if m == r.Method {
 			continue
 		}
 		for _, h := range handlers {
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/mux.go
 			pathParams, err := h.pat.Match(components, verb)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
+			pathParams, err := h.pat.MatchAndEscape(components, verb, s.unescapingMode)
+=======
+			var verb string
+			patVerb := h.pat.Verb()
+
+			idx := -1
+			if patVerb != "" && strings.HasSuffix(lastPathComponent, ":"+patVerb) {
+				idx = len(lastPathComponent) - len(patVerb) - 1
+			}
+
+			comps := make([]string, len(pathComponents))
+			copy(comps, pathComponents)
+
+			if idx > 0 {
+				comps[len(comps)-1], verb = lastPathComponent[:idx], lastPathComponent[idx+1:]
+			}
+
+			pathParams, err := h.pat.MatchAndEscape(comps, verb, s.unescapingMode)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/mux.go
 			if err != nil {
 				continue
 			}
+
 			// X-HTTP-Method-Override is optional. Always allow fallback to POST.
-			if s.isPathLengthFallback(r) {
+			// Also, only consider POST -> GET fallbacks, and avoid falling back to
+			// potentially dangerous operations like DELETE.
+			if s.isPathLengthFallback(r) && m == http.MethodGet {
 				if err := r.ParseForm(); err != nil {
 					if s.protoErrorHandler != nil {
 						_, outboundMarshaler := MarshalerForRequest(s, r)

@@ -20,18 +20,17 @@ import (
 	"go.opentelemetry.io/contrib"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/metric"
-	"go.opentelemetry.io/otel/metric/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
 
-const (
-	instrumentationName = "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
-)
+// ScopeName is the instrumentation scope name.
+const ScopeName = "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 // config represents the configuration options available for the http.Handler
 // and http.Transport types.
 type config struct {
+	ServerName        string
 	Tracer            trace.Tracer
 	Meter             metric.Meter
 	Propagators       propagation.TextMapPropagator
@@ -61,9 +60,17 @@ func (o OptionFunc) Apply(c *config) {
 // newConfig creates a new config struct and applies opts to it.
 func newConfig(opts ...Option) *config {
 	c := &config{
+<<<<<<< HEAD
 		Propagators:    otel.GetTextMapPropagator(),
 		TracerProvider: otel.GetTracerProvider(),
 		MeterProvider:  global.GetMeterProvider(),
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+		Propagators:   otel.GetTextMapPropagator(),
+		MeterProvider: global.MeterProvider(),
+=======
+		Propagators:   otel.GetTextMapPropagator(),
+		MeterProvider: otel.GetMeterProvider(),
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	for _, opt := range opts {
 		opt.Apply(c)
@@ -74,8 +81,16 @@ func newConfig(opts ...Option) *config {
 		trace.WithInstrumentationVersion(contrib.SemVersion()),
 	)
 	c.Meter = c.MeterProvider.Meter(
+<<<<<<< HEAD
 		instrumentationName,
 		metric.WithInstrumentationVersion(contrib.SemVersion()),
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+		instrumentationName,
+		metric.WithInstrumentationVersion(SemVersion()),
+=======
+		ScopeName,
+		metric.WithInstrumentationVersion(Version()),
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	)
 
 	return c
@@ -171,3 +186,31 @@ func WithSpanNameFormatter(f func(operation string, r *http.Request) string) Opt
 		c.SpanNameFormatter = f
 	})
 }
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+// WithClientTrace takes a function that returns client trace instance that will be
+// applied to the requests sent through the otelhttp Transport.
+func WithClientTrace(f func(context.Context) *httptrace.ClientTrace) Option {
+	return optionFunc(func(c *config) {
+		c.ClientTrace = f
+	})
+}
+=======
+
+// WithClientTrace takes a function that returns client trace instance that will be
+// applied to the requests sent through the otelhttp Transport.
+func WithClientTrace(f func(context.Context) *httptrace.ClientTrace) Option {
+	return optionFunc(func(c *config) {
+		c.ClientTrace = f
+	})
+}
+
+// WithServerName returns an Option that sets the name of the (virtual) server
+// handling requests.
+func WithServerName(server string) Option {
+	return optionFunc(func(c *config) {
+		c.ServerName = server
+	})
+}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

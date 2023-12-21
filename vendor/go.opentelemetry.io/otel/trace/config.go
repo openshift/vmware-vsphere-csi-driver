@@ -22,9 +22,46 @@ import (
 
 // TracerConfig is a group of options for a Tracer.
 type TracerConfig struct {
+<<<<<<< HEAD
 	// InstrumentationVersion is the version of the library providing
 	// instrumentation.
 	InstrumentationVersion string
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	instrumentationVersion string
+	// Schema URL of the telemetry emitted by the Tracer.
+	schemaURL string
+}
+
+// InstrumentationVersion returns the version of the library providing instrumentation.
+func (t *TracerConfig) InstrumentationVersion() string {
+	return t.instrumentationVersion
+}
+
+// SchemaURL returns the Schema URL of the telemetry emitted by the Tracer.
+func (t *TracerConfig) SchemaURL() string {
+	return t.schemaURL
+=======
+	instrumentationVersion string
+	// Schema URL of the telemetry emitted by the Tracer.
+	schemaURL string
+	attrs     attribute.Set
+}
+
+// InstrumentationVersion returns the version of the library providing instrumentation.
+func (t *TracerConfig) InstrumentationVersion() string {
+	return t.instrumentationVersion
+}
+
+// InstrumentationAttributes returns the attributes associated with the library
+// providing instrumentation.
+func (t *TracerConfig) InstrumentationAttributes() attribute.Set {
+	return t.attrs
+}
+
+// SchemaURL returns the Schema URL of the telemetry emitted by the Tracer.
+func (t *TracerConfig) SchemaURL() string {
+	return t.schemaURL
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // NewTracerConfig applies all the options to a returned TracerConfig.
@@ -154,8 +191,83 @@ func WithTimestamp(t time.Time) LifeCycleOption {
 
 type linksSpanOption []Link
 
+<<<<<<< HEAD
 func (o linksSpanOption) ApplySpan(c *SpanConfig) { c.Links = append(c.Links, []Link(o)...) }
 func (linksSpanOption) private()                  {}
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+func (o timestampOption) applySpan(c SpanConfig) SpanConfig {
+	c.timestamp = time.Time(o)
+	return c
+}
+func (o timestampOption) applySpanStart(c SpanConfig) SpanConfig { return o.applySpan(c) }
+func (o timestampOption) applySpanEnd(c SpanConfig) SpanConfig   { return o.applySpan(c) }
+func (o timestampOption) applyEvent(c EventConfig) EventConfig {
+	c.timestamp = time.Time(o)
+	return c
+}
+
+var _ SpanEventOption = timestampOption{}
+
+// WithTimestamp sets the time of a Span or Event life-cycle moment (e.g.
+// started, stopped, errored).
+func WithTimestamp(t time.Time) SpanEventOption {
+	return timestampOption(t)
+}
+
+type stackTraceOption bool
+
+func (o stackTraceOption) applyEvent(c EventConfig) EventConfig {
+	c.stackTrace = bool(o)
+	return c
+}
+func (o stackTraceOption) applySpan(c SpanConfig) SpanConfig {
+	c.stackTrace = bool(o)
+	return c
+}
+func (o stackTraceOption) applySpanEnd(c SpanConfig) SpanConfig { return o.applySpan(c) }
+
+// WithStackTrace sets the flag to capture the error with stack trace (e.g. true, false).
+func WithStackTrace(b bool) SpanEndEventOption {
+	return stackTraceOption(b)
+}
+=======
+func (o timestampOption) applySpan(c SpanConfig) SpanConfig {
+	c.timestamp = time.Time(o)
+	return c
+}
+func (o timestampOption) applySpanStart(c SpanConfig) SpanConfig { return o.applySpan(c) }
+func (o timestampOption) applySpanEnd(c SpanConfig) SpanConfig   { return o.applySpan(c) }
+func (o timestampOption) applyEvent(c EventConfig) EventConfig {
+	c.timestamp = time.Time(o)
+	return c
+}
+
+var _ SpanEventOption = timestampOption{}
+
+// WithTimestamp sets the time of a Span or Event life-cycle moment (e.g.
+// started, stopped, errored).
+func WithTimestamp(t time.Time) SpanEventOption {
+	return timestampOption(t)
+}
+
+type stackTraceOption bool
+
+func (o stackTraceOption) applyEvent(c EventConfig) EventConfig {
+	c.stackTrace = bool(o)
+	return c
+}
+
+func (o stackTraceOption) applySpan(c SpanConfig) SpanConfig {
+	c.stackTrace = bool(o)
+	return c
+}
+func (o stackTraceOption) applySpanEnd(c SpanConfig) SpanConfig { return o.applySpan(c) }
+
+// WithStackTrace sets the flag to capture the error with stack trace (e.g. true, false).
+func WithStackTrace(b bool) SpanEndEventOption {
+	return stackTraceOption(b)
+}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 // WithLinks adds links to a Span. The links are added to the existing Span
 // links, i.e. this does not overwrite.
@@ -196,10 +308,36 @@ func WithInstrumentationVersion(version string) InstrumentationOption {
 	return instrumentationVersionOption(version)
 }
 
+<<<<<<< HEAD
 type instrumentationVersionOption string
 
 func (i instrumentationVersionOption) ApplyTracer(config *TracerConfig) {
 	config.InstrumentationVersion = string(i)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// WithSchemaURL sets the schema URL for the Tracer.
+func WithSchemaURL(schemaURL string) TracerOption {
+	return tracerOptionFunc(func(cfg TracerConfig) TracerConfig {
+		cfg.schemaURL = schemaURL
+		return cfg
+	})
+=======
+// WithInstrumentationAttributes sets the instrumentation attributes.
+//
+// The passed attributes will be de-duplicated.
+func WithInstrumentationAttributes(attr ...attribute.KeyValue) TracerOption {
+	return tracerOptionFunc(func(config TracerConfig) TracerConfig {
+		config.attrs = attribute.NewSet(attr...)
+		return config
+	})
+}
+
+// WithSchemaURL sets the schema URL for the Tracer.
+func WithSchemaURL(schemaURL string) TracerOption {
+	return tracerOptionFunc(func(cfg TracerConfig) TracerConfig {
+		cfg.schemaURL = schemaURL
+		return cfg
+	})
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 func (instrumentationVersionOption) private() {}

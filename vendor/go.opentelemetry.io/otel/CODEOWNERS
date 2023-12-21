@@ -12,6 +12,18 @@
 #  https://help.github.com/en/articles/about-code-owners
 #
 
+<<<<<<< HEAD
 * @jmacd @MrAlias @Aneurysm9 @evantorrie @XSAM @dashpole @paivagustavo
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+* @jmacd @MrAlias @Aneurysm9 @evantorrie @XSAM @dashpole @MadVikingGod @pellared @hanyuancheung @dmathieu
+=======
+* @MrAlias @Aneurysm9 @evantorrie @XSAM @dashpole @MadVikingGod @pellared @hanyuancheung @dmathieu
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
+<<<<<<< HEAD
 CODEOWNERS @MrAlias @Aneurysm9
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+CODEOWNERS @MrAlias @Aneurysm9 @MadVikingGod
+=======
+CODEOWNERS @MrAlias @MadVikingGod @pellared
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

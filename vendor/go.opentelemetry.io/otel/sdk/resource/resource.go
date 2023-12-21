@@ -16,6 +16,15 @@ package resource // import "go.opentelemetry.io/otel/sdk/resource"
 
 import (
 	"context"
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	"errors"
+	"fmt"
+	"sync"
+=======
+	"errors"
+	"sync"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -33,6 +42,7 @@ type Resource struct {
 }
 
 var (
+<<<<<<< HEAD
 	emptyResource Resource
 
 	defaultResource *Resource = func(r *Resource, err error) *Resource {
@@ -41,25 +51,102 @@ var (
 		}
 		return r
 	}(Detect(context.Background(), defaultServiceNameDetector{}, FromEnv{}, TelemetrySDK{}))
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	emptyResource       Resource
+	defaultResource     *Resource
+	defaultResourceOnce sync.Once
+=======
+	defaultResource     *Resource
+	defaultResourceOnce sync.Once
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
+<<<<<<< HEAD
 // NewWithAttributes creates a resource from attrs. If attrs contains
 // duplicate keys, the last value will be used. If attrs contains any invalid
 // items those items will be dropped.
 func NewWithAttributes(attrs ...attribute.KeyValue) *Resource {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+var errMergeConflictSchemaURL = errors.New("cannot merge resource due to conflicting Schema URL")
+
+// New returns a Resource combined from the user-provided detectors.
+func New(ctx context.Context, opts ...Option) (*Resource, error) {
+	cfg := config{}
+	for _, opt := range opts {
+		cfg = opt.apply(cfg)
+	}
+
+	resource, err := Detect(ctx, cfg.detectors...)
+
+	var err2 error
+	resource, err2 = Merge(resource, &Resource{schemaURL: cfg.schemaURL})
+	if err == nil {
+		err = err2
+	} else if err2 != nil {
+		err = fmt.Errorf("detecting resources: %s", []string{err.Error(), err2.Error()})
+	}
+
+	return resource, err
+}
+
+// NewWithAttributes creates a resource from attrs and associates the resource with a
+// schema URL. If attrs contains duplicate keys, the last value will be used. If attrs
+// contains any invalid items those items will be dropped. The attrs are assumed to be
+// in a schema identified by schemaURL.
+func NewWithAttributes(schemaURL string, attrs ...attribute.KeyValue) *Resource {
+	resource := NewSchemaless(attrs...)
+	resource.schemaURL = schemaURL
+	return resource
+}
+
+// NewSchemaless creates a resource from attrs. If attrs contains duplicate keys,
+// the last value will be used. If attrs contains any invalid items those items will
+// be dropped. The resource will not be associated with a schema URL. If the schema
+// of the attrs is known use NewWithAttributes instead.
+func NewSchemaless(attrs ...attribute.KeyValue) *Resource {
+=======
+var errMergeConflictSchemaURL = errors.New("cannot merge resource due to conflicting Schema URL")
+
+// New returns a Resource combined from the user-provided detectors.
+func New(ctx context.Context, opts ...Option) (*Resource, error) {
+	cfg := config{}
+	for _, opt := range opts {
+		cfg = opt.apply(cfg)
+	}
+
+	r := &Resource{schemaURL: cfg.schemaURL}
+	return r, detect(ctx, r, cfg.detectors)
+}
+
+// NewWithAttributes creates a resource from attrs and associates the resource with a
+// schema URL. If attrs contains duplicate keys, the last value will be used. If attrs
+// contains any invalid items those items will be dropped. The attrs are assumed to be
+// in a schema identified by schemaURL.
+func NewWithAttributes(schemaURL string, attrs ...attribute.KeyValue) *Resource {
+	resource := NewSchemaless(attrs...)
+	resource.schemaURL = schemaURL
+	return resource
+}
+
+// NewSchemaless creates a resource from attrs. If attrs contains duplicate keys,
+// the last value will be used. If attrs contains any invalid items those items will
+// be dropped. The resource will not be associated with a schema URL. If the schema
+// of the attrs is known use NewWithAttributes instead.
+func NewSchemaless(attrs ...attribute.KeyValue) *Resource {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	if len(attrs) == 0 {
-		return &emptyResource
+		return &Resource{}
 	}
 
 	// Ensure attributes comply with the specification:
-	// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.0.1/specification/common/common.md#attributes
+	// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.20.0/specification/common/README.md#attribute
 	s, _ := attribute.NewSetWithFiltered(attrs, func(kv attribute.KeyValue) bool {
 		return kv.Valid()
 	})
 
 	// If attrs only contains invalid entries do not allocate a new resource.
 	if s.Len() == 0 {
-		return &emptyResource
+		return &Resource{}
 	}
 
 	return &Resource{s} //nolint
@@ -111,7 +198,23 @@ func (r *Resource) Equal(eq *Resource) bool {
 // If there are common keys between resource a and b, then the value
 // from resource b will overwrite the value from resource a, even
 // if resource b's value is empty.
+<<<<<<< HEAD
 func Merge(a, b *Resource) *Resource {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+//
+// The SchemaURL of the resources will be merged according to the spec rules:
+// https://github.com/open-telemetry/opentelemetry-specification/blob/bad49c714a62da5493f2d1d9bafd7ebe8c8ce7eb/specification/resource/sdk.md#merge
+// If the resources have different non-empty schemaURL an empty resource and an error
+// will be returned.
+func Merge(a, b *Resource) (*Resource, error) {
+=======
+//
+// The SchemaURL of the resources will be merged according to the spec rules:
+// https://github.com/open-telemetry/opentelemetry-specification/blob/v1.20.0/specification/resource/sdk.md#merge
+// If the resources have different non-empty schemaURL an empty resource and an error
+// will be returned.
+func Merge(a, b *Resource) (*Resource, error) {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	if a == nil && b == nil {
 		return Empty()
 	}
@@ -135,12 +238,48 @@ func Merge(a, b *Resource) *Resource {
 // Empty returns an instance of Resource with no attributes.  It is
 // equivalent to a `nil` Resource.
 func Empty() *Resource {
-	return &emptyResource
+	return &Resource{}
 }
 
 // Default returns an instance of Resource with a default
 // "service.name" and OpenTelemetrySDK attributes
 func Default() *Resource {
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	defaultResourceOnce.Do(func() {
+		var err error
+		defaultResource, err = Detect(
+			context.Background(),
+			defaultServiceNameDetector{},
+			fromEnv{},
+			telemetrySDK{},
+		)
+		if err != nil {
+			otel.Handle(err)
+		}
+		// If Detect did not return a valid resource, fall back to emptyResource.
+		if defaultResource == nil {
+			defaultResource = &emptyResource
+		}
+	})
+=======
+	defaultResourceOnce.Do(func() {
+		var err error
+		defaultResource, err = Detect(
+			context.Background(),
+			defaultServiceNameDetector{},
+			fromEnv{},
+			telemetrySDK{},
+		)
+		if err != nil {
+			otel.Handle(err)
+		}
+		// If Detect did not return a valid resource, fall back to emptyResource.
+		if defaultResource == nil {
+			defaultResource = &Resource{}
+		}
+	})
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return defaultResource
 }
 

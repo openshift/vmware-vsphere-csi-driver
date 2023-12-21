@@ -25,6 +25,7 @@ import (
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace/embedded"
 )
 
 const (
@@ -63,8 +64,10 @@ func (e errorConst) Error() string {
 // nolint:golint
 type TraceID [16]byte
 
-var nilTraceID TraceID
-var _ json.Marshaler = nilTraceID
+var (
+	nilTraceID TraceID
+	_          json.Marshaler = nilTraceID
+)
 
 // IsValid checks whether the trace TraceID is valid. A valid trace ID does
 // not consist of zeros only.
@@ -86,8 +89,10 @@ func (t TraceID) String() string {
 // SpanID is a unique identity of a span in a trace.
 type SpanID [8]byte
 
-var nilSpanID SpanID
-var _ json.Marshaler = nilSpanID
+var (
+	nilSpanID SpanID
+	_         json.Marshaler = nilSpanID
+)
 
 // IsValid checks whether the SpanID is valid. A valid SpanID does not consist
 // of zeros only.
@@ -497,11 +502,30 @@ func (sc SpanContext) MarshalJSON() ([]byte, error) {
 // and timed operation of a workflow that is traced. A Tracer is used to
 // create a Span and it is then up to the operation the Span represents to
 // properly end the Span when the operation itself ends.
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+//
+// Warning: methods may be added to this interface in minor releases.
+=======
+//
+// Warning: Methods may be added to this interface in minor releases. See
+// package documentation on API implementation for information on how to set
+// default behavior for unimplemented methods.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 type Span interface {
+<<<<<<< HEAD
 	// Tracer returns the Tracer that created the Span. Tracer MUST NOT be
 	// nil.
 	Tracer() Tracer
 
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+=======
+	// Users of the interface can ignore this. This embedded type is only used
+	// by implementations of this interface. See the "API Implementations"
+	// section of the package documentation for more information.
+	embedded.Span
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	// End completes the Span. The Span is considered complete and ready to be
 	// delivered through the rest of the telemetry pipeline after this method
 	// is called. Therefore, updates to the Span are not allowed after this
@@ -526,9 +550,20 @@ type Span interface {
 	SpanContext() SpanContext
 
 	// SetStatus sets the status of the Span in the form of a code and a
+<<<<<<< HEAD
 	// message. SetStatus overrides the value of previous calls to SetStatus
 	// on the Span.
 	SetStatus(code codes.Code, msg string)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	// description, overriding previous values set. The description is only
+	// included in a status when the code is for an error.
+	SetStatus(code codes.Code, description string)
+=======
+	// description, provided the status hasn't already been set to a higher
+	// value before (OK > Error > Unset). The description is only included in a
+	// status when the code is for an error.
+	SetStatus(code codes.Code, description string)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	// SetName sets the Span name.
 	SetName(name string)
@@ -654,19 +689,117 @@ func (sk SpanKind) String() string {
 }
 
 // Tracer is the creator of Spans.
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+//
+// Warning: methods may be added to this interface in minor releases.
+=======
+//
+// Warning: Methods may be added to this interface in minor releases. See
+// package documentation on API implementation for information on how to set
+// default behavior for unimplemented methods.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 type Tracer interface {
+<<<<<<< HEAD
 	// Start creates a span.
 	Start(ctx context.Context, spanName string, opts ...SpanOption) (context.Context, Span)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	// Start creates a span and a context.Context containing the newly-created span.
+	//
+	// If the context.Context provided in `ctx` contains a Span then the newly-created
+	// Span will be a child of that span, otherwise it will be a root span. This behavior
+	// can be overridden by providing `WithNewRoot()` as a SpanOption, causing the
+	// newly-created Span to be a root span even if `ctx` contains a Span.
+	//
+	// When creating a Span it is recommended to provide all known span attributes using
+	// the `WithAttributes()` SpanOption as samplers will only have access to the
+	// attributes provided when a Span is created.
+	//
+	// Any Span that is created MUST also be ended. This is the responsibility of the user.
+	// Implementations of this API may leak memory or other resources if Spans are not ended.
+	Start(ctx context.Context, spanName string, opts ...SpanStartOption) (context.Context, Span)
+=======
+	// Users of the interface can ignore this. This embedded type is only used
+	// by implementations of this interface. See the "API Implementations"
+	// section of the package documentation for more information.
+	embedded.Tracer
+
+	// Start creates a span and a context.Context containing the newly-created span.
+	//
+	// If the context.Context provided in `ctx` contains a Span then the newly-created
+	// Span will be a child of that span, otherwise it will be a root span. This behavior
+	// can be overridden by providing `WithNewRoot()` as a SpanOption, causing the
+	// newly-created Span to be a root span even if `ctx` contains a Span.
+	//
+	// When creating a Span it is recommended to provide all known span attributes using
+	// the `WithAttributes()` SpanOption as samplers will only have access to the
+	// attributes provided when a Span is created.
+	//
+	// Any Span that is created MUST also be ended. This is the responsibility of the user.
+	// Implementations of this API may leak memory or other resources if Spans are not ended.
+	Start(ctx context.Context, spanName string, opts ...SpanStartOption) (context.Context, Span)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
+<<<<<<< HEAD
 // TracerProvider provides access to instrumentation Tracers.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// TracerProvider provides Tracers that are used by instrumentation code to
+// trace computational workflows.
+//
+// A TracerProvider is the collection destination of all Spans from Tracers it
+// provides, it represents a unique telemetry collection pipeline. How that
+// pipeline is defined, meaning how those Spans are collected, processed, and
+// where they are exported, depends on its implementation. Instrumentation
+// authors do not need to define this implementation, rather just use the
+// provided Tracers to instrument code.
+//
+// Commonly, instrumentation code will accept a TracerProvider implementation
+// at runtime from its users or it can simply use the globally registered one
+// (see https://pkg.go.dev/go.opentelemetry.io/otel#GetTracerProvider).
+//
+// Warning: methods may be added to this interface in minor releases.
+=======
+// TracerProvider provides Tracers that are used by instrumentation code to
+// trace computational workflows.
+//
+// A TracerProvider is the collection destination of all Spans from Tracers it
+// provides, it represents a unique telemetry collection pipeline. How that
+// pipeline is defined, meaning how those Spans are collected, processed, and
+// where they are exported, depends on its implementation. Instrumentation
+// authors do not need to define this implementation, rather just use the
+// provided Tracers to instrument code.
+//
+// Commonly, instrumentation code will accept a TracerProvider implementation
+// at runtime from its users or it can simply use the globally registered one
+// (see https://pkg.go.dev/go.opentelemetry.io/otel#GetTracerProvider).
+//
+// Warning: Methods may be added to this interface in minor releases. See
+// package documentation on API implementation for information on how to set
+// default behavior for unimplemented methods.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 type TracerProvider interface {
+<<<<<<< HEAD
 	// Tracer creates an implementation of the Tracer interface.
 	// The instrumentationName must be the name of the library providing
 	// instrumentation. This name may be the same as the instrumented code
 	// only if that code provides built-in instrumentation. If the
 	// instrumentationName is empty, then a implementation defined default
 	// name will be used instead.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	// Tracer returns a unique Tracer scoped to be used by instrumentation code
+	// to trace computational workflows. The scope and identity of that
+	// instrumentation code is uniquely defined by the name and options passed.
+=======
+	// Users of the interface can ignore this. This embedded type is only used
+	// by implementations of this interface. See the "API Implementations"
+	// section of the package documentation for more information.
+	embedded.TracerProvider
+
+	// Tracer returns a unique Tracer scoped to be used by instrumentation code
+	// to trace computational workflows. The scope and identity of that
+	// instrumentation code is uniquely defined by the name and options passed.
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	//
 	// This method must be concurrency safe.
 	Tracer(instrumentationName string, opts ...TracerOption) Tracer

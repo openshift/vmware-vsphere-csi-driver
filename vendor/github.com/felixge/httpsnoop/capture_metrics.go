@@ -45,9 +45,17 @@ func CaptureMetricsFn(w http.ResponseWriter, fn func(http.ResponseWriter)) Metri
 			WriteHeader: func(next WriteHeaderFunc) WriteHeaderFunc {
 				return func(code int) {
 					next(code)
+<<<<<<< HEAD
 					lock.Lock()
 					defer lock.Unlock()
 					if !headerWritten {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+
+					if !headerWritten {
+=======
+
+					if !(code >= 100 && code <= 199) && !headerWritten {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 						m.Code = code
 						headerWritten = true
 					}

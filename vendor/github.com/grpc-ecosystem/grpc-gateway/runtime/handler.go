@@ -53,11 +53,11 @@ func ForwardResponseStream(ctx context.Context, mux *ServeMux, marshaler Marshal
 			return
 		}
 		if err != nil {
-			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err)
+			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err, delimiter)
 			return
 		}
 		if err := handleForwardResponseOptions(ctx, w, resp, opts); err != nil {
-			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err)
+			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err, delimiter)
 			return
 		}
 
@@ -76,15 +76,15 @@ func ForwardResponseStream(ctx context.Context, mux *ServeMux, marshaler Marshal
 
 		if err != nil {
 			grpclog.Infof("Failed to marshal response chunk: %v", err)
-			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err)
+			handleForwardResponseStreamError(ctx, wroteHeader, marshaler, w, req, mux, err, delimiter)
 			return
 		}
-		if _, err = w.Write(buf); err != nil {
+		if _, err := w.Write(buf); err != nil {
 			grpclog.Infof("Failed to send response chunk: %v", err)
 			return
 		}
 		wroteHeader = true
-		if _, err = w.Write(delimiter); err != nil {
+		if _, err := w.Write(delimiter); err != nil {
 			grpclog.Infof("Failed to send delimiter chunk: %v", err)
 			return
 		}
@@ -180,18 +180,42 @@ func handleForwardResponseOptions(ctx context.Context, w http.ResponseWriter, re
 	return nil
 }
 
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/handler.go
 func handleForwardResponseStreamError(ctx context.Context, wroteHeader bool, marshaler Marshaler, w http.ResponseWriter, req *http.Request, mux *ServeMux, err error) {
 	serr := streamError(ctx, mux.streamErrorHandler, err)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/handler.go
+func handleForwardResponseStreamError(ctx context.Context, wroteHeader bool, marshaler Marshaler, w http.ResponseWriter, req *http.Request, mux *ServeMux, err error) {
+	st := mux.streamErrorHandler(ctx, err)
+	msg := errorChunk(st)
+=======
+func handleForwardResponseStreamError(ctx context.Context, wroteHeader bool, marshaler Marshaler, w http.ResponseWriter, req *http.Request, mux *ServeMux, err error, delimiter []byte) {
+	st := mux.streamErrorHandler(ctx, err)
+	msg := errorChunk(st)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/handler.go
 	if !wroteHeader {
 		w.WriteHeader(int(serr.HttpCode))
 	}
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/handler.go
 	buf, merr := marshaler.Marshal(errorChunk(serr))
 	if merr != nil {
 		grpclog.Infof("Failed to marshal an error: %v", merr)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/handler.go
+	buf, merr := marshaler.Marshal(msg)
+	if merr != nil {
+		grpclog.Infof("Failed to marshal an error: %v", merr)
+=======
+	buf, err := marshaler.Marshal(msg)
+	if err != nil {
+		grpclog.Infof("Failed to marshal an error: %v", err)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/handler.go
 		return
 	}
-	if _, werr := w.Write(buf); werr != nil {
-		grpclog.Infof("Failed to notify error to client: %v", werr)
+	if _, err := w.Write(buf); err != nil {
+		grpclog.Infof("Failed to notify error to client: %v", err)
+		return
+	}
+	if _, err := w.Write(delimiter); err != nil {
+		grpclog.Infof("Failed to send delimiter chunk: %v", err)
 		return
 	}
 }

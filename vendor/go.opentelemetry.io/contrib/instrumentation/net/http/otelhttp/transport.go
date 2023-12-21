@@ -19,8 +19,22 @@ import (
 	"io"
 	"net/http"
 
+<<<<<<< HEAD
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+=======
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp/internal/semconvutil"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/codes"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	"go.opentelemetry.io/otel/propagation"
+<<<<<<< HEAD
 	"go.opentelemetry.io/otel/semconv"
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+=======
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -90,8 +104,8 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 
 	ctx, span := t.tracer.Start(r.Context(), t.spanNameFormatter("", r), opts...)
 
-	r = r.WithContext(ctx)
-	span.SetAttributes(semconv.HTTPClientAttributesFromHTTPRequest(r)...)
+	r = r.Clone(ctx) // According to RoundTripper spec, we shouldn't modify the origin request.
+	span.SetAttributes(semconvutil.HTTPClientRequest(r)...)
 	t.propagators.Inject(ctx, propagation.HeaderCarrier(r.Header))
 
 	res, err := t.rt.RoundTrip(r)
@@ -101,9 +115,19 @@ func (t *Transport) RoundTrip(r *http.Request) (*http.Response, error) {
 		return res, err
 	}
 
+<<<<<<< HEAD
 	span.SetAttributes(semconv.HTTPAttributesFromHTTPStatusCode(res.StatusCode)...)
 	span.SetStatus(semconv.SpanStatusFromHTTPStatusCode(res.StatusCode))
 	res.Body = &wrappedBody{ctx: ctx, span: span, body: res.Body}
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	span.SetAttributes(semconv.HTTPAttributesFromHTTPStatusCode(res.StatusCode)...)
+	span.SetStatus(semconv.SpanStatusFromHTTPStatusCode(res.StatusCode))
+	res.Body = newWrappedBody(span, res.Body)
+=======
+	span.SetAttributes(semconvutil.HTTPClientResponse(res)...)
+	span.SetStatus(semconvutil.HTTPClientStatus(res.StatusCode))
+	res.Body = newWrappedBody(span, res.Body)
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	return res, err
 }

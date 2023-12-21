@@ -37,7 +37,7 @@ func BoolSlice(val, sep string) ([]bool, error) {
 	for i, v := range s {
 		value, err := Bool(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -57,7 +57,7 @@ func Float64Slice(val, sep string) ([]float64, error) {
 	for i, v := range s {
 		value, err := Float64(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -81,7 +81,7 @@ func Float32Slice(val, sep string) ([]float32, error) {
 	for i, v := range s {
 		value, err := Float32(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -101,7 +101,7 @@ func Int64Slice(val, sep string) ([]int64, error) {
 	for i, v := range s {
 		value, err := Int64(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -125,7 +125,7 @@ func Int32Slice(val, sep string) ([]int32, error) {
 	for i, v := range s {
 		value, err := Int32(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -145,7 +145,7 @@ func Uint64Slice(val, sep string) ([]uint64, error) {
 	for i, v := range s {
 		value, err := Uint64(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -169,7 +169,7 @@ func Uint32Slice(val, sep string) ([]uint32, error) {
 	for i, v := range s {
 		value, err := Uint32(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -197,7 +197,7 @@ func BytesSlice(val, sep string) ([][]byte, error) {
 	for i, v := range s {
 		value, err := Bytes(v)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
@@ -205,20 +205,50 @@ func BytesSlice(val, sep string) ([][]byte, error) {
 }
 
 // Timestamp converts the given RFC3339 formatted string into a timestamp.Timestamp.
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 func Timestamp(val string) (*timestamp.Timestamp, error) {
 	var r timestamp.Timestamp
 	err := jsonpb.UnmarshalString(val, &r)
 	if err != nil {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+func Timestamp(val string) (*timestamppb.Timestamp, error) {
+	var r timestamppb.Timestamp
+	val = strconv.Quote(strings.Trim(val, `"`))
+	unmarshaler := &protojson.UnmarshalOptions{}
+	err := unmarshaler.Unmarshal([]byte(val), &r)
+	if err != nil {
+=======
+func Timestamp(val string) (*timestamppb.Timestamp, error) {
+	var r timestamppb.Timestamp
+	val = strconv.Quote(strings.Trim(val, `"`))
+	unmarshaler := &protojson.UnmarshalOptions{}
+	if err := unmarshaler.Unmarshal([]byte(val), &r); err != nil {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 		return nil, err
 	}
 	return &r, nil
 }
 
 // Duration converts the given string into a timestamp.Duration.
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 func Duration(val string) (*duration.Duration, error) {
 	var r duration.Duration
 	err := jsonpb.UnmarshalString(val, &r)
 	if err != nil {
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+func Duration(val string) (*durationpb.Duration, error) {
+	var r durationpb.Duration
+	val = strconv.Quote(strings.Trim(val, `"`))
+	unmarshaler := &protojson.UnmarshalOptions{}
+	err := unmarshaler.Unmarshal([]byte(val), &r)
+	if err != nil {
+=======
+func Duration(val string) (*durationpb.Duration, error) {
+	var r durationpb.Duration
+	val = strconv.Quote(strings.Trim(val, `"`))
+	unmarshaler := &protojson.UnmarshalOptions{}
+	if err := unmarshaler.Unmarshal([]byte(val), &r); err != nil {
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 		return nil, err
 	}
 	return &r, nil
@@ -253,66 +283,120 @@ func EnumSlice(val, sep string, enumValMap map[string]int32) ([]int32, error) {
 	for i, v := range s {
 		value, err := Enum(v, enumValMap)
 		if err != nil {
-			return values, err
+			return nil, err
 		}
 		values[i] = value
 	}
 	return values, nil
 }
 
-/*
-	Support fot google.protobuf.wrappers on top of primitive types
-*/
+// Support for google.protobuf.wrappers on top of primitive types
 
 // StringValue well-known type support as wrapper around string type
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 func StringValue(val string) (*wrappers.StringValue, error) {
 	return &wrappers.StringValue{Value: val}, nil
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+func StringValue(val string) (*wrapperspb.StringValue, error) {
+	return &wrapperspb.StringValue{Value: val}, nil
+=======
+func StringValue(val string) (*wrapperspb.StringValue, error) {
+	return wrapperspb.String(val), nil
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // FloatValue well-known type support as wrapper around float32 type
 func FloatValue(val string) (*wrappers.FloatValue, error) {
 	parsedVal, err := Float32(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.FloatValue{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.FloatValue{Value: parsedVal}, err
+=======
+	return wrapperspb.Float(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // DoubleValue well-known type support as wrapper around float64 type
 func DoubleValue(val string) (*wrappers.DoubleValue, error) {
 	parsedVal, err := Float64(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.DoubleValue{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.DoubleValue{Value: parsedVal}, err
+=======
+	return wrapperspb.Double(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // BoolValue well-known type support as wrapper around bool type
 func BoolValue(val string) (*wrappers.BoolValue, error) {
 	parsedVal, err := Bool(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.BoolValue{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.BoolValue{Value: parsedVal}, err
+=======
+	return wrapperspb.Bool(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // Int32Value well-known type support as wrapper around int32 type
 func Int32Value(val string) (*wrappers.Int32Value, error) {
 	parsedVal, err := Int32(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.Int32Value{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.Int32Value{Value: parsedVal}, err
+=======
+	return wrapperspb.Int32(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // UInt32Value well-known type support as wrapper around uint32 type
 func UInt32Value(val string) (*wrappers.UInt32Value, error) {
 	parsedVal, err := Uint32(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.UInt32Value{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.UInt32Value{Value: parsedVal}, err
+=======
+	return wrapperspb.UInt32(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // Int64Value well-known type support as wrapper around int64 type
 func Int64Value(val string) (*wrappers.Int64Value, error) {
 	parsedVal, err := Int64(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.Int64Value{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.Int64Value{Value: parsedVal}, err
+=======
+	return wrapperspb.Int64(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // UInt64Value well-known type support as wrapper around uint64 type
 func UInt64Value(val string) (*wrappers.UInt64Value, error) {
 	parsedVal, err := Uint64(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.UInt64Value{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.UInt64Value{Value: parsedVal}, err
+=======
+	return wrapperspb.UInt64(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }
 
 // BytesValue well-known type support as wrapper around bytes[] type
 func BytesValue(val string) (*wrappers.BytesValue, error) {
 	parsedVal, err := Bytes(val)
+<<<<<<< HEAD:vendor/github.com/grpc-ecosystem/grpc-gateway/runtime/convert.go
 	return &wrappers.BytesValue{Value: parsedVal}, err
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
+	return &wrapperspb.BytesValue{Value: parsedVal}, err
+=======
+	return wrapperspb.Bytes(parsedVal), err
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/github.com/grpc-ecosystem/grpc-gateway/v2/runtime/convert.go
 }

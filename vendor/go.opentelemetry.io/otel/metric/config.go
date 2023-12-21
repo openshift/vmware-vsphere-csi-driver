@@ -14,6 +14,7 @@
 
 package metric // import "go.opentelemetry.io/otel/metric"
 
+<<<<<<< HEAD
 import (
 	"go.opentelemetry.io/otel/unit"
 )
@@ -82,11 +83,55 @@ func (i instrumentationNameOption) ApplyInstrument(config *InstrumentConfig) {
 	config.InstrumentationName = string(i)
 }
 
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+=======
+import "go.opentelemetry.io/otel/attribute"
+
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 // MeterConfig contains options for Meters.
 type MeterConfig struct {
+<<<<<<< HEAD
 	// InstrumentationVersion is the version of the library providing
 	// instrumentation.
 	InstrumentationVersion string
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	instrumentationVersion string
+	schemaURL              string
+}
+
+// InstrumentationVersion is the version of the library providing instrumentation.
+func (cfg MeterConfig) InstrumentationVersion() string {
+	return cfg.instrumentationVersion
+}
+
+// SchemaURL is the schema_url of the library providing instrumentation.
+func (cfg MeterConfig) SchemaURL() string {
+	return cfg.schemaURL
+=======
+	instrumentationVersion string
+	schemaURL              string
+	attrs                  attribute.Set
+
+	// Ensure forward compatibility by explicitly making this not comparable.
+	noCmp [0]func() //nolint: unused  // This is indeed used.
+}
+
+// InstrumentationVersion returns the version of the library providing
+// instrumentation.
+func (cfg MeterConfig) InstrumentationVersion() string {
+	return cfg.instrumentationVersion
+}
+
+// InstrumentationAttributes returns the attributes associated with the library
+// providing instrumentation.
+func (cfg MeterConfig) InstrumentationAttributes() attribute.Set {
+	return cfg.attrs
+}
+
+// SchemaURL is the schema_url of the library providing instrumentation.
+func (cfg MeterConfig) SchemaURL() string {
+	return cfg.schemaURL
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // MeterOption is an interface for applying Meter options.
@@ -117,6 +162,7 @@ func WithInstrumentationVersion(version string) InstrumentationOption {
 	return instrumentationVersionOption(version)
 }
 
+<<<<<<< HEAD
 type instrumentationVersionOption string
 
 func (i instrumentationVersionOption) ApplyMeter(config *MeterConfig) {
@@ -125,4 +171,29 @@ func (i instrumentationVersionOption) ApplyMeter(config *MeterConfig) {
 
 func (i instrumentationVersionOption) ApplyInstrument(config *InstrumentConfig) {
 	config.InstrumentationVersion = string(i)
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+// WithSchemaURL sets the schema URL.
+func WithSchemaURL(schemaURL string) MeterOption {
+	return meterOptionFunc(func(config MeterConfig) MeterConfig {
+		config.schemaURL = schemaURL
+		return config
+	})
+=======
+// WithInstrumentationAttributes sets the instrumentation attributes.
+//
+// The passed attributes will be de-duplicated.
+func WithInstrumentationAttributes(attr ...attribute.KeyValue) MeterOption {
+	return meterOptionFunc(func(config MeterConfig) MeterConfig {
+		config.attrs = attribute.NewSet(attr...)
+		return config
+	})
+}
+
+// WithSchemaURL sets the schema URL.
+func WithSchemaURL(schemaURL string) MeterOption {
+	return meterOptionFunc(func(config MeterConfig) MeterConfig {
+		config.schemaURL = schemaURL
+		return config
+	})
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }

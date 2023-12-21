@@ -48,6 +48,7 @@ type (
 		iface interface{}
 	}
 
+<<<<<<< HEAD
 	// Filter supports removing certain labels from label sets.
 	// When the filter returns true, the label will be kept in
 	// the filtered label set.  When the filter returns false, the
@@ -61,6 +62,24 @@ type (
 	// for the call to `sort.Stable()`, which the caller may
 	// provide in order to avoid an allocation.  See
 	// `NewSetWithSortable()`.
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	// Filter supports removing certain attributes from attribute sets. When
+	// the filter returns true, the attribute will be kept in the filtered
+	// attribute set. When the filter returns false, the attribute is excluded
+	// from the filtered attribute set, and the attribute instead appears in
+	// the removed list of excluded attributes.
+	Filter func(KeyValue) bool
+
+	// Sortable implements sort.Interface, used for sorting KeyValue. This is
+	// an exported type to support a memory optimization. A pointer to one of
+	// these is needed for the call to sort.Stable(), which the caller may
+	// provide in order to avoid an allocation. See NewSetWithSortable().
+=======
+	// Sortable implements sort.Interface, used for sorting KeyValue. This is
+	// an exported type to support a memory optimization. A pointer to one of
+	// these is needed for the call to sort.Stable(), which the caller may
+	// provide in order to avoid an allocation. See NewSetWithSortable().
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	Sortable []KeyValue
 )
 
@@ -73,6 +92,12 @@ var (
 		equivalent: Distinct{
 			iface: [0]KeyValue{},
 		},
+	}
+
+	// sortables is a pool of Sortables used to create Sets with a user does
+	// not provide one.
+	sortables = sync.Pool{
+		New: func() interface{} { return new(Sortable) },
 	}
 )
 
@@ -105,7 +130,7 @@ func (l *Set) Len() int {
 
 // Get returns the KeyValue at ordered position `idx` in this set.
 func (l *Set) Get(idx int) (KeyValue, bool) {
-	if l == nil {
+	if l == nil || !l.equivalent.Valid() {
 		return KeyValue{}, false
 	}
 	value := l.equivalent.reflect()
@@ -121,7 +146,7 @@ func (l *Set) Get(idx int) (KeyValue, bool) {
 
 // Value returns the value of a specified key in this set.
 func (l *Set) Value(k Key) (Value, bool) {
-	if l == nil {
+	if l == nil || !l.equivalent.Valid() {
 		return Value{}, false
 	}
 	rValue := l.equivalent.reflect()
@@ -245,8 +270,18 @@ func NewSet(kvs ...KeyValue) Set {
 	if len(kvs) == 0 {
 		return empty()
 	}
+<<<<<<< HEAD
 	s, _ := NewSetWithSortableFiltered(kvs, new(Sortable), nil)
 	return s //nolint
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	s, _ := NewSetWithSortableFiltered(kvs, new(Sortable), nil)
+	return s
+=======
+	srt := sortables.Get().(*Sortable)
+	s, _ := NewSetWithSortableFiltered(kvs, srt, nil)
+	sortables.Put(srt)
+	return s
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // NewSetWithSortable returns a new `Set`.  See the documentation for
@@ -273,7 +308,10 @@ func NewSetWithFiltered(kvs []KeyValue, filter Filter) (Set, []KeyValue) {
 	if len(kvs) == 0 {
 		return empty(), nil
 	}
-	return NewSetWithSortableFiltered(kvs, new(Sortable), filter)
+	srt := sortables.Get().(*Sortable)
+	s, filtered := NewSetWithSortableFiltered(kvs, srt, filter)
+	sortables.Put(srt)
+	return s, filtered
 }
 
 // NewSetWithSortableFiltered returns a new `Set`.

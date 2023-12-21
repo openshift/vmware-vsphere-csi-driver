@@ -20,9 +20,15 @@ import (
 	"os"
 	"path/filepath"
 
-	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+<<<<<<< HEAD
 	"go.opentelemetry.io/otel/semconv"
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
+=======
+	"go.opentelemetry.io/otel/sdk"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 type (
@@ -58,9 +64,21 @@ var (
 // Detect returns a *Resource that describes the OpenTelemetry SDK used.
 func (TelemetrySDK) Detect(context.Context) (*Resource, error) {
 	return NewWithAttributes(
+<<<<<<< HEAD
 		semconv.TelemetrySDKNameKey.String("opentelemetry"),
 		semconv.TelemetrySDKLanguageKey.String("go"),
 		semconv.TelemetrySDKVersionKey.String(otel.Version()),
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+		semconv.SchemaURL,
+		semconv.TelemetrySDKNameKey.String("opentelemetry"),
+		semconv.TelemetrySDKLanguageKey.String("go"),
+		semconv.TelemetrySDKVersionKey.String(otel.Version()),
+=======
+		semconv.SchemaURL,
+		semconv.TelemetrySDKName("opentelemetry"),
+		semconv.TelemetrySDKLanguageGo,
+		semconv.TelemetrySDKVersion(sdk.Version()),
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	), nil
 }
 

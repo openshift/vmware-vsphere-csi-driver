@@ -18,11 +18,19 @@ package contrib // import "go.opentelemetry.io/contrib"
 
 // Version is the current release version of OpenTelemetry Contrib in use.
 func Version() string {
+<<<<<<< HEAD:vendor/go.opentelemetry.io/contrib/contrib.go
 	return "0.20.0"
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp/version.go
+	return "0.35.1"
+=======
+	return "0.46.1"
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp/version.go
 	// This string is updated by the pre_release.sh script during release
 }
 
 // SemVersion is the semantic version to be supplied to tracer/meter creation.
+//
+// Deprecated: Use [Version] instead.
 func SemVersion() string {
-	return "semver:" + Version()
+	return Version()
 }

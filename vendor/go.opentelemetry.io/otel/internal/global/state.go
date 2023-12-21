@@ -35,16 +35,30 @@ type (
 	propagatorsHolder struct {
 		tm propagation.TextMapPropagator
 	}
+
+	meterProviderHolder struct {
+		mp metric.MeterProvider
+	}
 )
 
 var (
+<<<<<<< HEAD
 	globalTracer      = defaultTracerValue()
 	globalMeter       = defaultMeterValue()
 	globalPropagators = defaultPropagatorsValue()
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+	globalTracer      = defaultTracerValue()
+	globalPropagators = defaultPropagatorsValue()
+=======
+	globalTracer        = defaultTracerValue()
+	globalPropagators   = defaultPropagatorsValue()
+	globalMeterProvider = defaultMeterProvider()
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	delegateMeterOnce             sync.Once
 	delegateTraceOnce             sync.Once
 	delegateTextMapPropagatorOnce sync.Once
+	delegateMeterOnce             sync.Once
 )
 
 // TracerProvider is the internal implementation for global.TracerProvider.
@@ -114,6 +128,34 @@ func SetTextMapPropagator(p propagation.TextMapPropagator) {
 	globalPropagators.Store(propagatorsHolder{tm: p})
 }
 
+// MeterProvider is the internal implementation for global.MeterProvider.
+func MeterProvider() metric.MeterProvider {
+	return globalMeterProvider.Load().(meterProviderHolder).mp
+}
+
+// SetMeterProvider is the internal implementation for global.SetMeterProvider.
+func SetMeterProvider(mp metric.MeterProvider) {
+	current := MeterProvider()
+	if _, cOk := current.(*meterProvider); cOk {
+		if _, mpOk := mp.(*meterProvider); mpOk && current == mp {
+			// Do not assign the default delegating MeterProvider to delegate
+			// to itself.
+			Error(
+				errors.New("no delegate configured in meter provider"),
+				"Setting meter provider to it's current value. No delegate will be configured",
+			)
+			return
+		}
+	}
+
+	delegateMeterOnce.Do(func() {
+		if def, ok := current.(*meterProvider); ok {
+			def.setDelegate(mp)
+		}
+	})
+	globalMeterProvider.Store(meterProviderHolder{mp: mp})
+}
+
 func defaultTracerValue() *atomic.Value {
 	v := &atomic.Value{}
 	v.Store(tracerProviderHolder{tp: &tracerProvider{}})
@@ -131,6 +173,7 @@ func defaultPropagatorsValue() *atomic.Value {
 	v.Store(propagatorsHolder{tm: newTextMapPropagator()})
 	return v
 }
+<<<<<<< HEAD
 
 // ResetForTest restores the initial global state, for testing purposes.
 func ResetForTest() {
@@ -141,3 +184,12 @@ func ResetForTest() {
 	delegateTraceOnce = sync.Once{}
 	delegateTextMapPropagatorOnce = sync.Once{}
 }
+||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
+=======
+
+func defaultMeterProvider() *atomic.Value {
+	v := &atomic.Value{}
+	v.Store(meterProviderHolder{mp: &meterProvider{}})
+	return v
+}
+>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
