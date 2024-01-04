@@ -35,7 +35,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	migrationconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/config"
 
 	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/v1alpha1"
@@ -68,12 +67,8 @@ type VolumeMigrationService interface {
 	GetVolumeID(ctx context.Context, volumeSpec *VolumeSpec, registerIfNotFound bool) (string, error)
 
 	// GetVolumePath returns VolumePath for a given VolumeID.
-	// It will also create a CnsVSphereVolumeMigration CR if it's not present.
+	// Returns an error if not able to retrieve VolumePath.
 	GetVolumePath(ctx context.Context, volumeID string) (string, error)
-
-	// GetVolumePathFromMigrationServiceCache checks the in-memory cache for a volumeID
-	// a cache hit means that the volume is a migrated in-tree volume
-	GetVolumePathFromMigrationServiceCache(ctx context.Context, volumeID string) (string, error)
 
 	// DeleteVolumeInfo helps delete mapping of volumePath to VolumeID for
 	// specified volumeID.
@@ -367,26 +362,6 @@ func (volumeMigration *volumeMigration) GetVolumePath(ctx context.Context, volum
 	return fileBackingInfo.FilePath, nil
 }
 
-// GetVolumePathFromMigrationServiceCache checks the in-memory cache for a volumeID
-// a cache hit means that the volume is a migrated in-tree volume
-func (volumeMigration *volumeMigration) GetVolumePathFromMigrationServiceCache(ctx context.Context,
-	volumeID string) (string, error) {
-	log := logger.GetLogger(ctx)
-	var volumePath string
-	volumeMigration.volumePathToVolumeID.Range(func(key, value interface{}) bool {
-		if value.(string) == volumeID {
-			volumePath = key.(string)
-			log.Infof("Found VolumePath %v for VolumeID: %q in the cache", volumePath, volumeID)
-			return false
-		}
-		return true
-	})
-	if volumePath != "" {
-		return volumePath, nil
-	}
-	return "", common.ErrNotFound
-}
-
 // saveVolumeInfo helps create CR for given cnsVSphereVolumeMigration. This func
 // also update local cache with supplied cnsVSphereVolumeMigration, after
 // successful creation of CR
@@ -610,41 +585,13 @@ func (volumeMigration *volumeMigration) cleanupStaleCRDInstances() {
 			cnsVolumesMap[vol.VolumeId.Id] = true
 		}
 		log.Debugf("cnsVolumesMap:  %v:", cnsVolumesMap)
-		k8sclient, err := k8s.NewClient(ctx)
-		if err != nil {
-			log.Errorf("failed to get k8sclient with error: %v", err)
-			continue
-		}
-		// The runCleanupRoutine is only triggered from Syncer container,
-		// hence we are checking for PV objects in the k8s in the below code snippet.
-		pvList, err := k8sclient.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			log.Errorf("failed to list PersistentVolumes with error %v.", err)
-			continue
-		}
 		for _, volumeMigrationResource := range volumeMigrationResourceList.Items {
 			if _, existsInCNSVolumesMap := cnsVolumesMap[volumeMigrationResource.Name]; !existsInCNSVolumesMap {
 				log.Debugf("Volume with id %s is not found in CNS", volumeMigrationResource.Name)
-				// Check if a PV exists for the given volumePath in CnsVSphereVolumeMigration CR
-				pvFound := false
-				for _, pv := range pvList.Items {
-					if pv.Spec.VsphereVolume != nil &&
-						pv.Spec.VsphereVolume.VolumePath == volumeMigrationResource.Spec.VolumePath {
-						pvFound = true
-						log.Infof("PV %s with VolumePath %s is found in k8s, but CNS does not have an entry."+
-							"Skipping the %s CR deletion.",
-							pv.Name, pv.Spec.VsphereVolume.VolumePath, volumeMigrationResource.Name)
-						break
-					}
-				}
-				// Delete the CnsVSphereVolumeMigration CR only when there is no corresponding PV in k8s
-				if !pvFound {
-					log.Debugf("Deleting CnsVSphereVolumeMigration CR: %s", volumeMigrationResource.Name)
-					err = volumeMigrationInstance.DeleteVolumeInfo(ctx, volumeMigrationResource.Name)
-					if err != nil {
-						log.Warnf("failed to delete volume mapping CR for %s with error %+v", volumeMigrationResource.Name, err)
-						continue
-					}
+				err = volumeMigrationInstance.DeleteVolumeInfo(ctx, volumeMigrationResource.Name)
+				if err != nil {
+					log.Warnf("failed to delete volume mapping CR for %s with error %+v", volumeMigrationResource.Name, err)
+					continue
 				}
 			}
 		}

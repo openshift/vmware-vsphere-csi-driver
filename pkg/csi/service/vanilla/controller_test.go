@@ -169,7 +169,7 @@ func configFromEnvOrSim() (*config.Config, func()) {
 	return cfg, func() {}
 }
 
-func (f *FakeNodeManager) Initialize(ctx context.Context) error {
+func (f *FakeNodeManager) Initialize(ctx context.Context, useNodeUuid bool) error {
 	return nil
 }
 
@@ -223,12 +223,11 @@ func (f *FakeNodeManager) GetSharedDatastoresInK8SCluster(ctx context.Context) (
 	}, nil
 }
 
-func (f *FakeNodeManager) GetNodeVMByNameAndUpdateCache(ctx context.Context,
-	nodeName string) (*cnsvsphere.VirtualMachine, error) {
+func (f *FakeNodeManager) GetNodeByName(ctx context.Context, nodeName string) (*cnsvsphere.VirtualMachine, error) {
 	var vm *cnsvsphere.VirtualMachine
 	var t *testing.T
 	if v := os.Getenv("VSPHERE_DATACENTER"); v != "" {
-		nodeUUID, err := k8s.GetNodeUUID(ctx, f.k8sClient, nodeName)
+		nodeUUID, err := k8s.GetNodeUUID(ctx, f.k8sClient, nodeName, false)
 		if err != nil {
 			t.Errorf("failed to get providerId from node: %q. Err: %v", nodeName, err)
 			return nil, err
@@ -247,16 +246,16 @@ func (f *FakeNodeManager) GetNodeVMByNameAndUpdateCache(ctx context.Context,
 	return vm, nil
 }
 
-func (f *FakeNodeManager) GetNodeVMByNameOrUUID(
+func (f *FakeNodeManager) GetNodeByNameOrUUID(
 	ctx context.Context, nodeNameOrUUID string) (*cnsvsphere.VirtualMachine, error) {
-	return f.GetNodeVMByNameAndUpdateCache(ctx, nodeNameOrUUID)
+	return f.GetNodeByName(ctx, nodeNameOrUUID)
 }
 
 func (f *FakeNodeManager) GetNodeNameByUUID(ctx context.Context, nodeUUID string) (string, error) {
 	return "", nil
 }
 
-func (f *FakeNodeManager) GetNodeVMByUuid(ctx context.Context, nodeUuid string) (*cnsvsphere.VirtualMachine, error) {
+func (f *FakeNodeManager) GetNodeByUuid(ctx context.Context, nodeUuid string) (*cnsvsphere.VirtualMachine, error) {
 	var vm *cnsvsphere.VirtualMachine
 	var t *testing.T
 	if v := os.Getenv("VSPHERE_DATACENTER"); v != "" {

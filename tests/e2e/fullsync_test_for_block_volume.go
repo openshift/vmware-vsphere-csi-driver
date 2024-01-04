@@ -127,16 +127,11 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if isVsanHealthServiceStopped {
-			startVCServiceWait4VPs(ctx, vcAddress, vsanhealthServiceName, &isVsanHealthServiceStopped)
-		}
 		if supervisorCluster {
 			deleteResourceQuota(client, namespace)
-			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
-		if guestCluster {
-			svcClient, svNamespace := getSvcClientAndNamespace()
-			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
+		if isVsanHealthServiceStopped {
+			startVCServiceWait4VPs(ctx, vcAddress, vsanhealthServiceName, &isVsanHealthServiceStopped)
 		}
 	})
 
@@ -798,7 +793,7 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 
 		ginkgo.By("create a pvc pvc1, wait for pvc bound to pv")
 		volHandle, pvc, pv, storageclass := createSCwithVolumeExpansionTrueAndDynamicPVC(
-			f, client, "", storagePolicyName, namespace, ext4FSType)
+			f, client, "", storagePolicyName, namespace)
 		defer func() {
 			if !supervisorCluster {
 				err := client.StorageV1().StorageClasses().Delete(ctx, storageclass.Name, *metav1.NewDeleteOptions(0))
@@ -815,7 +810,7 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		}()
 
 		ginkgo.By("create a pod pod1, using pvc1")
-		pod, _ := createPODandVerifyVolumeMount(ctx, f, client, namespace, pvc, volHandle, "")
+		pod, _ := createPODandVerifyVolumeMount(ctx, f, client, namespace, pvc, volHandle)
 		defer func() {
 			err := fpod.DeletePodWithWait(client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())

@@ -51,12 +51,12 @@ func TestValidateStorageClassForAllowVolumeExpansion(t *testing.T) {
 			"\"volumeBindingMode\": \"Immediate\"\n}"),
 	}
 	admissionResponse := validateStorageClass(ctx, &admissionReview)
-	if admissionResponse.Allowed {
-		t.Log("TestValidateStorageClassForAllowVolumeExpansion Passed")
-	} else {
+	if !strings.Contains(string(admissionResponse.Result.Reason), volumeExpansionErrorMessage) ||
+		admissionResponse.Allowed {
 		t.Fatalf("TestValidateStorageClassForAllowVolumeExpansion failed. "+
 			"admissionReview.Request: %v, admissionResponse: %v", admissionReview.Request, admissionResponse)
 	}
+	t.Log("TestValidateStorageClassForAllowVolumeExpansion Passed")
 }
 
 // TestValidateStorageClassForMigrationParameter is the unit test for validating
