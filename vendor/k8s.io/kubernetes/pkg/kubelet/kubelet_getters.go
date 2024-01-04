@@ -176,11 +176,14 @@ func (kl *Kubelet) GetPods() []*v1.Pod {
 	pods := kl.podManager.GetPods()
 	// a kubelet running without apiserver requires an additional
 	// update of the static pod status. See #57106
-	for _, p := range pods {
+	for i, p := range pods {
 		if kubelettypes.IsStaticPod(p) {
 			if status, ok := kl.statusManager.GetPodStatus(p.UID); ok {
 				klog.V(2).InfoS("Pod status updated", "pod", klog.KObj(p), "status", status.Phase)
+				// do not mutate the cache
+				p = p.DeepCopy()
 				p.Status = status
+				pods[i] = p
 			}
 		}
 	}
@@ -191,8 +194,8 @@ func (kl *Kubelet) GetPods() []*v1.Pod {
 // container runtime cache. This function converts kubecontainer.Pod to
 // v1.Pod, so only the fields that exist in both kubecontainer.Pod and
 // v1.Pod are considered meaningful.
-func (kl *Kubelet) GetRunningPods() ([]*v1.Pod, error) {
-	pods, err := kl.runtimeCache.GetPods()
+func (kl *Kubelet) GetRunningPods(ctx context.Context) ([]*v1.Pod, error) {
+	pods, err := kl.runtimeCache.GetPods(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +306,7 @@ func (kl *Kubelet) getPodVolumePathListFromDisk(podUID types.UID) ([]string, err
 	if pathExists, pathErr := mount.PathExists(podVolDir); pathErr != nil {
 		return volumes, fmt.Errorf("error checking if path %q exists: %v", podVolDir, pathErr)
 	} else if !pathExists {
-		klog.InfoS("Path does not exist", "path", podVolDir)
+		klog.V(6).InfoS("Path does not exist", "path", podVolDir)
 		return volumes, nil
 	}
 
