@@ -157,6 +157,7 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 				scheme:              s,
 				configInfo:          &cnsconfig.ConfigurationInfo{},
 				recorder:            record.NewFakeRecorder(testBufferSize),
+				useNodeUuid:         true,
 				enableTKGsHAinGuest: true,
 				vmOperatorClient:    fakeVmOperatorClient,
 				supervisorNamespace: testSupervisorNamespace,

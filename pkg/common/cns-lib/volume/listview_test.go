@@ -18,10 +18,9 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
-const testVCHost = "testVCHost"
-
 func TestAddRemoveListView(t *testing.T) {
 	ctx := logger.NewContextWithLogger(context.Background())
+
 	model := simulator.VPX()
 	defer model.Remove()
 	if err := model.Create(); err != nil {
@@ -37,9 +36,6 @@ func TestAddRemoveListView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	config := vsphere.VirtualCenterConfig{Host: testVCHost}
-	virtualCenter.Config = &config
 
 	listViewImpl, err := NewListViewImpl(ctx, virtualCenter, virtualCenter.Client)
 	assert.NoError(t, err)
@@ -86,9 +82,6 @@ func TestMarkForDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	config := vsphere.VirtualCenterConfig{Host: testVCHost}
-	virtualCenter.Config = &config
 
 	listViewImpl, err := NewListViewImpl(ctx, virtualCenter, virtualCenter.Client)
 	assert.NoError(t, err)

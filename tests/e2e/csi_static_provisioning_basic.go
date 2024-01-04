@@ -52,7 +52,7 @@ var _ = ginkgo.Describe("Basic Static Provisioning", func() {
 
 	f := framework.NewDefaultFramework("e2e-csistaticprovision")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
-	framework.TestContext.DeleteNamespace = true
+
 	var (
 		client                     clientset.Interface
 		namespace                  string
@@ -165,10 +165,6 @@ var _ = ginkgo.Describe("Basic Static Provisioning", func() {
 		if guestCluster {
 			svcClient, svNamespace := getSvcClientAndNamespace()
 			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
-			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
-		}
-		if supervisorCluster {
-			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
 	})
 

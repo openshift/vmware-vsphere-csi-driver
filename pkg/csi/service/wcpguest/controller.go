@@ -27,7 +27,7 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/fsnotify/fsnotify"
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	vmoperatortypes "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
 	"golang.org/x/net/context"
@@ -45,7 +45,6 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsfileaccessconfigv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsfileaccessconfig/v1alpha1"
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -64,8 +63,6 @@ var (
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
 		csi.ControllerServiceCapability_RPC_PUBLISH_UNPUBLISH_VOLUME,
 		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
-		csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
-		csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
 	}
 )
 
@@ -247,7 +244,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		*csi.CreateVolumeResponse, string, error) {
 
 		log.Infof("CreateVolume: called with args %+v", *req)
-		// TODO: If the err is returned by invoking CNS API, then faultType should be
+		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -277,15 +274,6 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		}
 		volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
 		volumeSource := req.GetVolumeContentSource()
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot) &&
-			volumeSource != nil {
-			sourceSnapshot := volumeSource.GetSnapshot()
-			if sourceSnapshot == nil {
-				return nil, csifault.CSIInvalidArgumentFault,
-					logger.LogNewErrorCode(log, codes.InvalidArgument, "unsupported VolumeContentSource type")
-			}
-			volumeSnapshotName = sourceSnapshot.GetSnapshotId()
-		}
 
 		// Get supervisorStorageClass and accessMode
 		var supervisorStorageClass string
@@ -315,6 +303,10 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 					}
 					annotations[common.AnnGuestClusterRequestedTopology] = topologyAnnotation
 				}
+				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot) &&
+					volumeSource != nil {
+					volumeSnapshotName = volumeSource.GetSnapshot().GetSnapshotId()
+				}
 				claim := getPersistentVolumeClaimSpecWithStorageClass(supervisorPVCName, c.supervisorNamespace,
 					diskSize, supervisorStorageClass, getAccessMode(accessMode), annotations, volumeSnapshotName)
 				log.Debugf("PVC claim spec is %+v", spew.Sdump(claim))
@@ -340,29 +332,12 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 				c.supervisorNamespace, err)
 			log.Error(msg)
 			eventList, err := c.supervisorClient.CoreV1().Events(c.supervisorNamespace).List(ctx,
-				metav1.ListOptions{
-					FieldSelector:        "involvedObject.name=" + pvc.Name,
-					ResourceVersion:      pvc.ResourceVersion,
-					ResourceVersionMatch: metav1.ResourceVersionMatchNotOlderThan,
-				})
+				metav1.ListOptions{FieldSelector: "involvedObject.name=" + pvc.Name})
 			if err != nil {
 				log.Errorf("Unable to fetch events for pvc %q/%q from supervisor cluster with err: %+v",
 					c.supervisorNamespace, pvc.Name, err)
 				return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
 			}
-
-			var failureMessage string
-			for _, svcPvcEvent := range eventList.Items {
-				if svcPvcEvent.Type == corev1.EventTypeWarning {
-					failureMessage = svcPvcEvent.Message
-					break
-				}
-			}
-
-			if failureMessage != "" {
-				msg = fmt.Sprintf("%s. reason: %s", msg, failureMessage)
-			}
-
 			log.Errorf("Last observed events on the pvc %q/%q in supervisor cluster: %+v",
 				c.supervisorNamespace, pvc.Name, spew.Sdump(eventList.Items))
 			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
@@ -430,9 +405,6 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	resp, faultType, err := createVolumeInternal()
 	log.Debugf("createVolumeInternal: returns fault %q", faultType)
 	if err != nil {
-		if csifault.IsNonStorageFault(faultType) {
-			faultType = csifault.AddCsiNonStoragePrefix(ctx, faultType)
-		}
 		log.Errorf("Operation failed, reporting failure status to Prometheus."+
 			" Operation Type: %q, Volume Type: %q, Fault Type: %q",
 			prometheus.PrometheusCreateVolumeOpType, volumeType, faultType)
@@ -459,7 +431,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	deleteVolumeInternal := func() (
 		*csi.DeleteVolumeResponse, string, error) {
 		log.Infof("DeleteVolume: called with args: %+v", *req)
-		// TODO: If the err is returned by invoking CNS API, then faultType should be
+		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -509,9 +481,6 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 	resp, faultType, err := deleteVolumeInternal()
 	log.Debugf("deleteVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
 	if err != nil {
-		if csifault.IsNonStorageFault(faultType) {
-			faultType = csifault.AddCsiNonStoragePrefix(ctx, faultType)
-		}
 		log.Errorf("Operation failed, reporting failure status to Prometheus."+
 			" Operation Type: %q, Volume Type: %q, Fault Type: %q",
 			prometheus.PrometheusDeleteVolumeOpType, volumeType, faultType)
@@ -537,7 +506,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 	controllerPublishVolumeInternal := func() (
 		*csi.ControllerPublishVolumeResponse, string, error) {
 		log.Infof("ControllerPublishVolume: called with args %+v", *req)
-		// TODO: If the err is returned by invoking CNS API, then faultType should be
+		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -573,9 +542,6 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 	resp, faultType, err := controllerPublishVolumeInternal()
 	if err != nil {
 		log.Debugf("controllerPublishVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
-		if csifault.IsNonStorageFault(faultType) {
-			faultType = csifault.AddCsiNonStoragePrefix(ctx, faultType)
-		}
 		log.Errorf("Operation failed, reporting failure status to Prometheus."+
 			" Operation Type: %q, Volume Type: %q, Fault Type: %q",
 			prometheus.PrometheusAttachVolumeOpType, volumeType, faultType)
@@ -712,7 +678,7 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 		log.Debugf("disk UUID %v is set for the volume: %q ", diskUUID, req.VolumeId)
 	}
 
-	// return PublishContext with diskUUID of the volume attached to node.
+	//return PublishContext with diskUUID of the volume attached to node.
 	publishInfo := make(map[string]string)
 	publishInfo[common.AttributeDiskType] = common.DiskTypeBlockVolume
 	publishInfo[common.AttributeFirstClassDiskUUID] = common.FormatDiskUUID(diskUUID)
@@ -876,7 +842,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 	controllerUnpublishVolumeInternal := func() (
 		*csi.ControllerUnpublishVolumeResponse, string, error) {
 		log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
-		// TODO: If the err is returned by invoking CNS API, then faultType should be
+		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -919,9 +885,6 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 	resp, faultType, err := controllerUnpublishVolumeInternal()
 	log.Debugf("controllerUnpublishVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
 	if err != nil {
-		if csifault.IsNonStorageFault(faultType) {
-			faultType = csifault.AddCsiNonStoragePrefix(ctx, faultType)
-		}
 		log.Errorf("Operation failed, reporting failure status to Prometheus."+
 			" Operation Type: %q, Volume Type: %q, Fault Type: %q",
 			prometheus.PrometheusDetachVolumeOpType, volumeType, faultType)
@@ -1168,7 +1131,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 			return nil, csifault.CSIUnimplementedFault, status.Error(codes.Unimplemented, msg)
 		}
 		log.Infof("ControllerExpandVolume: called with args %+v", *req)
-		// TODO: If the err is returned by invoking CNS API, then faultType should be
+		//TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
 		// If thr reqeust failed due to object not found, "csi.fault.NotFound" will be return.
@@ -1290,9 +1253,6 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 	resp, faultType, err := controllerExpandVolumeInternal()
 	log.Debugf("controllerExpandVolumeInternal: returns fault %q for volume %q", faultType, req.VolumeId)
 	if err != nil {
-		if csifault.IsNonStorageFault(faultType) {
-			faultType = csifault.AddCsiNonStoragePrefix(ctx, faultType)
-		}
 		log.Errorf("Operation failed, reporting failure status to Prometheus."+
 			" Operation Type: %q, Volume Type: %q, Fault Type: %q",
 			prometheus.PrometheusExpandVolumeOpType, volumeType, faultType)
@@ -1346,6 +1306,10 @@ func (c *controller) ControllerGetCapabilities(ctx context.Context, req *csi.Con
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
 	log.Infof("ControllerGetCapabilities: called with args %+v", *req)
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot) {
+		controllerCaps = append(controllerCaps, csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
+			csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS)
+	}
 	var caps []*csi.ControllerServiceCapability
 	for _, cap := range controllerCaps {
 		c := &csi.ControllerServiceCapability{
@@ -1406,12 +1370,8 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		if err != nil {
 			if errors.IsNotFound(err) {
 				// New createSnapshot request on the guest
-				// Add "csi.vsphere.guest-initiated-csi-snapshot" annotation on VolumeSnapshot CR in
-				// the supervisor cluster to indicate that snapshot creation is initiated from Guest cluster
-				annotation := make(map[string]string)
-				annotation[common.SupervisorVolumeSnapshotAnnotationKey] = "true"
 				supVolumeSnapshot := constructVolumeSnapshotWithVolumeSnapshotClass(supervisorVolumeSnapshotName,
-					c.supervisorNamespace, supervisorVolumeSnapshotClass, supervisorPVCName, annotation)
+					c.supervisorNamespace, supervisorVolumeSnapshotClass, supervisorPVCName)
 				log.Infof("Supervisosr VolumeSnapshot Spec: %+v", supVolumeSnapshot)
 				_, err = c.supervisorSnapshotterClient.SnapshotV1().VolumeSnapshots(
 					c.supervisorNamespace).Create(ctx, supVolumeSnapshot, metav1.CreateOptions{})
@@ -1434,7 +1394,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		// Wait for VolumeSnapshot to be ready to use
 		isReady, vs, err := common.IsVolumeSnapshotReady(ctx, c.supervisorSnapshotterClient,
 			supervisorVolumeSnapshotName, c.supervisorNamespace,
-			time.Duration(getSnapshotTimeoutInMin(ctx))*time.Minute)
+			time.Duration(getProvisionTimeoutInMin(ctx))*time.Minute)
 		if !isReady {
 			msg := fmt.Sprintf("volumesnapshot: %s on namespace: %s in supervisor cluster was not Ready. "+
 				"Error: %+v", supervisorVolumeSnapshotName, c.supervisorNamespace, err)

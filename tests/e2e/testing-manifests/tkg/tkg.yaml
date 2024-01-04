@@ -1,4 +1,4 @@
-apiVersion: run.tanzu.vmware.com/v1alpha3
+apiVersion: run.tanzu.vmware.com/v1alpha1
 kind: TanzuKubernetesCluster
 metadata:
   name: test-cluster-e2e-script
@@ -6,25 +6,22 @@ metadata:
 spec:
   topology:
     controlPlane:
-      tkr:
-        reference:
-          name: replaceImage # this will be replaced with the actual image name by pipeline
-      replicas: 3
-      vmClass: best-effort-xsmall # vmclass to be used for master(s)
+      count: 3
+      class: best-effort-xsmall # vmclass to be used for master(s)
       storageClass: gc-storage-profile
-    nodePools:
-    - replicas: 2
-      name: np-2
-      vmClass: best-effort-xsmall # vmclass to be used for workers(s)
+    workers:
+      count: 2
+      class: best-effort-xsmall # vmclass to be used for workers(s)
       storageClass: gc-storage-profile
+  distribution:
+    version: replaceImage # this will be replaced with the actual image name by pipeline
   settings:
     network:
       cni:
-        name: antrea
+        name: calico
       services:
-        cidrBlocks:
-        - 198.51.100.0/12
+        cidrBlocks: ["198.51.100.0/12"]
       pods:
-        cidrBlocks:
-        - 192.0.2.0/16
-      serviceDomain: cluster.local
+        cidrBlocks: ["192.0.2.0/16"]
+      serviceDomain: "managedcluster.local" 
+

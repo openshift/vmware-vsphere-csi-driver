@@ -146,9 +146,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 		setResourceQuota(svcClient, svNamespace, defaultrqLimit)
 
 		if isGCCSIDeploymentPODdown {
-			_ = updateDeploymentReplica(client, 3, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
+			_ = updateDeploymentReplica(client, 1, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
 		}
-		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	// Verify offline expansion triggers FS resize.
