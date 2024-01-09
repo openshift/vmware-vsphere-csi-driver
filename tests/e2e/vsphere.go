@@ -3,13 +3,11 @@ package e2e
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/davecgh/go-spew/spew"
@@ -141,16 +139,10 @@ func (vs *vSphere) queryCNSVolumeSnapshotWithResult(fcdID string,
 }
 
 // verifySnapshotIsDeletedInCNS verifies the snapshotId's presence on CNS
-func verifySnapshotIsDeletedInCNS(volumeId string, snapshotId string, isMultiVcSetup bool) error {
+func verifySnapshotIsDeletedInCNS(volumeId string, snapshotId string) error {
 	ginkgo.By(fmt.Sprintf("Invoking queryCNSVolumeSnapshotWithResult with VolumeID: %s and SnapshotID: %s",
 		volumeId, snapshotId))
-	var querySnapshotResult *cnstypes.CnsSnapshotQueryResult
-	var err error
-	if !isMultiVcSetup {
-		querySnapshotResult, err = e2eVSphere.queryCNSVolumeSnapshotWithResult(volumeId, snapshotId)
-	} else {
-		querySnapshotResult, err = multiVCe2eVSphere.queryCNSVolumeSnapshotWithResultInMultiVC(volumeId, snapshotId)
-	}
+	querySnapshotResult, err := e2eVSphere.queryCNSVolumeSnapshotWithResult(volumeId, snapshotId)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.By(fmt.Sprintf("Task result is %+v", querySnapshotResult))
 	gomega.Expect(querySnapshotResult.Entries).ShouldNot(gomega.BeEmpty())
@@ -162,16 +154,10 @@ func verifySnapshotIsDeletedInCNS(volumeId string, snapshotId string, isMultiVcS
 }
 
 // verifySnapshotIsCreatedInCNS verifies the snapshotId's presence on CNS
-func verifySnapshotIsCreatedInCNS(volumeId string, snapshotId string, isMultiVC bool) error {
+func verifySnapshotIsCreatedInCNS(volumeId string, snapshotId string) error {
 	ginkgo.By(fmt.Sprintf("Invoking queryCNSVolumeSnapshotWithResult with VolumeID: %s and SnapshotID: %s",
 		volumeId, snapshotId))
-	var querySnapshotResult *cnstypes.CnsSnapshotQueryResult
-	var err error
-	if !isMultiVC {
-		querySnapshotResult, err = e2eVSphere.queryCNSVolumeSnapshotWithResult(volumeId, snapshotId)
-	} else {
-		querySnapshotResult, err = multiVCe2eVSphere.queryCNSVolumeSnapshotWithResultInMultiVC(volumeId, snapshotId)
-	}
+	querySnapshotResult, err := e2eVSphere.queryCNSVolumeSnapshotWithResult(volumeId, snapshotId)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.By(fmt.Sprintf("Task result is %+v", querySnapshotResult))
 	gomega.Expect(querySnapshotResult.Entries).ShouldNot(gomega.BeEmpty())
@@ -462,7 +448,7 @@ func (vs *vSphere) waitForMetadataToBeDeleted(volumeID string, entityType string
 // waitForCNSVolumeToBeDeleted executes QueryVolume API on vCenter and verifies
 // volume entries are deleted from vCenter Database
 func (vs *vSphere) waitForCNSVolumeToBeDeleted(volumeID string) error {
-	err := wait.Poll(poll, 2*pollTimeout, func() (bool, error) {
+	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
 		queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
 		if err != nil {
 			return true, err
@@ -782,14 +768,9 @@ func (vs *vSphere) getVsanClusterResource(ctx context.Context, forceRefresh ...b
 }
 
 // getAllHostsIP reads cluster, gets hosts in it and returns IP array
-func getAllHostsIP(ctx context.Context, forceRefresh ...bool) []string {
+func getAllHostsIP(ctx context.Context) []string {
 	var result []string
-	refresh := false
-	if len(forceRefresh) > 0 {
-		refresh = forceRefresh[0]
-	}
-
-	cluster := e2eVSphere.getVsanClusterResource(ctx, refresh)
+	cluster := e2eVSphere.getVsanClusterResource(ctx)
 	hosts, err := cluster.Hosts(ctx)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -802,7 +783,7 @@ func getAllHostsIP(ctx context.Context, forceRefresh ...bool) []string {
 // getHostConnectionState reads cluster, gets hosts in it and returns connection state of host
 func getHostConnectionState(ctx context.Context, addr string) (string, error) {
 	var state string
-	cluster := e2eVSphere.getVsanClusterResource(ctx, true)
+	cluster := e2eVSphere.getVsanClusterResource(ctx)
 	hosts, err := cluster.Hosts(ctx)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1096,14 +1077,9 @@ func (vs *vSphere) verifyDatastoreMatch(volumeID string, dsUrls []string) {
 
 // cnsRelocateVolume relocates volume from one datastore to another using CNS relocate volume API
 func (vs *vSphere) cnsRelocateVolume(e2eVSphere vSphere, ctx context.Context, fcdID string,
-	dsRefDest vim25types.ManagedObjectReference,
-	waitForRelocateTaskToComplete ...bool) (*object.Task, error) {
+	dsRefDest vim25types.ManagedObjectReference) error {
 	var pandoraSyncWaitTime int
 	var err error
-	waitForTaskTocomplete := true
-	if len(waitForRelocateTaskToComplete) > 0 {
-		waitForTaskTocomplete = waitForRelocateTaskToComplete[0]
-	}
 	if os.Getenv(envPandoraSyncWaitTime) != "" {
 		pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1125,32 +1101,31 @@ func (vs *vSphere) cnsRelocateVolume(e2eVSphere vSphere, ctx context.Context, fc
 	res, err := cnsmethods.CnsRelocateVolume(ctx, cnsClient, &req)
 	framework.Logf("error is: %v", err)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	task := object.NewTask(e2eVSphere.Client.Client, res.Returnval)
-	if waitForTaskTocomplete {
-		taskInfo, err := task.WaitForResult(ctx, nil)
-		framework.Logf("taskInfo: %v", taskInfo)
-		framework.Logf("error: %v", err)
-		if err != nil {
-			return nil, err
-		}
-		taskResult, err := cns.GetTaskResult(ctx, taskInfo)
-		if err != nil {
-			return nil, err
-		}
 
-		framework.Logf("Sleeping for %v seconds to allow CNS to sync with pandora", pandoraSyncWaitTime)
-		time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
-
-		cnsRelocateVolumeRes := taskResult.GetCnsVolumeOperationResult()
-
-		if cnsRelocateVolumeRes.Fault != nil {
-			err = fmt.Errorf("failed to relocate volume=%+v", cnsRelocateVolumeRes.Fault)
-			return nil, err
-		}
+	task, err := object.NewTask(e2eVSphere.Client.Client, res.Returnval), nil
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	framework.Logf("taskInfo: %v", taskInfo)
+	framework.Logf("error: %v", err)
+	if err != nil {
+		return err
 	}
-	return task, nil
+	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return err
+	}
+
+	framework.Logf("Sleeping for %v seconds to allow CNS to sync with pandora", pandoraSyncWaitTime)
+	time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
+
+	cnsRelocateVolumeRes := taskResult.GetCnsVolumeOperationResult()
+
+	if cnsRelocateVolumeRes.Fault != nil {
+		err = fmt.Errorf("failed to relocate volume=%+v", cnsRelocateVolumeRes.Fault)
+		return err
+	}
+	return nil
 }
 
 // fetchDsUrl4CnsVol executes query CNS volume to get the datastore
@@ -1203,88 +1178,4 @@ func (vs *vSphere) deleteCNSvolume(volumeID string, isDeleteDisk bool) (*cnstype
 		return nil, err
 	}
 	return res, nil
-}
-
-// reconfigPolicy reconfigures given policy on the given volume
-func (vs *vSphere) reconfigPolicy(ctx context.Context, volumeID string, profileID string) error {
-	cnsClient, err := newCnsClient(ctx, vs.Client.Client)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	CnsVolumeManagerInstance := vim25types.ManagedObjectReference{
-		Type:  "CnsVolumeManager",
-		Value: "cns-volume-manager",
-	}
-	req := cnstypes.CnsReconfigVolumePolicy{
-		This: CnsVolumeManagerInstance,
-		VolumePolicyReconfigSpecs: []cnstypes.CnsVolumePolicyReconfigSpec{
-			{
-				VolumeId: cnstypes.CnsVolumeId{Id: volumeID},
-				Profile: []vim25types.BaseVirtualMachineProfileSpec{
-					&vim25types.VirtualMachineDefinedProfileSpec{
-						ProfileId: profileID,
-					},
-				},
-			},
-		},
-	}
-	res, err := cnsmethods.CnsReconfigVolumePolicy(ctx, cnsClient, &req)
-	if err != nil {
-		return err
-	}
-	task := object.NewTask(vs.Client.Client, res.Returnval)
-	taskInfo, err := cns.GetTaskInfo(ctx, task)
-	if err != nil {
-		return err
-	}
-	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
-	if err != nil {
-		return err
-	}
-	if taskResult == nil {
-		return errors.New("TaskInfo result is empty")
-	}
-	reconfigVolumeOperationRes := taskResult.GetCnsVolumeOperationResult()
-	if reconfigVolumeOperationRes == nil {
-		return errors.New("cnsreconfigpolicy operation result is empty")
-	}
-	if reconfigVolumeOperationRes.Fault != nil {
-		return errors.New("cnsreconfigpolicy operation fault: " + reconfigVolumeOperationRes.Fault.LocalizedMessage)
-	}
-	framework.Logf("reconfigpolicy on volume %v with policy %v is successful", volumeID, profileID)
-	return nil
-}
-
-// cnsRelocateVolumeInParallel relocates volume in parallel from one datastore to another
-// using CNS API
-func cnsRelocateVolumeInParallel(e2eVSphere vSphere, ctx context.Context, fcdID string,
-	dsRefDest vim25types.ManagedObjectReference, waitForRelocateTaskToComplete bool,
-	wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
-	defer wg.Done()
-	_, err := e2eVSphere.cnsRelocateVolume(e2eVSphere, ctx, fcdID, dsRefDest, waitForRelocateTaskToComplete)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-}
-
-// waitForCNSTaskToComplete wait for CNS task to complete
-// and gets the result and checks if any fault has occurred
-func waitForCNSTaskToComplete(ctx context.Context, task *object.Task) *vim25types.LocalizedMethodFault {
-	var pandoraSyncWaitTime int
-	var err error
-	if os.Getenv(envPandoraSyncWaitTime) != "" {
-		pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	} else {
-		pandoraSyncWaitTime = defaultPandoraSyncWaitTime
-	}
-
-	taskInfo, err := task.WaitForResult(ctx, nil)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	framework.Logf("Sleeping for %v seconds to allow CNS to sync with pandora", pandoraSyncWaitTime)
-	time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
-
-	cnsTaskRes := taskResult.GetCnsVolumeOperationResult()
-	return cnsTaskRes.Fault
 }

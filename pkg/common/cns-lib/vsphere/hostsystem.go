@@ -19,7 +19,6 @@ package vsphere
 import (
 	"context"
 	"encoding/json"
-	"errors"
 
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 
@@ -29,8 +28,6 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	"github.com/vmware/govmomi/vim25/types"
 )
-
-var ErrNoSharedDSFound = errors.New("no shared datastores found among given hosts")
 
 // HostSystem holds details of a host instance.
 type HostSystem struct {
@@ -43,7 +40,8 @@ type HostSystem struct {
 func (host *HostSystem) GetAllAccessibleDatastores(ctx context.Context) ([]*DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
 	var hostSystemMo mo.HostSystem
-	err := host.Properties(ctx, host.Reference(), []string{"datastore"}, &hostSystemMo)
+	s := object.NewSearchIndex(host.Client())
+	err := s.Properties(ctx, host.Reference(), []string{"datastore"}, &hostSystemMo)
 	if err != nil {
 		log.Errorf("failed to retrieve datastores for host %v with err: %v", host, err)
 		return nil, err
@@ -183,39 +181,4 @@ func (host *HostSystem) GetHostVsanCapacity(ctx context.Context) (*VsanHostCapac
 		out.CapacityUsed += disk.CapacityUsed
 	}
 	return &out, nil
-}
-
-// GetSharedDatastoresForHosts returns shared datastores accessible to hosts mentioned in the input parameter.
-func GetSharedDatastoresForHosts(ctx context.Context, hosts []*HostSystem) ([]*DatastoreInfo, error) {
-	log := logger.GetLogger(ctx)
-	var sharedDatastores []*DatastoreInfo
-
-	for _, host := range hosts {
-		accessibleDatastores, err := host.GetAllAccessibleDatastores(ctx)
-		if err != nil {
-			return nil, logger.LogNewErrorf(log, "failed to fetch datastores from host %+v. Error: %+v",
-				host, err)
-		}
-		if len(sharedDatastores) == 0 {
-			sharedDatastores = accessibleDatastores
-		} else {
-			var sharedAccessibleDatastores []*DatastoreInfo
-			for _, sharedDs := range sharedDatastores {
-				// Check if sharedDatastores is found in accessibleDatastores.
-				for _, accessibleDs := range accessibleDatastores {
-					// Intersection is performed based on the datastoreUrl as this
-					// uniquely identifies the datastore.
-					if accessibleDs.Info.Url == sharedDs.Info.Url {
-						sharedAccessibleDatastores = append(sharedAccessibleDatastores, sharedDs)
-						break
-					}
-				}
-			}
-			sharedDatastores = sharedAccessibleDatastores
-		}
-		if len(sharedDatastores) == 0 {
-			return nil, ErrNoSharedDSFound
-		}
-	}
-	return sharedDatastores, nil
 }

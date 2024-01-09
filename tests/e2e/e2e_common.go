@@ -77,12 +77,8 @@ const (
 	envSharedNFSDatastoreURL                   = "SHARED_NFS_DATASTORE_URL"
 	envSharedVMFSDatastoreURL                  = "SHARED_VMFS_DATASTORE_URL"
 	envSharedVMFSDatastore2URL                 = "SHARED_VMFS_DATASTORE2_URL"
-	envVsanDirectSetup                         = "USE_VSAN_DIRECT_DATASTORE_IN_WCP"
-	envVsanDDatastoreURL                       = "SHARED_VSAND_DATASTORE_URL"
-	envVsanDDatastore2URL                      = "SHARED_VSAND_DATASTORE2_URL"
 	envStoragePolicyNameForNonSharedDatastores = "STORAGE_POLICY_FOR_NONSHARED_DATASTORES"
 	envStoragePolicyNameForSharedDatastores    = "STORAGE_POLICY_FOR_SHARED_DATASTORES"
-	envStoragePolicyNameForVsanVmfsDatastores  = "STORAGE_POLICY_FOR_VSAN_VMFS_DATASTORES"
 	envStoragePolicyNameForSharedDatastores2   = "STORAGE_POLICY_FOR_SHARED_DATASTORES_2"
 	envStoragePolicyNameFromInaccessibleZone   = "STORAGE_POLICY_FROM_INACCESSIBLE_ZONE"
 	envStoragePolicyNameWithThickProvision     = "STORAGE_POLICY_WITH_THICK_PROVISIONING"
@@ -96,11 +92,8 @@ const (
 	envVmdkDiskURL                             = "DISK_URL_PATH"
 	envVolumeOperationsScale                   = "VOLUME_OPS_SCALE"
 	envComputeClusterName                      = "COMPUTE_CLUSTER_NAME"
-	envTKGImage                                = "TKG_IMAGE_NAME"
 	execCommand                                = "/bin/df -T /mnt/volume1 | " +
 		"/bin/awk 'FNR == 2 {print $2}' > /mnt/volume1/fstype && while true ; do sleep 2 ; done"
-	execRWXCommandPod = "echo 'Hello message from Pod' > /mnt/volume1/Pod.html  && " +
-		"chmod o+rX /mnt /mnt/volume1/Pod.html && while true ; do sleep 2 ; done"
 	execRWXCommandPod1 = "echo 'Hello message from Pod1' > /mnt/volume1/Pod1.html  && " +
 		"chmod o+rX /mnt /mnt/volume1/Pod1.html && while true ; do sleep 2 ; done"
 	execRWXCommandPod2 = "echo 'Hello message from Pod2' > /mnt/volume1/Pod2.html  && " +
@@ -199,8 +192,8 @@ const (
 	waitTimeForCNSNodeVMAttachmentReconciler  = 30 * time.Second
 	wcpServiceName                            = "wcp"
 	vmcWcpHost                                = "10.2.224.24" //This is the LB IP of VMC WCP and its constant
-	devopsTKG                                 = "test-cluster-e2e-script-2"
-	cloudadminTKG                             = "test-cluster-e2e-script-3"
+	devopsTKG                                 = "test-cluster-e2e-script"
+	cloudadminTKG                             = "test-cluster-e2e-script-1"
 	vmOperatorAPI                             = "/apis/vmoperator.vmware.com/v1alpha1/"
 	devopsUser                                = "testuser"
 	zoneKey                                   = "failure-domain.beta.kubernetes.io/zone"
@@ -221,70 +214,17 @@ const (
 	topologyLength                             = 5
 	tkgshaTopologyLevels                       = 1
 	vmcPrdEndpoint                             = "https://vmc.vmware.com/vmc/api/orgs/"
-	vsphereClusterIdConfigMapName              = "vsphere-csi-cluster-id"
 	authAPI                                    = "https://console.cloud.vmware.com/csp/gateway/am/api/auth" +
 		"/api-tokens/authorize"
-)
-
-/*
-// test suite labels
-
-flaky -> label include the testcases which fails intermittently
-disruptive -> label include the testcases which are disruptive in nature
-vanilla -> label include the testcases for block, file, configSecret, topology etc.
-stable -> label include the testcases which do not fail
-longRunning -> label include the testcases which takes longer time for completion
-p0 -> label include the testcases which are P0
-p1 -> label include the testcases which are P1
-p2 -> label include the testcases which are P2
-semiAutomated -> label include the testcases which are semi-automated
-newTests -> label include the testcases which are newly automated
-core -> label include the testcases specific to block or file
-level2 -> label include the level-2 topology testcases or pipeline specific
-level5 -> label include the level-5 topology testcases
-customPort -> label include the testcases running on vCenter custom port <VC:444>
-deprecated ->label include the testcases which are no longer in execution
-*/
-const (
-	flaky               = "flaky"
-	disruptive          = "disruptive"
-	wcp                 = "wcp"
-	tkg                 = "tkg"
-	vanilla             = "vanilla"
-	topology            = "topology"
-	preferential        = "preferential"
-	vsphereConfigSecret = "vsphereConfigSecret"
-	snapshot            = "snapshot"
-	stable              = "stable"
-	newTests            = "newTests"
-	multiVc             = "multiVc"
-	block               = "block"
-	file                = "file"
-	core                = "core"
-	p0                  = "p0"
-	p1                  = "p1"
-	p2                  = "p2"
-	vsanStretch         = "vsanStretch"
-	longRunning         = "longRunning"
-	deprecated          = "deprecated"
-	vmc                 = "vmc"
-	tkgsHA              = "tkgsHA"
-	thickThin           = "thickThin"
-	customPort          = "customPort"
-	windows             = "windows"
-	semiAutomated       = "semiAutomated"
-	level2              = "level2"
-	level5              = "level5"
 )
 
 // The following variables are required to know cluster type to run common e2e
 // tests. These variables will be set once during test suites initialization.
 var (
-	vanillaCluster       bool
-	supervisorCluster    bool
-	guestCluster         bool
-	rwxAccessMode        bool
-	wcpVsanDirectCluster bool
+	vanillaCluster    bool
+	supervisorCluster bool
+	guestCluster      bool
+	rwxAccessMode     bool
 )
 
 // For busybox pod image
@@ -303,6 +243,7 @@ var (
 	migratedPluginAnnotation        = "storage.alpha.kubernetes.io/migrated-plugins"
 	pvcAnnotationStorageProvisioner = "volume.beta.kubernetes.io/storage-provisioner"
 	pvAnnotationProvisionedBy       = "pv.kubernetes.io/provisioned-by"
+	scAnnotation4Statefulset        = "volume.beta.kubernetes.io/storage-class"
 	nodeMapper                      = &NodeMapper{}
 )
 
@@ -317,6 +258,11 @@ var (
 	configSecretTestUser2Password = "VMware!234"
 	configSecretTestUser1         = "testuser1"
 	configSecretTestUser2         = "testuser2"
+)
+
+// CSI Internal FSSs
+var (
+	useCsiNodeID = "use-csinode-id"
 )
 
 // Nimbus generated passwords
@@ -344,24 +290,6 @@ var (
 	nfstoragePolicyDatastoreUrl           = "NFS_STORAGE_POLICY_DATASTORE_URL"
 	workerClusterMap                      = "WORKER_CLUSTER_MAP"
 	datastoreClusterMap                   = "DATASTORE_CLUSTER_MAP"
-)
-
-// For multivc
-var (
-	envSharedDatastoreURLVC1          = "SHARED_VSPHERE_DATASTORE_URL_VC1"
-	envSharedDatastoreURLVC2          = "SHARED_VSPHERE_DATASTORE_URL_VC2"
-	envStoragePolicyNameToDeleteLater = "STORAGE_POLICY_TO_DELETE_LATER"
-	envMultiVCSetupType               = "MULTI_VC_SETUP_TYPE"
-	envStoragePolicyNameVC1           = "STORAGE_POLICY_VC1"
-	envStoragePolicyNameInVC1VC2      = "STORAGE_POLICY_NAME_COMMON_IN_VC1_VC2"
-	envPreferredDatastoreUrlVC1       = "PREFERRED_DATASTORE_URL_VC1"
-	envPreferredDatastoreUrlVC2       = "PREFERRED_DATASTORE_URL_VC2"
-)
-
-// VolumeSnapshotClass env variables for tkg-snapshot
-var (
-	envVolSnapClassDel = "VOLUME_SNAPSHOT_CLASS_DELETE"
-	deletionPolicy     = "Delete"
 )
 
 // GetAndExpectStringEnvVar parses a string from env variable.

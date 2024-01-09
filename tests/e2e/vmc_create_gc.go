@@ -17,9 +17,6 @@ limitations under the License.
 package e2e
 
 import (
-	"fmt"
-	"os"
-
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -45,11 +42,6 @@ var _ = ginkgo.Describe("Create GC", func() {
 
 	ginkgo.It("[vmc] Create GC using devops user", func() {
 
-		tkgImageName := os.Getenv(envTKGImage)
-		if tkgImageName == "" {
-			ginkgo.Skip(fmt.Sprintf("Env %v is missing", envTKGImage))
-		}
-
 		ginkgo.By("Get WCP session id")
 		gomega.Expect((e2eVSphere.Config.Global.VmcDevopsUser)).NotTo(gomega.BeEmpty(), "Devops user is not set")
 		wcpToken := getWCPSessionId(vmcWcpHost, e2eVSphere.Config.Global.VmcDevopsUser,
@@ -57,7 +49,7 @@ var _ = ginkgo.Describe("Create GC", func() {
 		framework.Logf("vmcWcpHost %s", vmcWcpHost)
 
 		ginkgo.By("Creating Guest Cluster with Devops User")
-		createGC(vmcWcpHost, wcpToken, tkgImageName, devopsTKG)
+		createGC(vmcWcpHost, wcpToken)
 		ginkgo.By("Validate the Guest Cluster is up and running")
 		err := getGC(vmcWcpHost, wcpToken, devopsTKG)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -74,11 +66,6 @@ var _ = ginkgo.Describe("Create GC", func() {
 
 	ginkgo.It("[vmc] Create GC using cloudadmin user", func() {
 
-		tkgImageName := os.Getenv(envTKGImage)
-		if tkgImageName == "" {
-			ginkgo.Skip(fmt.Sprintf("Env %v is missing", envTKGImage))
-		}
-
 		ginkgo.By("Get WCP session id")
 		gomega.Expect((e2eVSphere.Config.Global.VmcCloudUser)).NotTo(gomega.BeEmpty(), "VmcCloudUser is not set")
 		wcpToken := getWCPSessionId(vmcWcpHost, e2eVSphere.Config.Global.VmcCloudUser,
@@ -86,7 +73,7 @@ var _ = ginkgo.Describe("Create GC", func() {
 		framework.Logf("vmcWcpHost %s", vmcWcpHost)
 
 		ginkgo.By("Creating Guest Cluster with cloudadmin User")
-		createGC(vmcWcpHost, wcpToken, tkgImageName, cloudadminTKG)
+		createGC(vmcWcpHost, wcpToken)
 		ginkgo.By("Validate the Guest Cluster is up and running")
 		err := getGC(vmcWcpHost, wcpToken, cloudadminTKG)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

@@ -161,7 +161,6 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		svcClient, svNamespace := getSvcClientAndNamespace()
 		setResourceQuota(svcClient, svNamespace, defaultrqLimit)
-		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	// Combined:

@@ -65,7 +65,6 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] PVCs claiming the available resource in p
 	ginkgo.AfterEach(func() {
 		svcClient, svcNamespace := getSvcClientAndNamespace()
 		setResourceQuota(svcClient, svcNamespace, rqLimit)
-		dumpSvcNsEventsOnTestFailure(svcClient, svcNamespace)
 	})
 
 	/*

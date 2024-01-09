@@ -68,7 +68,6 @@ var _ = ginkgo.Describe("[rwm-csi-destructive-tkg] Statefulsets with File Volume
 	ginkgo.AfterEach(func() {
 		svcClient, svNamespace := getSvcClientAndNamespace()
 		setResourceQuota(svcClient, svNamespace, defaultrqLimit)
-		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	/*
@@ -168,11 +167,10 @@ var _ = ginkgo.Describe("[rwm-csi-destructive-tkg] Statefulsets with File Volume
 
 		statefulset := GetStatefulSetFromManifest(namespace)
 		ginkgo.By("Creating statefulset")
-		scName := defaultNginxStorageClassName
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].Spec.AccessModes[0] =
 			v1.ReadWriteMany
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Spec.StorageClassName = &scName
+			Annotations["volume.beta.kubernetes.io/storage-class"] = defaultNginxStorageClassName
 		*statefulset.Spec.Replicas = 2
 		CreateStatefulSet(namespace, statefulset, clientNewGc)
 		replicas := *(statefulset.Spec.Replicas)

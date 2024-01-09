@@ -54,11 +54,6 @@ import (
 const (
 	testVolumeName  = "test-pvc"
 	testClusterName = "test-cluster"
-	// TODO: We may need to decide this value by checking GlobalMaxSnapshotsPerBlockVolume
-	// variable's value when it is set for WCP.
-	// Currently keeping this as 3, since it is the recommended value of snapshots
-	// per block volume in vSphere.
-	maxNumOfSnapshots = 3
 )
 
 var (
@@ -127,6 +122,11 @@ func configFromSimWithTLS(tlsConfig *tls.Config, insecureAllowed bool) (*config.
 		VCenterPort:  cfg.Global.VCenterPort,
 		InsecureFlag: cfg.Global.InsecureFlag,
 		Datacenters:  cfg.Global.Datacenters,
+	}
+
+	// set up the default global maximum of number of snapshots if unset
+	if cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume == 0 {
+		cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume = config.DefaultGlobalMaxSnapshotsPerBlockVolume
 	}
 
 	return cfg, func() {
@@ -630,6 +630,7 @@ func TestWCPCreateDeleteSnapshot(t *testing.T) {
 
 func TestListSnapshots(t *testing.T) {
 	ct := getControllerTest(t)
+	numOfSnapshots := ct.config.Snapshot.GlobalMaxSnapshotsPerBlockVolume
 	// Create.
 	params := make(map[string]string)
 	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
@@ -678,7 +679,7 @@ func TestListSnapshots(t *testing.T) {
 	snapshots := make(map[string]string)
 	var deleteSnapshotList []string
 
-	for i := 0; i < maxNumOfSnapshots; i++ {
+	for i := 0; i < numOfSnapshots; i++ {
 		// Snapshot a volume
 		reqCreateSnapshot := &csi.CreateSnapshotRequest{
 			SourceVolumeId: volID,
@@ -750,6 +751,7 @@ func TestListSnapshots(t *testing.T) {
 
 func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 	ct := getControllerTest(t)
+	numOfSnapshots := ct.config.Snapshot.GlobalMaxSnapshotsPerBlockVolume
 	// Create.
 	params := make(map[string]string)
 	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
@@ -798,7 +800,7 @@ func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 	snapshots := make(map[string]string)
 	var deleteSnapshotList []string
 
-	for i := 0; i < maxNumOfSnapshots; i++ {
+	for i := 0; i < numOfSnapshots; i++ {
 		// Snapshot a volume
 		reqCreateSnapshot := &csi.CreateSnapshotRequest{
 			SourceVolumeId: volID,
@@ -871,6 +873,7 @@ func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 
 func TestListSnapshotsWithToken(t *testing.T) {
 	ct := getControllerTest(t)
+	numOfSnapshots := ct.config.Snapshot.GlobalMaxSnapshotsPerBlockVolume
 	// Create.
 	params := make(map[string]string)
 	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
@@ -919,7 +922,7 @@ func TestListSnapshotsWithToken(t *testing.T) {
 	snapshots := make(map[string]string)
 	var deleteSnapshotList []string
 
-	for i := 0; i < maxNumOfSnapshots; i++ {
+	for i := 0; i < numOfSnapshots; i++ {
 		// Snapshot a volume
 		reqCreateSnapshot := &csi.CreateSnapshotRequest{
 			SourceVolumeId: volID,

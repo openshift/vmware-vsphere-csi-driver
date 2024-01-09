@@ -157,12 +157,6 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
-		ginkgo.By("Creating service")
-		service := CreateService(namespace, client)
-		defer func() {
-			deleteService(namespace, client, service)
-		}()
-
 		// Creating statefulset with 3 replicas
 		ginkgo.By("Creating statefulset with 3 replica")
 		statefulset := GetStatefulSetFromManifest(namespace)

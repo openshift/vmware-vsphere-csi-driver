@@ -110,15 +110,11 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		if guestCluster {
 			svcClient, svNamespace := getSvcClientAndNamespace()
 			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
-			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
-		}
-		if supervisorCluster {
-			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
 	})
 
 	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-guest] [csi-block-vanilla-parallelized] "+
-		"Should create and delete pod with the same volume source and data", func() {
+		"Should create and delete pod with the same volume source", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var sc *storagev1.StorageClass
