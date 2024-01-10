@@ -74,7 +74,6 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Test for label updates", func
 			ginkgo.By(fmt.Sprintf("Starting %v on the vCenter host", vsanhealthServiceName))
 			startVCServiceWait4VPs(ctx, vcAddress, vsanhealthServiceName, &isVsanHealthServiceStopped)
 		}
-		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	/*

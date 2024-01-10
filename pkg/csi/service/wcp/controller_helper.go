@@ -598,8 +598,7 @@ func (c *controller) GetVolumeToHostMapping(ctx context.Context) (map[string]str
 
 // getVolumeIDToVMMap returns the csi list volume response by computing the volumeID to nodeNames map for
 // fake attached volumes and non-fake attached volumes.
-func getVolumeIDToVMMap(ctx context.Context, volumeIDs []string, vmMoidToHostMoid,
-	volumeIDToVMMap map[string]string) (*csi.ListVolumesResponse, error) {
+func getVolumeIDToVMMap(ctx context.Context, c *controller, volumeIDs []string) (*csi.ListVolumesResponse, error) {
 	log := logger.GetLogger(ctx)
 	response := &csi.ListVolumesResponse{}
 
@@ -610,7 +609,6 @@ func getVolumeIDToVMMap(ctx context.Context, volumeIDs []string, vmMoidToHostMoi
 			fakeAttachedVolumes = append(fakeAttachedVolumes, volumeID)
 		}
 	}
-
 	// Process fake attached volumes
 	log.Debugf("Fake attached volumes %v", fakeAttachedVolumes)
 	volumeIDToNodesMap := commonco.ContainerOrchestratorUtility.GetNodesForVolumes(ctx, fakeAttachedVolumes)
@@ -626,6 +624,13 @@ func getVolumeIDToVMMap(ctx context.Context, volumeIDs []string, vmMoidToHostMoi
 			Status: volumeStatus,
 		}
 		response.Entries = append(response.Entries, entry)
+	}
+
+	// Process remaining volumes
+	vmMoidToHostMoid, volumeIDToVMMap, err := c.GetVolumeToHostMapping(ctx)
+	if err != nil {
+		log.Errorf("failed to get VM MoID to Host MoID map, err:%v", err)
+		return nil, fmt.Errorf("failed to get VM MoID to Host MoID map, err: %v", err)
 	}
 
 	hostNames := commonco.ContainerOrchestratorUtility.GetNodeIDtoNameMap(ctx)
@@ -667,5 +672,6 @@ func getVolumeIDToVMMap(ctx context.Context, volumeIDs []string, vmMoidToHostMoi
 		}
 		response.Entries = append(response.Entries, entry)
 	}
+
 	return response, nil
 }

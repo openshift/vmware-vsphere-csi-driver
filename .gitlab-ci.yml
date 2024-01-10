@@ -5,8 +5,6 @@ stages:
   - e2e-tests-dev
   - deploy-staging
   - tests-staging
-  - prod-rollout
-  - cleanup-dev
 
 run-unit-tests:
   stage: unit-test
@@ -53,16 +51,13 @@ deploy-images-dev:
   stage: deploy-dev
   # This resource group is configured with process_mode=oldest_first to make sure the pipelines are run serially.
   resource_group: production
-  # Image built from cd-infra/images/ci-deploy/Dockerfile.
+  # Image built from cd-infra/images/ci-deploy/Dockerfile from Calatrava project.
   image: $CNS_IMAGE_CI_DEPLOY_STAGE
   script:
     - ./pipeline/deploy.sh
   dependencies:
     - build-images
   artifacts:
-    paths:
-      - ./env.json
-      - ./sv_kubeconfig_content.yaml
     reports:
       dotenv: build.env
 
@@ -70,26 +65,15 @@ e2e-tests-dev:
   stage: e2e-tests-dev
   # This resource group is configured with process_mode=oldest_first to make sure the pipelines are run serially.
   resource_group: production
-  # Image built by docker file images/ci/e2e/Dockerfile.
-  # Command to build new image is
-  # docker build -t <image-name:version> --platform=Linux/x86_64 -f Dockerfile . 
-  # docker tag <image-name:version> <repo>/<image-name:version>
-  # docker push <repo>/<image-name:version>
-  image: $CSI_FVT_GOLANG
+  image: $CNS_IMAGE_GOLANG
   dependencies:
     - deploy-images-dev
   script:
     - ./pipeline/e2e-tests.sh
-  artifacts:
-    paths:
-      - ./env.json
-      - ./sv_kubeconfig_content.yaml
-    reports:
-      dotenv: build.env
 
 deploy-images-staging:
   stage: deploy-staging
-  # Image built from cd-infra/images/ci-deploy/Dockerfile.
+  # Image built from cd-infra/images/ci-deploy/Dockerfile from Calatrava project.
   image: $CNS_IMAGE_CI_DEPLOY_STAGE
   script:
     - ./pipeline/deploy-staging.sh
@@ -97,15 +81,14 @@ deploy-images-staging:
     - build-images
   only:
     - master
+  artifacts:
+    reports:
+      dotenv: build.env
 
 e2e-tests-staging:
   stage: tests-staging
-  # Image built by docker file images/ci/e2e/Dockerfile.
-  # Command to build new image is
-  # docker build -t <image-name:version> --platform=Linux/x86_64 -f Dockerfile . 
-  # docker tag <image-name:version> <repo>/<image-name:version>
-  # docker push <repo>/<image-name:version>
-  image: $CSI_FVT_GOLANG
+  # Image built from cd-infra//images/ci-e2e/Dockerfile from Calatrava project.
+  image: $CNS_IMAGE_E2E
   dependencies:
     - deploy-images-staging
   script:
@@ -115,7 +98,7 @@ e2e-tests-staging:
 
 system-tests-staging:
   stage: tests-staging
-  # Image built from cd-infra//images/ci-e2e/Dockerfile.
+  # Image built from cd-infra//images/ci-e2e/Dockerfile from Calatrava project.
   image: $CNS_IMAGE_E2E
   dependencies:
     - deploy-images-staging
@@ -126,7 +109,7 @@ system-tests-staging:
 
 perf-tests-staging:
   stage: tests-staging
-  # Image built from cd-infra//images/ci-e2e/Dockerfile.
+  # Image built from cd-infra//images/ci-e2e/Dockerfile from Calatrava project.
   image: $CNS_IMAGE_E2E
   dependencies:
     - deploy-images-staging
@@ -134,25 +117,3 @@ perf-tests-staging:
     - echo "TODO - Add perf tests."
   only:
     - master
-
-patch-prod-images:
-  stage: prod-rollout
-  # Image built from cd-infra/images/ci-deploy/Dockerfile
-  image: $CNS_IMAGE_CI_DEPLOY_STAGE
-  script:
-    - ./pipeline/patch-prod.sh
-  dependencies:
-    - build-images
-  only:
-    - master
-
-cleanup-dev:
-  stage: cleanup-dev
-  image: $CNS_IMAGE_CI_DEPLOY_STAGE
-  when: always
-  artifacts:
-    reports:
-      dotenv: build.env
-  script:
-    - chmod 777 pipeline/release-testbed.sh
-    - ./pipeline/release-testbed.sh

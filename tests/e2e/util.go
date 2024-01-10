@@ -78,6 +78,8 @@ import (
 	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 
+	snapc "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsfileaccessconfigv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsfileaccessconfig/v1alpha1"
@@ -481,50 +483,6 @@ type GetTaskTstatus struct {
 	OrgID           string      `json:"org_id"`
 }
 
-// This Struct is used for Creating tanzu cluster
-type TanzuCluster struct {
-	APIVersion string `yaml:"apiVersion"`
-	Kind       string `yaml:"kind"`
-	Metadata   struct {
-		Name      string `yaml:"name"`
-		Namespace string `yaml:"namespace"`
-	} `yaml:"metadata"`
-	Spec struct {
-		Topology struct {
-			ControlPlane struct {
-				TKR struct {
-					Reference struct {
-						Name string `yaml:"name"`
-					} `yaml:"reference"`
-				} `yaml:"tkr"`
-				Replicas     int    `yaml:"replicas"`
-				VMClass      string `yaml:"vmClass"`
-				StorageClass string `yaml:"storageClass"`
-			} `yaml:"controlPlane"`
-			NodePools []struct {
-				Replicas     int    `yaml:"replicas"`
-				Name         string `yaml:"name"`
-				VMClass      string `yaml:"vmClass"`
-				StorageClass string `yaml:"storageClass"`
-			} `yaml:"nodePools"`
-		} `yaml:"topology"`
-		Settings struct {
-			Network struct {
-				CNI struct {
-					Name string `yaml:"name"`
-				} `yaml:"cni"`
-				Services struct {
-					CIDRBlocks []string `yaml:"cidrBlocks"`
-				} `yaml:"services"`
-				Pods struct {
-					CIDRBlocks []string `yaml:"cidrBlocks"`
-				} `yaml:"pods"`
-				ServiceDomain string `yaml:"serviceDomain"`
-			} `yaml:"network"`
-		} `yaml:"settings"`
-	} `yaml:"spec"`
-}
-
 // getVSphereStorageClassSpec returns Storage Class Spec with supplied storage
 // class parameters.
 func getVSphereStorageClassSpec(scName string, scParameters map[string]string,
@@ -588,16 +546,23 @@ func getPvFromClaim(client clientset.Interface, namespace string, claimName stri
 // getNodeUUID returns Node VM UUID for requested node.
 func getNodeUUID(ctx context.Context, client clientset.Interface, nodeName string) string {
 	vmUUID := ""
-	csiNode, err := client.StorageV1().CSINodes().Get(ctx, nodeName, metav1.GetOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	csiDriverFound := false
-	for _, driver := range csiNode.Spec.Drivers {
-		if driver.Name == e2evSphereCSIDriverName {
-			csiDriverFound = true
-			vmUUID = driver.NodeID
+	if isCsiFssEnabled(ctx, client, GetAndExpectStringEnvVar(envCSINamespace), useCsiNodeID) {
+		csiNode, err := client.StorageV1().CSINodes().Get(ctx, nodeName, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		csiDriverFound := false
+		for _, driver := range csiNode.Spec.Drivers {
+			if driver.Name == e2evSphereCSIDriverName {
+				csiDriverFound = true
+				vmUUID = driver.NodeID
+			}
 		}
+		gomega.Expect(csiDriverFound).To(gomega.BeTrue(), "CSI driver not found in CSI node %s", nodeName)
+	} else {
+		node, err := client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		vmUUID = strings.TrimPrefix(node.Spec.ProviderID, providerPrefix)
+		gomega.Expect(vmUUID).NotTo(gomega.BeEmpty())
 	}
-	gomega.Expect(csiDriverFound).To(gomega.BeTrue(), "CSI driver not found in CSI node %s", nodeName)
 	ginkgo.By(fmt.Sprintf("VM UUID is: %s for node: %s", vmUUID, nodeName))
 	return vmUUID
 }
@@ -893,7 +858,6 @@ func createPVC(client clientset.Interface, pvcnamespace string, pvclaimlabels ma
 // storage class.
 func scaleCreatePVC(client clientset.Interface, pvcnamespace string, pvclaimlabels map[string]string, ds string,
 	storageclass *storagev1.StorageClass, accessMode v1.PersistentVolumeAccessMode, wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 
 	pvcspec := getPersistentVolumeClaimSpecWithStorageClass(pvcnamespace, ds, storageclass, pvclaimlabels, accessMode)
@@ -912,7 +876,6 @@ func scaleCreatePVC(client clientset.Interface, pvcnamespace string, pvclaimlabe
 func scaleCreateDeletePVC(client clientset.Interface, pvcnamespace string, pvclaimlabels map[string]string,
 	ds string, storageclass *storagev1.StorageClass, accessMode v1.PersistentVolumeAccessMode,
 	wg *sync.WaitGroup, lock *sync.Mutex, worker int) {
-	defer ginkgo.GinkgoRecover()
 	ctx, cancel := context.WithCancel(context.Background())
 	var totalPVCDeleted int = 0
 	defer cancel()
@@ -985,12 +948,9 @@ func updateDeploymentReplicawithWait(client clientset.Interface, count int32, na
 	var err error
 	waitErr := wait.Poll(healthStatusPollInterval, healthStatusPollTimeout, func() (bool, error) {
 		deployment, err = client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if err != nil {
-			if count == 0 && apierrors.IsNotFound(err) {
-				return true, nil
-			} else {
-				return false, err
-			}
+			return false, nil
 		}
 		*deployment.Spec.Replicas = count
 		ginkgo.By("Waiting for update operation on deployment to take effect")
@@ -1150,7 +1110,7 @@ func updateCSIDeploymentProvisionerTimeout(client clientset.Interface, namespace
 	framework.Logf("Waiting for a min for update operation on deployment to take effect...")
 	time.Sleep(1 * time.Minute)
 	err = fpod.WaitForPodsRunningReady(client, csiSystemNamespace, int32(num_csi_pods), 0,
-		2*pollTimeout, ignoreLabels)
+		pollTimeout, ignoreLabels)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 }
 
@@ -1450,7 +1410,7 @@ func checkVcenterServicesRunning(
 
 	var pollTime time.Duration
 	if len(timeout) == 0 {
-		pollTime = pollTimeout * 6
+		pollTime = pollTimeout * 2
 	} else {
 		pollTime = timeout[0]
 	}
@@ -1636,7 +1596,7 @@ func upgradeTKG(wcpHost string, wcpToken string, tkgCluster string, tkgImage str
 }
 
 // createGC method creates GC and takes WCP host and bearer token as input param
-func createGC(wcpHost string, wcpToken string, tkgImageName string, clusterName string) {
+func createGC(wcpHost string, wcpToken string) {
 
 	transCfg := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // ignore expired SSL certificates
@@ -1651,26 +1611,7 @@ func createGC(wcpHost string, wcpToken string, tkgImageName string, clusterName 
 	gcBytes, err := os.ReadFile(tkg_yaml)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	var tkg TanzuCluster
-	err = yaml.Unmarshal([]byte(gcBytes), &tkg)
-	if err != nil {
-		framework.Logf("Error: %v", err)
-	}
-
-	// Change the value of the replaceImage field
-	tkg.Spec.Topology.ControlPlane.TKR.Reference.Name = tkgImageName
-	tkg.Metadata.Name = clusterName
-
-	// Marshal the updated struct back to YAML
-	updatedYAML, err := yaml.Marshal(&tkg)
-	if err != nil {
-		framework.Logf("Error: %v", err)
-	}
-
-	// Convert the marshalled YAML to []byte
-	updatedYAMLBytes := []byte(updatedYAML)
-
-	req, err := http.NewRequest("POST", createGCURL, bytes.NewBuffer(updatedYAMLBytes))
+	req, err := http.NewRequest("POST", createGCURL, bytes.NewBuffer(gcBytes))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	req.Header.Add("Authorization", "Bearer "+wcpToken)
 	req.Header.Add("Accept", "application/yaml")
@@ -2010,10 +1951,7 @@ func writeToFile(filePath, data string) error {
 // invokeVCenterChangePassword invokes `dir-cli password reset` command on the
 // given vCenter host over SSH, thereby resetting the currentPassword of the
 // `user` to the `newPassword`.
-func invokeVCenterChangePassword(user, adminPassword, newPassword, host string,
-	isMultiVcSetup bool, clientIndex int) error {
-	var copyCmd string
-	var removeCmd string
+func invokeVCenterChangePassword(user, adminPassword, newPassword, host string) error {
 	// Create an input file and write passwords into it.
 	path := "input.txt"
 	data := fmt.Sprintf("%s\n%s\n", adminPassword, newPassword)
@@ -2026,27 +1964,16 @@ func invokeVCenterChangePassword(user, adminPassword, newPassword, host string,
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}()
 	// Remote copy this input file to VC.
-	if !isMultiVcSetup {
-		copyCmd = fmt.Sprintf("/bin/cat %s | /usr/bin/ssh root@%s '/usr/bin/cat >> input_copy.txt'",
-			path, e2eVSphere.Config.Global.VCenterHostname)
-	} else {
-		vCenter := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")[clientIndex]
-		copyCmd = fmt.Sprintf("/bin/cat %s | /usr/bin/ssh root@%s '/usr/bin/cat >> input_copy.txt'",
-			path, vCenter)
-	}
+	copyCmd := fmt.Sprintf("/bin/cat %s | /usr/bin/ssh root@%s '/usr/bin/cat >> input_copy.txt'",
+		path, e2eVSphere.Config.Global.VCenterHostname)
 	fmt.Printf("Executing the command: %s\n", copyCmd)
 	_, err = exec.Command("/bin/sh", "-c", copyCmd).Output()
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 	defer func() {
 		// Remove the input_copy.txt file from VC.
-		if !isMultiVcSetup {
-			removeCmd = fmt.Sprintf("/usr/bin/ssh root@%s '/usr/bin/rm input_copy.txt'",
-				e2eVSphere.Config.Global.VCenterHostname)
-		} else {
-			vCenter := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")[clientIndex]
-			removeCmd = fmt.Sprintf("/usr/bin/ssh root@%s '/usr/bin/rm input_copy.txt'",
-				vCenter)
-		}
+		removeCmd := fmt.Sprintf("/usr/bin/ssh root@%s '/usr/bin/rm input_copy.txt'",
+			e2eVSphere.Config.Global.VCenterHostname)
 		_, err = exec.Command("/bin/sh", "-c", removeCmd).Output()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}()
@@ -2343,7 +2270,6 @@ func getVolumeIDFromSupervisorCluster(pvcName string) string {
 	svcPV := getPvFromClaim(svcClient, svNamespace, pvcName)
 	volumeHandle := svcPV.Spec.CSI.VolumeHandle
 	ginkgo.By(fmt.Sprintf("Found volume in Supervisor cluster with VolumeID: %s", volumeHandle))
-
 	return volumeHandle
 }
 
@@ -2556,7 +2482,6 @@ func verifyIsDetachedInSupervisor(ctx context.Context, f *framework.Framework,
 // namespace. It takes client, namespace, pvc, pv as input.
 func verifyPodCreation(f *framework.Framework, client clientset.Interface, namespace string,
 	pvc *v1.PersistentVolumeClaim, pv *v1.PersistentVolume) {
-	defer ginkgo.GinkgoRecover()
 	ginkgo.By("Create pod and wait for this to be in running phase")
 	pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvc}, false, "")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -3422,9 +3347,6 @@ func VsanObjIndentities(ctx context.Context, vs *vSphere, pvName string) string 
 
 	for _, cluster := range clusterComputeResource {
 		if strings.Contains(cluster.Name(), computeCluster) {
-			// Fix for NotAuthenticated issue
-			bootstrap()
-
 			clusterConfig, err := vsanHealthClient.VsanQueryObjectIdentities(ctx, cluster.Reference())
 			framework.Logf("clusterconfig %v", clusterConfig)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -4008,9 +3930,14 @@ func createPod(client clientset.Interface, namespace string, nodeSelector map[st
 	return pod, nil
 }
 
-func getDeploymentSpec(ctx context.Context, client clientset.Interface, replicas int32,
+// createDeployment create a deployment with 1 replica for given pvcs and node
+// selector.
+func createDeployment(ctx context.Context, client clientset.Interface, replicas int32,
 	podLabels map[string]string, nodeSelector map[string]string, namespace string,
-	pvclaims []*v1.PersistentVolumeClaim, command string, isPrivileged bool, image string) *appsv1.Deployment {
+	pvclaims []*v1.PersistentVolumeClaim, command string, isPrivileged bool, image string) (*appsv1.Deployment, error) {
+	if len(command) == 0 {
+		command = "trap exit TERM; while true; do sleep 1; done"
+	}
 	zero := int64(0)
 	deploymentName := "deployment-" + string(uuid.NewUUID())
 	deploymentSpec := &appsv1.Deployment{
@@ -4058,19 +3985,6 @@ func getDeploymentSpec(ctx context.Context, client clientset.Interface, replicas
 	if nodeSelector != nil {
 		deploymentSpec.Spec.Template.Spec.NodeSelector = nodeSelector
 	}
-	return deploymentSpec
-}
-
-// createDeployment create a deployment with 1 replica for given pvcs and node
-// selector.
-func createDeployment(ctx context.Context, client clientset.Interface, replicas int32,
-	podLabels map[string]string, nodeSelector map[string]string, namespace string,
-	pvclaims []*v1.PersistentVolumeClaim, command string, isPrivileged bool, image string) (*appsv1.Deployment, error) {
-	if len(command) == 0 {
-		command = "trap exit TERM; while true; do sleep 1; done"
-	}
-	deploymentSpec := getDeploymentSpec(ctx, client, replicas, podLabels, nodeSelector, namespace,
-		pvclaims, command, isPrivileged, image)
 	deployment, err := client.AppsV1().Deployments(namespace).Create(ctx, deploymentSpec, metav1.CreateOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("deployment %q Create API error: %v", deploymentSpec.Name, err)
@@ -4719,24 +4633,17 @@ which PV is provisioned.
 */
 func verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx context.Context,
 	client clientset.Interface, statefulset *appsv1.StatefulSet, namespace string,
-	allowedTopologies []v1.TopologySelectorLabelRequirement,
-	parallelStatefulSetCreation bool, isMultiVcSetup bool) error {
+	allowedTopologies []v1.TopologySelectorLabelRequirement, parallelStatefulSetCreation bool) {
 	allowedTopologiesMap := createAllowedTopologiesMap(allowedTopologies)
 	var ssPodsBeforeScaleDown *v1.PodList
-	var err error
-
 	if parallelStatefulSetCreation {
 		ssPodsBeforeScaleDown = GetListOfPodsInSts(client, statefulset)
 	} else {
 		ssPodsBeforeScaleDown = fss.GetPodList(client, statefulset)
 	}
-
 	for _, sspod := range ssPodsBeforeScaleDown.Items {
-		_, err = client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
+		_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, volumespec := range sspod.Spec.Volumes {
 			if volumespec.PersistentVolumeClaim != nil {
 				// get pv details
@@ -4746,60 +4653,36 @@ func verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx context.Cont
 				ginkgo.By("Verifying PV node affinity details")
 				res, err := verifyVolumeTopologyForLevel5(pv, allowedTopologiesMap)
 				if res {
-					framework.Logf("PV %s node affinity details lie in the specified allowed "+
-						"topologies of Storage Class", pv.Name)
+					framework.Logf("PV %s node affinity details lies in the specified allowed topologies of Storage Class", pv.Name)
 				}
-				if !res {
-					return fmt.Errorf("PV %s node affinity details are not in the specified allowed "+
-						"topologies of Storage Class", pv.Name)
-				}
-				if err != nil {
-					return err
-				}
+				gomega.Expect(res).To(gomega.BeTrue(), "PV %s node affinity details is not in the "+
+					"specified allowed topologies of Storage Class", pv.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				// fetch node details
 				nodeList, err := fnodes.GetReadySchedulableNodes(client)
-				if err != nil {
-					return err
+				framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
+				if !(len(nodeList.Items) > 0) {
+					framework.Failf("Unable to find ready and schedulable Node")
 				}
-				if len(nodeList.Items) <= 0 {
-					return fmt.Errorf("unable to find ready and schedulable Node")
-				}
-
 				// verify pod is running on appropriate nodes
 				ginkgo.By("Verifying If Pods are running on appropriate nodes as mentioned in SC")
 				res, err = verifyPodLocationLevel5(&sspod, nodeList, allowedTopologiesMap)
 				if res {
-					framework.Logf("Pod %v is running on an appropriate node as specified in the "+
-						"allowed topologies of Storage Class", sspod.Name)
+					framework.Logf("Pod %v is running on appropriate node as specified "+
+						"in the allowed topolgies of Storage Class", sspod.Name)
 				}
-				if !res {
-					return fmt.Errorf("pod %v is not running on an appropriate node as specified "+
-						"in the allowed topologies of Storage Class", sspod.Name)
-				}
-				if err != nil {
-					return err
-				}
+				gomega.Expect(res).To(gomega.BeTrue(), "Pod %v is not running on appropriate node "+
+					"as specified in allowed topolgies of Storage Class", sspod.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				// Verify the attached volume match the one in CNS cache
-				if !isMultiVcSetup {
-					err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				} else {
-					err := verifyVolumeMetadataInCNSForMultiVC(&multiVCe2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				}
+				error := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+				gomega.Expect(error).NotTo(gomega.HaveOccurred())
 			}
 		}
 	}
-
-	return nil
 }
 
 /*
@@ -4877,29 +4760,20 @@ func scaleStatefulSetPods(c clientset.Interface, ss *appsv1.StatefulSet, count i
 }
 
 /*
-scaleDownStatefulSetPod util is used to perform scale down operation on StatefulSert Pods
-and later verifies that after scale down operation volume gets detached from the node
-and returns nil if no error found
+scaleDownStatefulSetPod is a utility method which is used to scale down the count of StatefulSet replicas.
 */
 func scaleDownStatefulSetPod(ctx context.Context, client clientset.Interface,
-	statefulset *appsv1.StatefulSet, namespace string, replicas int32, parallelStatefulSetCreation bool,
-	isMultiVcSetup bool) error {
+	statefulset *appsv1.StatefulSet, namespace string, replicas int32, parallelStatefulSetCreation bool) {
 	ginkgo.By(fmt.Sprintf("Scaling down statefulsets to number of Replica: %v", replicas))
 	var ssPodsAfterScaleDown *v1.PodList
-	var err error
-
 	if parallelStatefulSetCreation {
 		_, scaledownErr := scaleStatefulSetPods(client, statefulset, replicas)
-		if scaledownErr != nil {
-			return scaledownErr
-		}
+		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulset)
 	} else {
 		_, scaledownErr := fss.Scale(client, statefulset, replicas)
-		if scaledownErr != nil {
-			return scaledownErr
-		}
+		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
 		ssPodsAfterScaleDown = fss.GetPodList(client, statefulset)
 	}
@@ -4907,124 +4781,75 @@ func scaleDownStatefulSetPod(ctx context.Context, client clientset.Interface,
 	// After scale down, verify vSphere volumes are detached from deleted pods
 	ginkgo.By("Verify Volumes are detached from Nodes after Statefulsets is scaled down")
 	for _, sspod := range ssPodsAfterScaleDown.Items {
-		_, err = client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
+		_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
 		if err != nil {
-			if apierrors.IsNotFound(err) {
-				for _, volumespec := range sspod.Spec.Volumes {
-					if volumespec.PersistentVolumeClaim != nil {
-						pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
-						if !isMultiVcSetup {
-							isDiskDetached, detachErr := e2eVSphere.waitForVolumeDetachedFromNode(
-								client, pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
-							if detachErr != nil {
-								return detachErr
-							}
-							if !isDiskDetached {
-								return fmt.Errorf("volume %q is not detached from the node %q",
-									pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
-							}
-						} else {
-							isDiskDetached, detachErr := multiVCe2eVSphere.waitForVolumeDetachedFromNodeInMultiVC(
-								client, pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
-							if detachErr != nil {
-								return detachErr
-							}
-							if !isDiskDetached {
-								return fmt.Errorf("volume %q is not detached from the node %q",
-									pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
-							}
-						}
-					}
+			gomega.Expect(apierrors.IsNotFound(err), gomega.BeTrue())
+			for _, volumespec := range sspod.Spec.Volumes {
+				if volumespec.PersistentVolumeClaim != nil {
+					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+					isDiskDetached, err := e2eVSphere.waitForVolumeDetachedFromNode(
+						client, pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					gomega.Expect(isDiskDetached).To(gomega.BeTrue(),
+						fmt.Sprintf("Volume %q is not detached from the node %q",
+							pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName))
 				}
-			} else {
-				return err
 			}
 		}
 	}
 	// After scale down, verify the attached volumes match those in CNS Cache
 	for _, sspod := range ssPodsAfterScaleDown.Items {
-		_, err = client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
+		_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, volumespec := range sspod.Spec.Volumes {
 			if volumespec.PersistentVolumeClaim != nil {
-				if !isMultiVcSetup {
-					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
-					err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				} else {
-					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
-					err := verifyVolumeMetadataInCNSForMultiVC(&multiVCe2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				}
+				pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+				err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}
 	}
-	return nil
 }
 
 /*
-scaleUpStatefulSetPod util is used to perform scale up operation on StatefulSert Pods
-and later verifies that after scale up operation volume get successfully attached to the node
-and returns nil if no error found
+scaleUpStatefulSetPod is a utility method which is used to scale up the count of StatefulSet replicas.
 */
 func scaleUpStatefulSetPod(ctx context.Context, client clientset.Interface,
-	statefulset *appsv1.StatefulSet, namespace string, replicas int32,
-	parallelStatefulSetCreation bool, isMultiVcSetup bool) error {
+	statefulset *appsv1.StatefulSet, namespace string, replicas int32, parallelStatefulSetCreation bool) {
 	ginkgo.By(fmt.Sprintf("Scaling up statefulsets to number of Replica: %v", replicas))
 	var ssPodsAfterScaleUp *v1.PodList
-	var err error
-
 	if parallelStatefulSetCreation {
 		_, scaleupErr := scaleStatefulSetPods(client, statefulset, replicas)
-		if scaleupErr != nil {
-			return scaleupErr
-		}
+		gomega.Expect(scaleupErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(client, statefulset, replicas)
 		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
 
 		ssPodsAfterScaleUp = GetListOfPodsInSts(client, statefulset)
-		if len(ssPodsAfterScaleUp.Items) == 0 {
-			return fmt.Errorf("unable to get list of Pods from the Statefulset: %v", statefulset.Name)
-		}
-		if len(ssPodsAfterScaleUp.Items) != int(replicas) {
-			return fmt.Errorf("number of Pods in the statefulset should match with number of replicas")
-		}
+		gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
+			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
+		gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
+			"Number of Pods in the statefulset should match with number of replicas")
 	} else {
 		_, scaleupErr := fss.Scale(client, statefulset, replicas)
-		if scaleupErr != nil {
-			return scaleupErr
-		}
+		gomega.Expect(scaleupErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(client, statefulset, replicas)
 		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
 
 		ssPodsAfterScaleUp = fss.GetPodList(client, statefulset)
-		if len(ssPodsAfterScaleUp.Items) == 0 {
-			return fmt.Errorf("unable to get list of Pods from the Statefulset: %v", statefulset.Name)
-		}
-		if len(ssPodsAfterScaleUp.Items) != int(replicas) {
-			return fmt.Errorf("number of Pods in the statefulset should match with number of replicas")
-		}
+		gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
+			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
+		gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
+			"Number of Pods in the statefulset should match with number of replicas")
 	}
 
 	// After scale up, verify all vSphere volumes are attached to node VMs.
 	ginkgo.By("Verify all volumes are attached to Nodes after Statefulsets is scaled up")
 	for _, sspod := range ssPodsAfterScaleUp.Items {
-		err = fpod.WaitTimeoutForPodReadyInNamespace(client, sspod.Name, statefulset.Namespace, pollTimeout)
-		if err != nil {
-			return err
-		}
+		err := fpod.WaitTimeoutForPodReadyInNamespace(client, sspod.Name, statefulset.Namespace, pollTimeout)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		pod, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, volumespec := range pod.Spec.Volumes {
 			if volumespec.PersistentVolumeClaim != nil {
 				pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
@@ -5039,53 +4864,20 @@ func scaleUpStatefulSetPod(ctx context.Context, client clientset.Interface,
 				} else {
 					annotations := pod.Annotations
 					vmUUID, exists = annotations[vmUUIDLabel]
-					if !exists {
-						return fmt.Errorf("pod doesn't have %s annotation", vmUUIDLabel)
-					}
-					if !isMultiVcSetup {
-						_, err := e2eVSphere.getVMByUUID(ctx, vmUUID)
-						if err != nil {
-							return err
-						}
-					} else {
-						_, err := multiVCe2eVSphere.getVMByUUIDForMultiVC(ctx, vmUUID)
-						if err != nil {
-							return err
-						}
-					}
+					gomega.Expect(exists).To(gomega.BeTrue(), fmt.Sprintf("Pod doesn't have %s annotation", vmUUIDLabel))
+					_, err := e2eVSphere.getVMByUUID(ctx, vmUUID)
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
-				if !isMultiVcSetup {
-					isDiskAttached, err := e2eVSphere.isVolumeAttachedToVM(client, pv.Spec.CSI.VolumeHandle, vmUUID)
-					if err != nil {
-						return err
-					}
-					if !isDiskAttached {
-						return fmt.Errorf("disk is not attached to the node")
-					}
-					err = verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				} else {
-					isDiskAttached, err := multiVCe2eVSphere.verifyVolumeIsAttachedToVMInMultiVC(client,
-						pv.Spec.CSI.VolumeHandle, vmUUID)
-					if err != nil {
-						return err
-					}
-					if !isDiskAttached {
-						return fmt.Errorf("disk is not attached to the node")
-					}
-					err = verifyVolumeMetadataInCNSForMultiVC(&multiVCe2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				}
+				isDiskAttached, err := e2eVSphere.isVolumeAttachedToVM(client, pv.Spec.CSI.VolumeHandle, vmUUID)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Disk is not attached to the node")
+				gomega.Expect(isDiskAttached).To(gomega.BeTrue(), "Disk is not attached")
+				ginkgo.By("After scale up, verify the attached volumes match those in CNS Cache")
+				err = verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}
 	}
-	return nil
 }
 
 /*
@@ -5190,30 +4982,20 @@ PV is provisioned.
 */
 func verifyPVnodeAffinityAndPODnodedetailsForDeploymentSetsLevel5(ctx context.Context,
 	client clientset.Interface, deployment *appsv1.Deployment, namespace string,
-	allowedTopologies []v1.TopologySelectorLabelRequirement,
-	parallelDeplCreation bool, isMultiVcSetup bool) error {
+	allowedTopologies []v1.TopologySelectorLabelRequirement, parallelDeplCreation bool) {
 	allowedTopologiesMap := createAllowedTopologiesMap(allowedTopologies)
 	var pods *v1.PodList
 	var err error
-
 	if parallelDeplCreation {
 		pods, err = GetPodsForMultipleDeployment(client, deployment)
-		if err != nil {
-			return err
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	} else {
 		pods, err = fdep.GetPodsForDeployment(client, deployment)
-		if err != nil {
-			return err
-		}
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
-
 	for _, sspod := range pods.Items {
 		_, err := client.CoreV1().Pods(namespace).Get(ctx, sspod.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, volumespec := range sspod.Spec.Volumes {
 			if volumespec.PersistentVolumeClaim != nil {
 				// get pv details
@@ -5223,130 +5005,87 @@ func verifyPVnodeAffinityAndPODnodedetailsForDeploymentSetsLevel5(ctx context.Co
 				ginkgo.By("Verifying PV node affinity details")
 				res, err := verifyVolumeTopologyForLevel5(pv, allowedTopologiesMap)
 				if res {
-					framework.Logf("PV %s node affinity details lie in the specified allowed "+
-						"topologies of Storage Class", pv.Name)
+					framework.Logf("PV %s node affinity details lies in the specified allowed topologies of Storage Class", pv.Name)
 				}
-				if !res {
-					return fmt.Errorf("PV %s node affinity details are not in the specified allowed "+
-						"topologies of Storage Class", pv.Name)
-				}
-				if err != nil {
-					return err
-				}
+				gomega.Expect(res).To(gomega.BeTrue(), "PV %s node affinity details is not in the "+
+					"specified allowed topologies of Storage Class", pv.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				// fetch node details
 				nodeList, err := fnodes.GetReadySchedulableNodes(client)
-				if err != nil {
-					return err
+				framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
+				if !(len(nodeList.Items) > 0) {
+					framework.Failf("Unable to find ready and schedulable Node")
 				}
-				if len(nodeList.Items) <= 0 {
-					return fmt.Errorf("unable to find ready and schedulable Node")
-				}
-
 				// verify pod is running on appropriate nodes
 				ginkgo.By("Verifying If Pods are running on appropriate nodes as mentioned in SC")
 				res, err = verifyPodLocationLevel5(&sspod, nodeList, allowedTopologiesMap)
 				if res {
-					framework.Logf("Pod %v is running on an appropriate node as specified in the "+
-						"allowed topologies of Storage Class", sspod.Name)
+					framework.Logf("Pod %v is running on appropriate node as specified in the "+
+						"allowed topolgies of Storage Class", sspod.Name)
 				}
-				if !res {
-					return fmt.Errorf("pod %v is not running on an appropriate node as specified in the "+
-						"allowed topologies of Storage Class", sspod.Name)
-				}
-				if err != nil {
-					return err
-				}
+				gomega.Expect(res).To(gomega.BeTrue(), "Pod %v is not running on appropriate node "+
+					"as specified in allowed topolgies of Storage Class", sspod.Name)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				// Verify the attached volume match the one in CNS cache
-				if !isMultiVcSetup {
-					err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				} else {
-					err := verifyVolumeMetadataInCNSForMultiVC(&multiVCe2eVSphere, pv.Spec.CSI.VolumeHandle,
-						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
-					if err != nil {
-						return err
-					}
-				}
+				error := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
+				gomega.Expect(error).NotTo(gomega.HaveOccurred())
 			}
 		}
 	}
-
-	return nil
 }
 
 /*
 For Standalone Pod
-verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5
-verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5 for Standalone Pod verifies that PV
+verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5 for Standalone Pod verifies that PV
 node Affinity rules should match the topology constraints specified in the storage class.
 Also it verifies that a pod is scheduled on a node that belongs to the topology on which PV
 is provisioned.
 */
-func verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx context.Context,
+func verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx context.Context,
 	client clientset.Interface, pod *v1.Pod, namespace string,
-	allowedTopologies []v1.TopologySelectorLabelRequirement, isMultiVcSetup bool) error {
+	allowedTopologies []v1.TopologySelectorLabelRequirement) {
 	allowedTopologiesMap := createAllowedTopologiesMap(allowedTopologies)
 	for _, volumespec := range pod.Spec.Volumes {
 		if volumespec.PersistentVolumeClaim != nil {
 			// get pv details
 			pv := getPvFromClaim(client, pod.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
-			if pv == nil {
-				return fmt.Errorf("failed to get PV for claim: %s", volumespec.PersistentVolumeClaim.ClaimName)
-			}
 
 			// verify pv node affinity details as specified on SC
 			ginkgo.By("Verifying PV node affinity details")
 			res, err := verifyVolumeTopologyForLevel5(pv, allowedTopologiesMap)
-			if err != nil {
-				return fmt.Errorf("error verifying PV node affinity: %v", err)
+			if res {
+				framework.Logf("PV %s node affinity details lies in the specified allowed topologies of Storage Class", pv.Name)
 			}
-			if !res {
-				return fmt.Errorf("PV %s node affinity details are not in the specified allowed "+
-					"topologies of Storage Class", pv.Name)
-			}
+			gomega.Expect(res).To(gomega.BeTrue(), "PV %s node affinity details is not in the specified "+
+				"allowed topologies of Storage Class", pv.Name)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// fetch node details
 			nodeList, err := fnodes.GetReadySchedulableNodes(client)
-			if err != nil {
-				return fmt.Errorf("error getting ready and schedulable nodes: %v", err)
-			}
+			framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
 			if !(len(nodeList.Items) > 0) {
-				return errors.New("no ready and schedulable nodes found")
+				framework.Failf("Unable to find ready and schedulable Node")
 			}
-
 			// verify pod is running on appropriate nodes
 			ginkgo.By("Verifying If Pods are running on appropriate nodes as mentioned in SC")
 			res, err = verifyPodLocationLevel5(pod, nodeList, allowedTopologiesMap)
-			if err != nil {
-				return fmt.Errorf("error verifying pod location: %v", err)
+			if res {
+				framework.Logf("Pod %v is running on appropriate node as specified in the allowed "+
+					"topolgies of Storage Class", pod.Name)
 			}
-			if !res {
-				return fmt.Errorf("pod %v is not running on appropriate node as specified in allowed "+
-					"topologies of Storage Class", pod.Name)
-			}
+			gomega.Expect(res).To(gomega.BeTrue(), "Pod %v is not running on appropriate node as "+
+				"specified in allowed topolgies of Storage Class", pod.Name)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-			// Verify the attached volume matches the one in CNS cache
-			if !isMultiVcSetup {
-				err := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
-					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, pod.Name)
-				if err != nil {
-					return fmt.Errorf("error verifying volume metadata in CNS: %v", err)
-				}
-			} else {
-				err := verifyVolumeMetadataInCNSForMultiVC(&multiVCe2eVSphere, pv.Spec.CSI.VolumeHandle,
-					volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, pod.Name)
-				if err != nil {
-					return fmt.Errorf("error verifying volume metadata in CNS for multi-VC: %v", err)
-				}
-			}
+			// Verify the attached volume match the one in CNS cache
+			error := verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+				volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, pod.Name)
+			gomega.Expect(error).NotTo(gomega.HaveOccurred())
 		}
 	}
-	return nil
 }
 
 func getPersistentVolumeSpecWithStorageClassFCDNodeSelector(volumeHandle string,
@@ -5406,7 +5145,6 @@ func getPersistentVolumeSpecWithStorageClassFCDNodeSelector(volumeHandle string,
 func getNodeSelectorTerms(allowedTopologies []v1.TopologySelectorLabelRequirement) []v1.NodeSelectorTerm {
 	var nodeSelectorRequirements []v1.NodeSelectorRequirement
 	var nodeSelectorTerms []v1.NodeSelectorTerm
-	rackTopology := allowedTopologies[len(allowedTopologies)-1]
 
 	for i := 0; i < len(allowedTopologies)-1; i++ {
 		topologySelector := allowedTopologies[i]
@@ -5416,7 +5154,7 @@ func getNodeSelectorTerms(allowedTopologies []v1.TopologySelectorLabelRequiremen
 		nodeSelectorRequirement.Values = topologySelector.Values
 		nodeSelectorRequirements = append(nodeSelectorRequirements, nodeSelectorRequirement)
 	}
-
+	rackTopology := allowedTopologies[len(allowedTopologies)-1]
 	for i := 0; i < len(rackTopology.Values); i++ {
 		var nodeSelectorTerm v1.NodeSelectorTerm
 		var nodeSelectorRequirement v1.NodeSelectorRequirement
@@ -5426,7 +5164,6 @@ func getNodeSelectorTerms(allowedTopologies []v1.TopologySelectorLabelRequiremen
 		nodeSelectorTerm.MatchExpressions = append(nodeSelectorRequirements, nodeSelectorRequirement)
 		nodeSelectorTerms = append(nodeSelectorTerms, nodeSelectorTerm)
 	}
-
 	return nodeSelectorTerms
 }
 
@@ -5456,6 +5193,80 @@ func createKubernetesClientFromConfig(kubeConfigPath string) (clientset.Interfac
 		return nil, err
 	}
 	return client, nil
+}
+
+// getVolumeSnapshotClassSpec returns a spec for the volume snapshot class
+func getVolumeSnapshotClassSpec(deletionPolicy snapc.DeletionPolicy,
+	parameters map[string]string) *snapc.VolumeSnapshotClass {
+	var volumesnapshotclass = &snapc.VolumeSnapshotClass{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "VolumeSnapshotClass",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "volumesnapshot-",
+		},
+		Driver:         e2evSphereCSIDriverName,
+		DeletionPolicy: deletionPolicy,
+	}
+
+	volumesnapshotclass.Parameters = parameters
+	return volumesnapshotclass
+}
+
+// getVolumeSnapshotSpec returns a spec for the volume snapshot
+func getVolumeSnapshotSpec(namespace string, snapshotclassname string, pvcName string) *snapc.VolumeSnapshot {
+	var volumesnapshotSpec = &snapc.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "VolumeSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "snapshot-",
+			Namespace:    namespace,
+		},
+		Spec: snapc.VolumeSnapshotSpec{
+			VolumeSnapshotClassName: &snapshotclassname,
+			Source: snapc.VolumeSnapshotSource{
+				PersistentVolumeClaimName: &pvcName,
+			},
+		},
+	}
+	return volumesnapshotSpec
+}
+
+// waitForVolumeSnapshotReadyToUse waits for the volume's snapshot to be in ReadyToUse
+func waitForVolumeSnapshotReadyToUse(client snapclient.Clientset, ctx context.Context, namespace string,
+	name string) (*snapc.VolumeSnapshot, error) {
+	var volumeSnapshot *snapc.VolumeSnapshot
+	var err error
+	waitErr := wait.PollImmediate(poll, pollTimeout, func() (bool, error) {
+		volumeSnapshot, err = client.SnapshotV1().VolumeSnapshots(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("error fetching volumesnapshot details : %v", err)
+		}
+		if volumeSnapshot.Status != nil && *volumeSnapshot.Status.ReadyToUse {
+			return true, nil
+		}
+		return false, nil
+	})
+	return volumeSnapshot, waitErr
+}
+
+// waitForVolumeSnapshotContentToBeDeleted wait till the volume snapshot content is deleted
+func waitForVolumeSnapshotContentToBeDeleted(client snapclient.Clientset, ctx context.Context,
+	name string) error {
+	var err error
+	waitErr := wait.PollImmediate(poll, pollTimeout, func() (bool, error) {
+		_, err = client.SnapshotV1().VolumeSnapshotContents().Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				return true, nil
+			} else {
+				return false, fmt.Errorf("error fetching volumesnapshotcontent details : %v", err)
+			}
+		}
+		return false, nil
+	})
+	return waitErr
 }
 
 // getK8sMasterNodeIPWhereControllerLeaderIsRunning fetches the master node IP
@@ -5620,9 +5431,53 @@ func getMasterIpFromMasterNodeName(ctx context.Context, client clientset.Interfa
 	}
 }
 
+// getVolumeSnapshotContentSpec returns a spec for the volume snapshot content
+func getVolumeSnapshotContentSpec(deletionPolicy snapc.DeletionPolicy, snapshotHandle string,
+	futureSnapshotName string, namespace string) *snapc.VolumeSnapshotContent {
+	var volumesnapshotContentSpec = &snapc.VolumeSnapshotContent{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "VolumeSnapshotContent",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "snapshotcontent-",
+		},
+		Spec: snapc.VolumeSnapshotContentSpec{
+			DeletionPolicy: deletionPolicy,
+			Driver:         e2evSphereCSIDriverName,
+			Source: snapc.VolumeSnapshotContentSource{
+				SnapshotHandle: &snapshotHandle,
+			},
+			VolumeSnapshotRef: v1.ObjectReference{
+				Name:      futureSnapshotName,
+				Namespace: namespace,
+			},
+		},
+	}
+	return volumesnapshotContentSpec
+}
+
+// getVolumeSnapshotSpecByName returns a spec for the volume snapshot by name
+func getVolumeSnapshotSpecByName(namespace string, snapshotName string,
+	snapshotcontentname string) *snapc.VolumeSnapshot {
+	var volumesnapshotSpec = &snapc.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "VolumeSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      snapshotName,
+			Namespace: namespace,
+		},
+		Spec: snapc.VolumeSnapshotSpec{
+			Source: snapc.VolumeSnapshotSource{
+				VolumeSnapshotContentName: &snapshotcontentname,
+			},
+		},
+	}
+	return volumesnapshotSpec
+}
+
 func createParallelStatefulSets(client clientset.Interface, namespace string,
 	statefulset *appsv1.StatefulSet, replicas int32, wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	ginkgo.By("Creating statefulset")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -5638,12 +5493,11 @@ func createParallelStatefulSetSpec(namespace string, no_of_sts int, replicas int
 	var statefulset *appsv1.StatefulSet
 
 	for i := 0; i < no_of_sts; i++ {
-		scName := defaultNginxStorageClassName
 		statefulset = GetStatefulSetFromManifest(namespace)
 		statefulset.Name = "thread-" + strconv.Itoa(i) + "-" + statefulset.Name
 		statefulset.Spec.PodManagementPolicy = appsv1.ParallelPodManagement
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Spec.StorageClassName = &scName
+			Annotations["volume.beta.kubernetes.io/storage-class"] = defaultNginxStorageClassName
 		statefulset.Spec.Replicas = &replicas
 		stss = append(stss, statefulset)
 	}
@@ -5651,7 +5505,7 @@ func createParallelStatefulSetSpec(namespace string, no_of_sts int, replicas int
 }
 
 func createMultiplePVCsInParallel(ctx context.Context, client clientset.Interface, namespace string,
-	storageclass *storagev1.StorageClass, count int, pvclaimlabels map[string]string) []*v1.PersistentVolumeClaim {
+	storageclass *storagev1.StorageClass, count int) []*v1.PersistentVolumeClaim {
 	var pvclaims []*v1.PersistentVolumeClaim
 	for i := 0; i < count; i++ {
 		pvclaim, err := createPVC(client, namespace, nil, "", storageclass, "")
@@ -5722,6 +5576,49 @@ func deleteCsiControllerPodWhereLeaderIsRunning(ctx context.Context,
 	return nil
 }
 
+// getPersistentVolumeClaimSpecWithDatasource return the PersistentVolumeClaim
+// spec with specified storage class.
+func getPersistentVolumeClaimSpecWithDatasource(namespace string, ds string, storageclass *storagev1.StorageClass,
+	pvclaimlabels map[string]string, accessMode v1.PersistentVolumeAccessMode,
+	datasourceName string, snapshotapigroup string) *v1.PersistentVolumeClaim {
+	disksize := diskSize
+	if ds != "" {
+		disksize = ds
+	}
+	if accessMode == "" {
+		// If accessMode is not specified, set the default accessMode.
+		accessMode = v1.ReadWriteOnce
+	}
+	claim := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "pvc-",
+			Namespace:    namespace,
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{
+				accessMode,
+			},
+			Resources: v1.ResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceName(v1.ResourceStorage): resource.MustParse(disksize),
+				},
+			},
+			StorageClassName: &(storageclass.Name),
+			DataSource: &v1.TypedLocalObjectReference{
+				APIGroup: &snapshotapigroup,
+				Kind:     "VolumeSnapshot",
+				Name:     datasourceName,
+			},
+		},
+	}
+
+	if pvclaimlabels != nil {
+		claim.Labels = pvclaimlabels
+	}
+
+	return claim
+}
+
 // get topology cluster lists
 func ListTopologyClusterNames(topologyCluster string) []string {
 	topologyClusterList := strings.Split(topologyCluster, ",")
@@ -5788,21 +5685,41 @@ func powerOffEsxiHostByCluster(ctx context.Context, vs *vSphere, clusterName str
 	return powerOffHostsList
 }
 
+// getVolumeSnapshotSpecWithoutSC returns a spec for the volume snapshot
+func getVolumeSnapshotSpecWithoutSC(namespace string, pvcName string) *snapc.VolumeSnapshot {
+	var volumesnapshotSpec = &snapc.VolumeSnapshot{
+		TypeMeta: metav1.TypeMeta{
+			Kind: "VolumeSnapshot",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "snapshot-",
+			Namespace:    namespace,
+		},
+		Spec: snapc.VolumeSnapshotSpec{
+			Source: snapc.VolumeSnapshotSource{
+				PersistentVolumeClaimName: &pvcName,
+			},
+		},
+	}
+	return volumesnapshotSpec
+}
+
 // waitForPvcToBeDeleted waits by polling for a particular pvc to be deleted in a namespace
 func waitForPvcToBeDeleted(ctx context.Context, client clientset.Interface, pvcName string, namespace string) error {
+	var pvc *v1.PersistentVolumeClaim
 	waitErr := wait.PollImmediate(poll, pollTimeout, func() (bool, error) {
-		_, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
-				framework.Logf("PVC is deleted: %v", pvcName)
 				return true, nil
 			} else {
 				return false, fmt.Errorf("pvc %s is still not deleted in"+
-					"namespace %s with err: %v", pvcName, namespace, err)
+					"namespace %s with err: %v", pvc.Name, namespace, err)
 			}
 		}
 		return false, nil
 	})
+	framework.Logf("Status of pvc is: %v", pvc.Status.Phase)
 	return waitErr
 }
 
@@ -5834,33 +5751,29 @@ func waitForEventWithReason(client clientset.Interface, namespace string,
 }
 
 // stopCSIPods function stops all the running csi pods
-func stopCSIPods(ctx context.Context, client clientset.Interface, namespace string) (bool, error) {
+func stopCSIPods(ctx context.Context, client clientset.Interface) (bool, error) {
 	collectPodLogs(ctx, client, csiSystemNamespace)
 	isServiceStopped := false
 	err := updateDeploymentReplicawithWait(client, 0, vSphereCSIControllerPodNamePrefix,
-		namespace)
+		csiSystemNamespace)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	isServiceStopped = true
 	return isServiceStopped, err
 }
 
 // startCSIPods function starts the csi pods and waits till all the pods comes up
-func startCSIPods(ctx context.Context, client clientset.Interface, csiReplicas int32,
-	namespace string) (bool, error) {
+func startCSIPods(ctx context.Context, client clientset.Interface, csiReplicas int32) (bool, error) {
 	ignoreLabels := make(map[string]string)
 	err := updateDeploymentReplicawithWait(client, csiReplicas, vSphereCSIControllerPodNamePrefix,
-		namespace)
-	if err != nil {
-		return true, err
-	}
+		csiSystemNamespace)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	// Wait for the CSI Pods to be up and Running
-	list_of_pods, err := fpod.GetPodsInNamespace(client, namespace, ignoreLabels)
-	if err != nil {
-		return true, err
-	}
+	list_of_pods, err := fpod.GetPodsInNamespace(client, csiSystemNamespace, ignoreLabels)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	num_csi_pods := len(list_of_pods)
-	err = fpod.WaitForPodsRunningReady(client, namespace, int32(num_csi_pods), 0,
+	err = fpod.WaitForPodsRunningReady(client, csiSystemNamespace, int32(num_csi_pods), 0,
 		pollTimeout, ignoreLabels)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	isServiceStopped := false
 	return isServiceStopped, err
 }
@@ -6112,13 +6025,8 @@ func getCSIPodWhereListVolumeResponseIsPresent(ctx context.Context,
 	csiPods, err := fpod.GetPodsInNamespace(client, csiSystemNamespace, ignoreLabels)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var k8sMasterIP string
-	if vanillaCluster {
-		k8sMasterIPs := getK8sMasterIPs(ctx, client)
-		k8sMasterIP = k8sMasterIPs[0]
-	} else {
-		k8sMasterIP = GetAndExpectStringEnvVar(svcMasterIP)
-	}
-
+	k8sMasterIPs := getK8sMasterIPs(ctx, client)
+	k8sMasterIP = k8sMasterIPs[0]
 	for _, csiPod := range csiPods {
 		if strings.Contains(csiPod.Name, vSphereCSIControllerPodNamePrefix) {
 			// Putting the grepped logs for leader of container of different CSI pods
@@ -6175,343 +6083,4 @@ func getAllPVCFromNamespace(client clientset.Interface, namespace string) *v1.Pe
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(pvcList).NotTo(gomega.BeNil())
 	return pvcList
-}
-
-// CheckDevice helps verify the raw block device inside pod is accessible correctly
-func CheckDevice(client clientset.Interface, sts *appsv1.StatefulSet, devicePath string) error {
-	for _, cmd := range []string{
-		fmt.Sprintf("ls -idlh %v", devicePath),
-		fmt.Sprintf("find %v", devicePath),
-		fmt.Sprintf("dd if=/dev/zero of=%v bs=1024 count=1 seek=0", devicePath),
-	} {
-		if err := fss.ExecInStatefulPods(client, sts, cmd); err != nil {
-			return fmt.Errorf("failed to check device in command %v, err %v", cmd, err)
-		}
-	}
-	return nil
-}
-
-// verifyIOOnRawBlockVolume helps check data integrity for raw block volumes
-func verifyIOOnRawBlockVolume(ns string, podName string, devicePath string, testdataFile string,
-	startSizeInMB, dataSizeInMB int64) {
-	//Write some data to file first and then to raw block device
-	writeDataOnRawBlockVolume(ns, podName, devicePath, testdataFile, startSizeInMB, dataSizeInMB)
-	// Read the data to verify that is it same as what written
-	verifyDataFromRawBlockVolume(ns, podName, devicePath, testdataFile, startSizeInMB, dataSizeInMB)
-}
-
-// writeDataOnRawBlockVolume writes test data to raw block device
-func writeDataOnRawBlockVolume(ns string, podName string, devicePath string, testdataFile string,
-	startSizeInMB, dataSizeInMB int64) {
-	cmd := []string{"exec", podName, "--namespace=" + ns, "--", "/bin/sh", "-c",
-		fmt.Sprintf("/bin/ls %v", devicePath)}
-	_, err := framework.RunKubectl(ns, cmd...)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	_ = framework.RunKubectlOrDie(ns, "cp", testdataFile, fmt.Sprintf(
-		"%v/%v:/tmp/data_to_write", ns, podName))
-	framework.ExpectNoError(err, fmt.Sprintf("failed to write testdata inside the pod: %q", podName))
-
-	// If startSizeInMB is given, fill 1M with testData from offset=startSizeInMB given, upto dataSizeInMB.
-	// Otherwise write the testData given from offset=0.
-	gomega.Expect(dataSizeInMB).NotTo(gomega.BeZero())
-	for i := int64(0); i < dataSizeInMB; i = i + 1 {
-		seek := fmt.Sprintf("%v", startSizeInMB+i)
-		cmd = []string{"exec", podName, "--namespace=" + ns, "--", "/bin/sh", "-c",
-			fmt.Sprintf("/bin/dd if=/tmp/data_to_write of=%v bs=1M count=1 conv=fsync seek=%v",
-				devicePath, seek)}
-		_, err = framework.RunKubectl(ns, cmd...)
-		framework.ExpectNoError(err, fmt.Sprintf("failed to write device: %q inside the pod: %q", devicePath, podName))
-	}
-	cmd = []string{"--namespace=" + ns, "exec", podName, "--", "/bin/sh", "-c", "rm /tmp/data_to_write"}
-	_ = framework.RunKubectlOrDie(ns, cmd...)
-}
-
-// verifyDataFromRawBlockVolume reads data from raw block device and verifies it against given input
-func verifyDataFromRawBlockVolume(ns string, podName string, devicePath string, testdataFile string,
-	startSizeInMB, dataSizeInMB int64) {
-	cmd := []string{"exec", podName, "--namespace=" + ns, "--", "/bin/sh", "-c",
-		fmt.Sprintf("/bin/ls %v", devicePath)}
-	_, err := framework.RunKubectl(ns, cmd...)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	// Verify testData written on 1MB upto dataSizeInMB from the specified offset=startSizeInMB
-	// Otherwise verify the testdata specified from offset=0
-	gomega.Expect(dataSizeInMB).NotTo(gomega.BeZero())
-	for i := int64(0); i < dataSizeInMB; i = i + 1 {
-		skip := fmt.Sprintf("%v", startSizeInMB+i)
-		cmd = []string{"exec", podName, "--namespace=" + ns, "--", "/bin/sh", "-c",
-			fmt.Sprintf("/bin/dd if=%v of=/tmp/data_to_read bs=1M count=1 skip=%v", devicePath, skip)}
-		_, err = framework.RunKubectl(ns, cmd...)
-		framework.ExpectNoError(err, fmt.Sprintf("failed to read device: %q inside the pod: %q", devicePath, podName))
-		_ = framework.RunKubectlOrDie(ns, "cp",
-			fmt.Sprintf("%v/%v:/tmp/data_to_read", ns, podName), testdataFile+podName)
-
-		framework.Logf("Running diff with source file and file from pod %v for 1M starting %vM", podName, skip)
-		op, err := exec.Command("diff", testdataFile, testdataFile+podName).Output()
-		framework.Logf("diff: ", op)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		gomega.Expect(len(op)).To(gomega.BeZero())
-	}
-
-}
-
-// getBlockDevSizeInBytes returns size of block device at given path
-func getBlockDevSizeInBytes(f *framework.Framework, ns string, pod *v1.Pod, devicePath string) (int64, error) {
-	cmd := []string{"exec", pod.Name, "--namespace=" + ns, "--", "/bin/sh", "-c",
-		fmt.Sprintf("/bin/blockdev --getsize64 %v", devicePath)}
-	output, err := framework.RunKubectl(ns, cmd...)
-	if err != nil {
-		return -1, fmt.Errorf("failed to get size of raw device %v inside pod", devicePath)
-	}
-	output = strings.TrimSuffix(output, "\n")
-	return strconv.ParseInt(output, 10, 64)
-}
-
-// checkClusterIdValueOnWorkloads checks clusterId value by querying cns metadata
-// for all k8s workloads in a particular namespace
-func checkClusterIdValueOnWorkloads(vs *vSphere, client clientset.Interface,
-	ctx context.Context, namespace string, clusterID string) error {
-	podList, err := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	for _, pod := range podList.Items {
-		pvcName := pod.Spec.Volumes[0].PersistentVolumeClaim.ClaimName
-		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		pvName := pvc.Spec.VolumeName
-		pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		volumeID := pv.Spec.CSI.VolumeHandle
-		queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
-		if err != nil {
-			return err
-		}
-		gomega.Expect(queryResult.Volumes).ShouldNot(gomega.BeEmpty())
-		if len(queryResult.Volumes) != 1 || queryResult.Volumes[0].VolumeId.Id != volumeID {
-			return fmt.Errorf("failed to query cns volume %s", volumeID)
-		}
-		for _, metadata := range queryResult.Volumes[0].Metadata.EntityMetadata {
-			kubernetesMetadata := metadata.(*cnstypes.CnsKubernetesEntityMetadata)
-			if kubernetesMetadata.EntityType == "POD" && kubernetesMetadata.ClusterID != clusterID {
-				return fmt.Errorf("clusterID %s is not matching with %s ", clusterID, kubernetesMetadata.ClusterID)
-			} else if kubernetesMetadata.EntityType == "PERSISTENT_VOLUME" &&
-				kubernetesMetadata.ClusterID != clusterID {
-				return fmt.Errorf("clusterID %s is not matching with %s ", clusterID, kubernetesMetadata.ClusterID)
-			} else if kubernetesMetadata.EntityType == "PERSISTENT_VOLUME_CLAIM" &&
-				kubernetesMetadata.ClusterID != clusterID {
-				return fmt.Errorf("clusterID %s is not matching with %s ", clusterID, kubernetesMetadata.ClusterID)
-			}
-		}
-		framework.Logf("successfully verified clusterID of the volume %q", volumeID)
-	}
-	return nil
-}
-
-// Clean up statefulset and make sure no volume is left in CNS after it is deleted from k8s
-// TODO: Code improvements is needed in case if the function is called from snapshot test.
-// add a logic to delete the snapshots for the volumes and then delete volumes
-func cleaupStatefulset(client clientset.Interface, ctx context.Context, namespace string,
-	statefulset *appsv1.StatefulSet) {
-	scaleDownNDeleteStsDeploymentsInNamespace(ctx, client, namespace)
-	pvcs, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	for _, claim := range pvcs.Items {
-		pv := getPvFromClaim(client, namespace, claim.Name)
-		err := fpv.DeletePersistentVolumeClaim(client, claim.Name, namespace)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		ginkgo.By("Verify it's PV and corresponding volumes are deleted from CNS")
-		err = fpv.WaitForPersistentVolumeDeleted(client, pv.Name, poll,
-			pollTimeout)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		volumeHandle := pv.Spec.CSI.VolumeHandle
-		err = e2eVSphere.waitForCNSVolumeToBeDeleted(volumeHandle)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred(),
-			fmt.Sprintf("Volume: %s should not be present in the CNS after it is deleted from "+
-				"kubernetes", volumeHandle))
-	}
-}
-
-// getVsanDPersistentVolumeClaimSpecWithStorageClass return the PersistentVolumeClaim
-// spec for vsanDirect datastore with specified storage class.
-func getVsanDPersistentVolumeClaimSpecWithStorageClass(namespace string, ds string,
-	storageclass *storagev1.StorageClass, pvcName string, podName string,
-	accessMode v1.PersistentVolumeAccessMode) *v1.PersistentVolumeClaim {
-	pvcAnnotations := make(map[string]string)
-	pvcAnnotations["volume.beta.kubernetes.io/storage-class"] = storageclass.Name
-	pvcAnnotations["placement.beta.vmware.com/storagepool_antiAffinityRequired"] = podName
-
-	pvclaimlabels := make(map[string]string)
-	pvclaimlabels["supervisor"] = "true"
-
-	disksize := diskSize
-	if ds != "" {
-		disksize = ds
-	}
-	if accessMode == "" {
-		// If accessMode is not specified, set the default accessMode.
-		accessMode = v1.ReadWriteOnce
-	}
-
-	claim := &v1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      pvcName,
-			Namespace: namespace,
-		},
-		Spec: v1.PersistentVolumeClaimSpec{
-			AccessModes: []v1.PersistentVolumeAccessMode{
-				accessMode,
-			},
-			Resources: v1.ResourceRequirements{
-				Requests: v1.ResourceList{
-					v1.ResourceName(v1.ResourceStorage): resource.MustParse(disksize),
-				},
-			},
-			StorageClassName: &(storageclass.Name),
-		},
-	}
-	claim.Labels = pvclaimlabels
-	claim.Annotations = pvcAnnotations
-	framework.Logf("pvc spec: %v", claim)
-	return claim
-}
-
-// getVsanDPodSpec returns pod spec for vsan direct datastore for a given persistentVolumeClaim
-func getVsanDPodSpec(ns string, nodeSelector map[string]string, pvclaims []*v1.PersistentVolumeClaim,
-	isPrivileged bool, command string, podName string) *v1.Pod {
-
-	podlabels := make(map[string]string)
-	podlabels["psp.vmware.com/pod-placement-opt-in"] = "true"
-	podSpec := &v1.Pod{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Pod",
-			APIVersion: "v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      podName,
-			Namespace: ns,
-		},
-		Spec: v1.PodSpec{
-			Containers: []v1.Container{
-				{
-					Name:            "write-pod",
-					Image:           nginxImage,
-					SecurityContext: fpod.GenerateContainerSecurityContext(isPrivileged),
-				},
-			},
-			RestartPolicy: v1.RestartPolicyOnFailure,
-		},
-	}
-	var volumeMounts = make([]v1.VolumeMount, len(pvclaims))
-	var volumes = make([]v1.Volume, len(pvclaims))
-	for index, pvclaim := range pvclaims {
-		volumename := "data0"
-		volumeMounts[index] = v1.VolumeMount{Name: volumename, MountPath: "/data0"}
-		volumes[index] = v1.Volume{Name: volumename, VolumeSource: v1.VolumeSource{
-			PersistentVolumeClaim: &v1.PersistentVolumeClaimVolumeSource{ClaimName: pvclaim.Name, ReadOnly: false}}}
-	}
-	podSpec.Spec.Containers[0].VolumeMounts = volumeMounts
-	podSpec.Spec.Volumes = volumes
-	if nodeSelector != nil {
-		podSpec.Spec.NodeSelector = nodeSelector
-	}
-
-	podSpec.Labels = podlabels
-	podSpec.Spec.ServiceAccountName = "default"
-	podSpec.Spec.RestartPolicy = v1.RestartPolicyAlways
-	taintKeys := []string{v1.TaintNodeNotReady, v1.TaintNodeUnreachable}
-	podSpec.Spec.Subdomain = "sample-pe-svc"
-	var x int64 = 300
-	var tolerations []v1.Toleration
-	for _, taintkey := range taintKeys {
-		var toleration v1.Toleration
-		toleration.Key = taintkey
-		toleration.Operator = v1.TolerationOpExists
-		toleration.TolerationSeconds = &x
-		toleration.Effect = v1.TaintEffectNoExecute
-		framework.Logf("toleration: %v", toleration)
-		tolerations = append(tolerations, toleration)
-	}
-	podSpec.Spec.Tolerations = tolerations
-	framework.Logf("pod spec: %v", podSpec)
-	return podSpec
-}
-
-// createVsanDPvcAndPod creates pvc and pod for vsan direct as per wffc policy.
-// It ensures that pvc and pod is in in healthy state.
-func createVsanDPvcAndPod(client clientset.Interface, ctx context.Context,
-	namespace string, sc *storagev1.StorageClass, pvcName string,
-	podName string) (*v1.PersistentVolumeClaim, *v1.Pod) {
-	framework.Logf("Creating pvc %s with storage class %s", pvcName, sc.Name)
-	pvclaim, err := fpv.CreatePVC(client, namespace,
-		getVsanDPersistentVolumeClaimSpecWithStorageClass(namespace,
-			diskSize, sc, pvcName, podName, ""))
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	ginkgo.By("Expect claim status to be in Pending state")
-	err = fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimPending, client,
-		namespace, pvclaim.Name, framework.Poll, time.Minute)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(),
-		"Failed to find the volume: %s in pending state with err: %v", pvcName, err)
-
-	ginkgo.By("Creating a pod")
-	podSpec := getVsanDPodSpec(namespace, nil, []*v1.PersistentVolumeClaim{pvclaim}, false, execCommand, podName)
-	pod, err := client.CoreV1().Pods(namespace).Create(ctx, podSpec, metav1.CreateOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	err = fpod.WaitForPodNameRunningInNamespace(client, pod.Name, namespace)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	ginkgo.By("Expect claim to be in Bound state and provisioning volume passes")
-	err = fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound, client,
-		namespace, pvclaim.Name, framework.Poll, time.Minute)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to provision volume with err: %v", err)
-
-	return pvclaim, pod
-}
-
-// writeDataToMultipleFilesOnPodInParallel writes data to multiple files
-// on a given pod in parallel
-func writeDataToMultipleFilesOnPodInParallel(namespace string, podName string, data string,
-	wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
-	defer wg.Done()
-	for i := 0; i < 10; i++ {
-		ginkgo.By("write to a file in pod")
-		filePath := fmt.Sprintf("/mnt/volume1/file%v.txt", i)
-		writeDataOnFileFromPod(namespace, podName, filePath, data)
-	}
-
-}
-
-// byFirstTimeStamp sorts a slice of events by first timestamp, using their involvedObject's name as a tie breaker.
-type byFirstTimeStamp []v1.Event
-
-func (o byFirstTimeStamp) Len() int      { return len(o) }
-func (o byFirstTimeStamp) Swap(i, j int) { o[i], o[j] = o[j], o[i] }
-
-func (o byFirstTimeStamp) Less(i, j int) bool {
-	if o[i].FirstTimestamp.Equal(&o[j].FirstTimestamp) {
-		return o[i].InvolvedObject.Name < o[j].InvolvedObject.Name
-	}
-	return o[i].FirstTimestamp.Before(&o[j].FirstTimestamp)
-}
-
-// dumpSvcNsEventsOnTestFailure dumps the events from the given namespace in case of test failure
-func dumpSvcNsEventsOnTestFailure(client clientset.Interface, namespace string) {
-	if !ginkgo.CurrentSpecReport().Failed() {
-		return
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	events, err := client.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.By(fmt.Sprintf("Found %d events in svc ns %s.", len(events.Items), namespace))
-	sortedEvents := events.Items
-	if len(sortedEvents) > 1 {
-		sort.Sort(byFirstTimeStamp(sortedEvents))
-	}
-	for _, e := range sortedEvents {
-		framework.Logf(
-			"At %v - event for %v: %v %v: %v", e.FirstTimestamp, e.InvolvedObject.Name, e.Source, e.Reason, e.Message)
-	}
 }

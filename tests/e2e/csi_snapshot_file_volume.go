@@ -16,8 +16,6 @@ package e2e
 import (
 	"context"
 	"fmt"
-	"os"
-	"strconv"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
@@ -31,21 +29,20 @@ import (
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 
-	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
 )
 
 var _ = ginkgo.Describe("[file-vanilla-snapshot] Volume Snapshot file volume Test", func() {
 	f := framework.NewDefaultFramework("file-snapshot")
 	var (
-		client              clientset.Interface
-		namespace           string
-		scParameters        map[string]string
-		datastoreURL        string
-		pvclaims            []*v1.PersistentVolumeClaim
-		restConfig          *restclient.Config
-		snapc               *snapclient.Clientset
-		pandoraSyncWaitTime int
+		client       clientset.Interface
+		namespace    string
+		scParameters map[string]string
+		datastoreURL string
+		pvclaims     []*v1.PersistentVolumeClaim
+		restConfig   *restclient.Config
+		snapc        *snapclient.Clientset
 	)
 
 	ginkgo.BeforeEach(func() {
@@ -64,13 +61,6 @@ var _ = ginkgo.Describe("[file-vanilla-snapshot] Volume Snapshot file volume Tes
 		restConfig = getRestConfigClient()
 		snapc, err = snapclient.NewForConfig(restConfig)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		if os.Getenv(envPandoraSyncWaitTime) != "" {
-			pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		} else {
-			pandoraSyncWaitTime = defaultPandoraSyncWaitTime
-		}
 	})
 
 	/*
@@ -137,7 +127,8 @@ var _ = ginkgo.Describe("[file-vanilla-snapshot] Volume Snapshot file volume Tes
 			defer func() {
 				if snapshotCreated {
 					framework.Logf("Deleting volume snapshot")
-					deleteVolumeSnapshotWithPandoraWait(ctx, snapc, namespace, volumeSnapshot.Name, pandoraSyncWaitTime)
+					err := snapc.SnapshotV1().VolumeSnapshots(namespace).Delete(ctx, volumeSnapshot.Name, metav1.DeleteOptions{})
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
 			}()
 

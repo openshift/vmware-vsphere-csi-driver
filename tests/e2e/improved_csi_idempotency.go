@@ -124,6 +124,14 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] "+
 	ginkgo.AfterEach(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+
+		if supervisorCluster {
+			deleteResourceQuota(client, namespace)
+		}
+		if guestCluster {
+			svcClient, svNamespace := getSvcClientAndNamespace()
+			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
+		}
 		if isServiceStopped {
 			if serviceName == "CSI" {
 				framework.Logf("Starting CSI driver")
@@ -141,7 +149,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] "+
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			} else if serviceName == hostdServiceName {
 				framework.Logf("In afterEach function to start the hostd service on all hosts")
-				hostIPs := getAllHostsIP(ctx, true)
+				hostIPs := getAllHostsIP(ctx)
 				for _, hostIP := range hostIPs {
 					startHostDOnHost(ctx, hostIP)
 				}
@@ -157,16 +165,6 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] "+
 
 		ginkgo.By(fmt.Sprintf("Resetting provisioner time interval to %s sec", defaultProvisionerTimeInSec))
 		updateCSIDeploymentProvisionerTimeout(c, csiSystemNamespace, defaultProvisionerTimeInSec)
-
-		if supervisorCluster {
-			deleteResourceQuota(client, namespace)
-			dumpSvcNsEventsOnTestFailure(client, namespace)
-		}
-		if guestCluster {
-			svcClient, svNamespace := getSvcClientAndNamespace()
-			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
-			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
-		}
 	})
 
 	/*
@@ -398,7 +396,7 @@ func createVolumesByReducingProvisionerTime(namespace string, client clientset.I
 
 	ginkgo.By("Waiting for all claims to be in bound state")
 	persistentvolumes, err = fpv.WaitForPVClaimBoundPhase(client, pvclaims,
-		2*framework.ClaimProvisionTimeout)
+		framework.ClaimProvisionTimeout)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// TODO: Add a logic to check for the no orphan volumes
@@ -509,18 +507,18 @@ func createVolumeWithServiceDown(serviceName string, namespace string, client cl
 		csiReplicaCount := *deployment.Spec.Replicas
 
 		ginkgo.By("Stopping CSI driver")
-		isServiceStopped, err = stopCSIPods(ctx, c, csiSystemNamespace)
+		isServiceStopped, err = stopCSIPods(ctx, c)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
 			if isServiceStopped {
 				framework.Logf("Starting CSI driver")
-				isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount, csiSystemNamespace)
+				isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
 		framework.Logf("Starting CSI driver")
-		isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount, csiSystemNamespace)
+		isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		if os.Getenv(envFullSyncWaitTime) != "" {
@@ -538,7 +536,7 @@ func createVolumeWithServiceDown(serviceName string, namespace string, client cl
 		time.Sleep(time.Duration(fullSyncWaitTime) * time.Second)
 	} else if serviceName == hostdServiceName {
 		ginkgo.By("Fetch IPs for the all the hosts in the cluster")
-		hostIPs := getAllHostsIP(ctx, true)
+		hostIPs := getAllHostsIP(ctx)
 		isServiceStopped = true
 
 		var wg sync.WaitGroup
@@ -605,7 +603,7 @@ func createVolumeWithServiceDown(serviceName string, namespace string, client cl
 
 	ginkgo.By("Waiting for all claims to be in bound state")
 	persistentvolumes, err = fpv.WaitForPVClaimBoundPhase(client, pvclaims,
-		2*framework.ClaimProvisionTimeout)
+		framework.ClaimProvisionTimeout)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// TODO: Add a logic to check for the no orphan volumes
@@ -710,7 +708,7 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 
 	ginkgo.By("Waiting for all claims to be in bound state")
 	persistentvolumes, err = fpv.WaitForPVClaimBoundPhase(client, pvclaims,
-		2*framework.ClaimProvisionTimeout)
+		framework.ClaimProvisionTimeout)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// TODO: Add a logic to check for the no orphan volumes
@@ -766,19 +764,19 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 		csiReplicaCount := *deployment.Spec.Replicas
 
 		ginkgo.By("Stopping CSI driver")
-		isServiceStopped, err = stopCSIPods(ctx, c, csiSystemNamespace)
+		isServiceStopped, err = stopCSIPods(ctx, c)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		defer func() {
 			if isServiceStopped {
 				framework.Logf("Starting CSI driver")
-				isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount, csiSystemNamespace)
+				isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
 
 		framework.Logf("Starting CSI driver")
-		isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount, csiSystemNamespace)
+		isServiceStopped, err = startCSIPods(ctx, c, csiReplicaCount)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		if os.Getenv(envFullSyncWaitTime) != "" {
@@ -839,7 +837,6 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 
 // stopHostD is a function for waitGroup to run stop hostd parallelly
 func stopHostD(ctx context.Context, addr string, wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	stopHostDOnHost(ctx, addr)
 }

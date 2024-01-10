@@ -39,7 +39,6 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Non-VSAN datas
 		scParameters             map[string]string
 		nonVsanStoragePolicyName string
 	)
-
 	ginkgo.BeforeEach(func() {
 		client = f.ClientSet
 		namespace = getNamespaceToRunTests(f)
@@ -51,11 +50,6 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Non-VSAN datas
 		if !(len(nodeList.Items) > 0) {
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
-	})
-
-	ginkgo.AfterEach(func() {
-		svcClient, svNamespace := getSvcClientAndNamespace()
-		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	/*

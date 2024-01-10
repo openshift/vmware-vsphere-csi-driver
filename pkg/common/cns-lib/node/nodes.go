@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -34,8 +35,11 @@ type Nodes struct {
 }
 
 // Initialize helps initialize node manager and node informer manager.
-func (nodes *Nodes) Initialize(ctx context.Context) error {
+// If useNodeUuid is set, an informer on K8s CSINode is created.
+// if not, an informer on K8s Node API object is created.
+func (nodes *Nodes) Initialize(ctx context.Context, useNodeUuid bool) error {
 	nodes.cnsNodeManager = GetManager(ctx)
+	nodes.cnsNodeManager.SetUseNodeUuid(useNodeUuid)
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
 		log := logger.GetLogger(ctx)
@@ -44,10 +48,66 @@ func (nodes *Nodes) Initialize(ctx context.Context) error {
 	}
 	nodes.cnsNodeManager.SetKubernetesClient(k8sclient)
 	nodes.informMgr = k8s.NewInformer(ctx, k8sclient, true)
-	nodes.informMgr.AddCSINodeListener(nodes.csiNodeAdd,
-		nodes.csiNodeUpdate, nodes.csiNodeDelete)
+	if useNodeUuid {
+		nodes.informMgr.AddCSINodeListener(nodes.csiNodeAdd,
+			nodes.csiNodeUpdate, nodes.csiNodeDelete)
+	} else {
+		nodes.informMgr.AddNodeListener(nodes.nodeAdd,
+			nodes.nodeUpdate, nodes.nodeDelete)
+	}
 	nodes.informMgr.Listen()
 	return nil
+}
+
+func (nodes *Nodes) nodeAdd(obj interface{}) {
+	ctx, log := logger.GetNewContextWithLogger()
+	node, ok := obj.(*v1.Node)
+	if node == nil || !ok {
+		log.Warnf("nodeAdd: unrecognized object %+v", obj)
+		return
+	}
+	err := nodes.cnsNodeManager.RegisterNode(ctx,
+		cnsvsphere.GetUUIDFromProviderID(node.Spec.ProviderID), node.Name)
+	if err != nil {
+		log.Warnf("failed to register node:%q. err=%v", node.Name, err)
+	}
+}
+
+func (nodes *Nodes) nodeUpdate(oldObj interface{}, newObj interface{}) {
+	ctx, log := logger.GetNewContextWithLogger()
+	newNode, ok := newObj.(*v1.Node)
+	if !ok {
+		log.Warnf("nodeUpdate: unrecognized object newObj %[1]T%+[1]v", newObj)
+		return
+	}
+	oldNode, ok := oldObj.(*v1.Node)
+	if !ok {
+		log.Warnf("nodeUpdate: unrecognized object oldObj %[1]T%+[1]v", oldObj)
+		return
+	}
+	if oldNode.Spec.ProviderID != newNode.Spec.ProviderID {
+		log.Infof("nodeUpdate: Observed ProviderID change from %q to %q for the node: %q",
+			oldNode.Spec.ProviderID, newNode.Spec.ProviderID, newNode.Name)
+
+		err := nodes.cnsNodeManager.RegisterNode(ctx,
+			cnsvsphere.GetUUIDFromProviderID(newNode.Spec.ProviderID), newNode.Name)
+		if err != nil {
+			log.Warnf("nodeUpdate: Failed to register node:%q. err=%v", newNode.Name, err)
+		}
+	}
+}
+
+func (nodes *Nodes) nodeDelete(obj interface{}) {
+	ctx, log := logger.GetNewContextWithLogger()
+	node, ok := obj.(*v1.Node)
+	if node == nil || !ok {
+		log.Warnf("nodeDelete: unrecognized object %+v", obj)
+		return
+	}
+	err := nodes.cnsNodeManager.UnregisterNode(ctx, node.Name)
+	if err != nil {
+		log.Warnf("failed to unregister node:%q. err=%v", node.Name, err)
+	}
 }
 
 func (nodes *Nodes) csiNodeAdd(obj interface{}) {
@@ -122,19 +182,19 @@ func (nodes *Nodes) csiNodeDelete(obj interface{}) {
 	}
 }
 
-// GetNodeVMByNameAndUpdateCache returns VirtualMachine object for given nodeName.
+// GetNodeByName returns VirtualMachine object for given nodeName.
 // This is called by ControllerPublishVolume and ControllerUnpublishVolume
 // to perform attach and detach operations.
-func (nodes *Nodes) GetNodeVMByNameAndUpdateCache(ctx context.Context, nodeName string) (
+func (nodes *Nodes) GetNodeByName(ctx context.Context, nodeName string) (
 	*cnsvsphere.VirtualMachine, error) {
-	return nodes.cnsNodeManager.GetNodeVMByNameAndUpdateCache(ctx, nodeName)
+	return nodes.cnsNodeManager.GetNodeByName(ctx, nodeName)
 }
 
-// GetNodeVMByNameOrUUID returns VirtualMachine object for given nodeName
+// GetNodeByNameOrUUID returns VirtualMachine object for given nodeName
 // This function can be called either using nodeName or nodeUID.
-func (nodes *Nodes) GetNodeVMByNameOrUUID(
+func (nodes *Nodes) GetNodeByNameOrUUID(
 	ctx context.Context, nodeNameOrUUID string) (*cnsvsphere.VirtualMachine, error) {
-	return nodes.cnsNodeManager.GetNodeVMByNameOrUUID(ctx, nodeNameOrUUID)
+	return nodes.cnsNodeManager.GetNodeByNameOrUUID(ctx, nodeNameOrUUID)
 }
 
 // GetNodeNameByUUID fetches the name of the node given the VM UUID.
@@ -143,11 +203,11 @@ func (nodes *Nodes) GetNodeNameByUUID(ctx context.Context, nodeUUID string) (
 	return nodes.cnsNodeManager.GetNodeNameByUUID(ctx, nodeUUID)
 }
 
-// GetNodeVMByUuid returns VirtualMachine object for given nodeUuid.
+// GetNodeByUuid returns VirtualMachine object for given nodeUuid.
 // This is called by ControllerPublishVolume and ControllerUnpublishVolume
 // to perform attach and detach operations.
-func (nodes *Nodes) GetNodeVMByUuid(ctx context.Context, nodeUuid string) (*cnsvsphere.VirtualMachine, error) {
-	return nodes.cnsNodeManager.GetNodeVMByUuid(ctx, nodeUuid)
+func (nodes *Nodes) GetNodeByUuid(ctx context.Context, nodeUuid string) (*cnsvsphere.VirtualMachine, error) {
+	return nodes.cnsNodeManager.GetNode(ctx, nodeUuid, nil)
 }
 
 // GetAllNodes returns VirtualMachine objects for all registered nodes in cluster.
