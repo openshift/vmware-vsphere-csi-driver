@@ -35,29 +35,6 @@ const (
 	//
 	// When both bootstrap FileName and FileContent are set, FileName is used.
 	XDSBootstrapFileContentEnv = "GRPC_XDS_BOOTSTRAP_CONFIG"
-<<<<<<< HEAD
-
-	ringHashSupportEnv           = "GRPC_XDS_EXPERIMENTAL_ENABLE_RING_HASH"
-	clientSideSecuritySupportEnv = "GRPC_XDS_EXPERIMENTAL_SECURITY_SUPPORT"
-	aggregateAndDNSSupportEnv    = "GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER"
-	rbacSupportEnv               = "GRPC_XDS_EXPERIMENTAL_RBAC"
-	outlierDetectionSupportEnv   = "GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION"
-	federationEnv                = "GRPC_EXPERIMENTAL_XDS_FEDERATION"
-	rlsInXDSEnv                  = "GRPC_EXPERIMENTAL_XDS_RLS_LB"
-
-	c2pResolverTestOnlyTrafficDirectorURIEnv = "GRPC_TEST_ONLY_GOOGLE_C2P_RESOLVER_TRAFFIC_DIRECTOR_URI"
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-
-	ringHashSupportEnv           = "GRPC_XDS_EXPERIMENTAL_ENABLE_RING_HASH"
-	clientSideSecuritySupportEnv = "GRPC_XDS_EXPERIMENTAL_SECURITY_SUPPORT"
-	aggregateAndDNSSupportEnv    = "GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER"
-	rbacSupportEnv               = "GRPC_XDS_EXPERIMENTAL_RBAC"
-	federationEnv                = "GRPC_EXPERIMENTAL_XDS_FEDERATION"
-	rlsInXDSEnv                  = "GRPC_EXPERIMENTAL_XDS_RLS_LB"
-
-	c2pResolverTestOnlyTrafficDirectorURIEnv = "GRPC_TEST_ONLY_GOOGLE_C2P_RESOLVER_TRAFFIC_DIRECTOR_URI"
-=======
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 )
 
 var (
@@ -83,49 +60,18 @@ var (
 	// Note that there is no env var protection for the server-side because we
 	// have a brand new API on the server-side and users explicitly need to use
 	// the new API to get security integration on the server.
-<<<<<<< HEAD
-	XDSClientSideSecurity = !strings.EqualFold(os.Getenv(clientSideSecuritySupportEnv), "false")
-	// XDSAggregateAndDNS indicates whether processing of aggregated cluster
-	// and DNS cluster is enabled, which can be enabled by setting the
-	// environment variable
-	// "GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER" to
-	// "true".
-	XDSAggregateAndDNS = strings.EqualFold(os.Getenv(aggregateAndDNSSupportEnv), "true")
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	XDSClientSideSecurity = !strings.EqualFold(os.Getenv(clientSideSecuritySupportEnv), "false")
-	// XDSAggregateAndDNS indicates whether processing of aggregated cluster
-	// and DNS cluster is enabled, which can be enabled by setting the
-	// environment variable
-	// "GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER" to
-	// "true".
-	XDSAggregateAndDNS = !strings.EqualFold(os.Getenv(aggregateAndDNSSupportEnv), "false")
-=======
 	XDSClientSideSecurity = boolFromEnv("GRPC_XDS_EXPERIMENTAL_SECURITY_SUPPORT", true)
 	// XDSAggregateAndDNS indicates whether processing of aggregated cluster and
 	// DNS cluster is enabled, which can be disabled by setting the environment
 	// variable "GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER"
 	// to "false".
 	XDSAggregateAndDNS = boolFromEnv("GRPC_XDS_EXPERIMENTAL_ENABLE_AGGREGATE_AND_LOGICAL_DNS_CLUSTER", true)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	// XDSRBAC indicates whether xDS configured RBAC HTTP Filter is enabled,
 	// which can be disabled by setting the environment variable
 	// "GRPC_XDS_EXPERIMENTAL_RBAC" to "false".
 	XDSRBAC = boolFromEnv("GRPC_XDS_EXPERIMENTAL_RBAC", true)
 	// XDSOutlierDetection indicates whether outlier detection support is
-<<<<<<< HEAD
-	// enabled, which can be enabled by setting the environment variable
-	// "GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION" to "true".
-	XDSOutlierDetection = strings.EqualFold(os.Getenv(outlierDetectionSupportEnv), "true")
-	// XDSFederation indicates whether federation support is enabled.
-	XDSFederation = strings.EqualFold(os.Getenv(federationEnv), "true")
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	// enabled, which can be enabled by setting the environment variable
-	// "GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION" to "true".
-	XDSOutlierDetection = false
-	// XDSFederation indicates whether federation support is enabled.
-	XDSFederation = strings.EqualFold(os.Getenv(federationEnv), "true")
-=======
 	// enabled, which can be disabled by setting the environment variable
 	// "GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION" to "false".
 	XDSOutlierDetection = boolFromEnv("GRPC_EXPERIMENTAL_ENABLE_OUTLIER_DETECTION", true)
@@ -133,7 +79,6 @@ var (
 	// be enabled by setting the environment variable
 	// "GRPC_EXPERIMENTAL_XDS_FEDERATION" to "true".
 	XDSFederation = boolFromEnv("GRPC_EXPERIMENTAL_XDS_FEDERATION", true)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	// XDSRLS indicates whether processing of Cluster Specifier plugins and
 	// support for the RLS CLuster Specifier is enabled, which can be disabled by

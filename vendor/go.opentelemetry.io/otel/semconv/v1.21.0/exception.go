@@ -12,24 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-<<<<<<<< HEAD:vendor/go.opentelemetry.io/otel/unit/unit.go
-package unit // import "go.opentelemetry.io/otel/unit"
-|||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/metric/unit/unit.go
-package unit // import "go.opentelemetry.io/otel/metric/unit"
-========
 package semconv // import "go.opentelemetry.io/otel/semconv/v1.21.0"
->>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/semconv/v1.21.0/exception.go
 
-<<<<<<<< HEAD:vendor/go.opentelemetry.io/otel/unit/unit.go
-type Unit string
-
-|||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/metric/unit/unit.go
-// Unit is a determinate standard quantity of measurement.
-type Unit string
-
-// Units defined by OpenTelemetry.
-========
->>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/semconv/v1.21.0/exception.go
 const (
 	// ExceptionEventName is the name of the Span event representing an exception.
 	ExceptionEventName = "exception"

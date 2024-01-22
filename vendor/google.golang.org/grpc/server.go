@@ -73,15 +73,6 @@ func init() {
 	internal.DrainServerTransports = func(srv *Server, addr string) {
 		srv.drainServerTransports(addr)
 	}
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	internal.AddExtraServerOptions = func(opt ...ServerOption) {
-		extraServerOptions = opt
-	}
-	internal.ClearExtraServerOptions = func() {
-		extraServerOptions = nil
-	}
-=======
 	internal.AddGlobalServerOptions = func(opt ...ServerOption) {
 		globalServerOptions = append(globalServerOptions, opt...)
 	}
@@ -90,7 +81,6 @@ func init() {
 	}
 	internal.BinaryLogger = binaryLogger
 	internal.JoinServerOptions = newJoinServerOption
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 var statusOK = status.New(codes.OK, "")
@@ -163,7 +153,7 @@ type serverOptions struct {
 	chainStreamInts       []StreamServerInterceptor
 	binaryLogger          binarylog.Logger
 	inTapHandle           tap.ServerInHandle
-	statsHandler          stats.Handler
+	statsHandlers         []stats.Handler
 	maxConcurrentStreams  uint32
 	maxReceiveMessageSize int
 	maxSendMessageSize    int
@@ -191,12 +181,7 @@ var defaultServerOptions = serverOptions{
 	readBufferSize:        defaultReadBufSize,
 	recvBufferPool:        nopBufferPool{},
 }
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-var extraServerOptions []ServerOption
-=======
 var globalServerOptions []ServerOption
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 // A ServerOption sets options such as credentials, codec and keepalive parameters, etc.
 type ServerOption interface {
@@ -206,7 +191,7 @@ type ServerOption interface {
 // EmptyServerOption does not alter the server configuration. It can be embedded
 // in another structure to build custom server options.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This type is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -351,7 +336,7 @@ func CustomCodec(codec Codec) ServerOption {
 // https://github.com/grpc/grpc-go/blob/master/Documentation/encoding.md#using-a-codec.
 // Will be supported throughout 1.x.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -475,7 +460,7 @@ func ChainStreamInterceptor(interceptors ...StreamServerInterceptor) ServerOptio
 // InTapHandle returns a ServerOption that sets the tap handle for all the server
 // transport to be created. Only one can be installed.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -491,7 +476,13 @@ func InTapHandle(h tap.ServerInHandle) ServerOption {
 // StatsHandler returns a ServerOption that sets the stats handler for the server.
 func StatsHandler(h stats.Handler) ServerOption {
 	return newFuncServerOption(func(o *serverOptions) {
-		o.statsHandler = h
+		if h == nil {
+			logger.Error("ignoring nil parameter in grpc.StatsHandler ServerOption")
+			// Do not allow a nil stats handler, which would otherwise cause
+			// panics.
+			return
+		}
+		o.statsHandlers = append(o.statsHandlers, h)
 	})
 }
 
@@ -526,7 +517,7 @@ func UnknownServiceHandler(streamHandler StreamHandler) ServerOption {
 // new connections.  If this is not set, the default is 120 seconds.  A zero or
 // negative value will result in an immediate timeout.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -547,7 +538,7 @@ func MaxHeaderListSize(s uint32) ServerOption {
 // HeaderTableSize returns a ServerOption that sets the size of dynamic
 // header table for stream.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -562,7 +553,7 @@ func HeaderTableSize(s uint32) ServerOption {
 // zero (default) will disable workers and spawn a new goroutine for each
 // stream.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -638,16 +629,9 @@ func (s *Server) stopServerWorkers() {
 // started to accept requests yet.
 func NewServer(opt ...ServerOption) *Server {
 	opts := defaultServerOptions
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	for _, o := range extraServerOptions {
-		o.apply(&opts)
-	}
-=======
 	for _, o := range globalServerOptions {
 		o.apply(&opts)
 	}
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	for _, o := range opt {
 		o.apply(&opts)
 	}
@@ -955,7 +939,7 @@ func (s *Server) newHTTP2Transport(c net.Conn) transport.ServerTransport {
 		ConnectionTimeout:     s.opts.connectionTimeout,
 		Credentials:           s.opts.creds,
 		InTapHandle:           s.opts.inTapHandle,
-		StatsHandler:          s.opts.statsHandler,
+		StatsHandlers:         s.opts.statsHandlers,
 		KeepaliveParams:       s.opts.keepaliveParams,
 		KeepalivePolicy:       s.opts.keepalivePolicy,
 		InitialWindowSize:     s.opts.initialWindowSize,
@@ -977,7 +961,7 @@ func (s *Server) newHTTP2Transport(c net.Conn) transport.ServerTransport {
 		if err != credentials.ErrConnDispatched {
 			// Don't log on ErrConnDispatched and io.EOF to prevent log spam.
 			if err != io.EOF {
-				channelz.Warning(logger, s.channelzID, "grpc: Server.Serve failed to create ServerTransport: ", err)
+				channelz.Info(logger, s.channelzID, "grpc: Server.Serve failed to create ServerTransport: ", err)
 			}
 			c.Close()
 		}
@@ -1029,24 +1013,24 @@ var _ http.Handler = (*Server)(nil)
 // To share one port (such as 443 for https) between gRPC and an
 // existing http.Handler, use a root http.Handler such as:
 //
-//   if r.ProtoMajor == 2 && strings.HasPrefix(
-//   	r.Header.Get("Content-Type"), "application/grpc") {
-//   	grpcServer.ServeHTTP(w, r)
-//   } else {
-//   	yourMux.ServeHTTP(w, r)
-//   }
+//	if r.ProtoMajor == 2 && strings.HasPrefix(
+//		r.Header.Get("Content-Type"), "application/grpc") {
+//		grpcServer.ServeHTTP(w, r)
+//	} else {
+//		yourMux.ServeHTTP(w, r)
+//	}
 //
 // Note that ServeHTTP uses Go's HTTP/2 server implementation which is totally
 // separate from grpc-go's HTTP/2 server. Performance and features may vary
 // between the two paths. ServeHTTP does not support some gRPC features
 // available through grpc-go's HTTP/2 server.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	st, err := transport.NewServerHandlerTransport(w, r, s.opts.statsHandler)
+	st, err := transport.NewServerHandlerTransport(w, r, s.opts.statsHandlers)
 	if err != nil {
 		// Errors returned from transport.NewServerHandlerTransport have
 		// already been written to w.
@@ -1136,20 +1120,10 @@ func (s *Server) sendResponse(ctx context.Context, t transport.ServerTransport, 
 		return status.Errorf(codes.ResourceExhausted, "grpc: trying to send message larger than max (%d vs. %d)", len(payload), s.opts.maxSendMessageSize)
 	}
 	err = t.Write(stream, hdr, payload, opts)
-<<<<<<< HEAD
-	if err == nil && s.opts.statsHandler != nil {
-		s.opts.statsHandler.HandleRPC(stream.Context(), outPayload(false, msg, data, payload, time.Now()))
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	if err == nil {
-		for _, sh := range s.opts.statsHandlers {
-			sh.HandleRPC(stream.Context(), outPayload(false, msg, data, payload, time.Now()))
-		}
-=======
 	if err == nil {
 		for _, sh := range s.opts.statsHandlers {
 			sh.HandleRPC(ctx, outPayload(false, msg, data, payload, time.Now()))
 		}
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	return err
 }
@@ -1181,15 +1155,6 @@ func chainUnaryInterceptors(interceptors []UnaryServerInterceptor) UnaryServerIn
 	}
 }
 
-<<<<<<< HEAD
-func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, info *serviceInfo, md *MethodDesc, trInfo *traceInfo) (err error) {
-	sh := s.opts.statsHandler
-	if sh != nil || trInfo != nil || channelz.IsOn() {
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-func (s *Server) processUnaryRPC(t transport.ServerTransport, stream *transport.Stream, info *serviceInfo, md *MethodDesc, trInfo *traceInfo) (err error) {
-	shs := s.opts.statsHandlers
-	if len(shs) != 0 || trInfo != nil || channelz.IsOn() {
-=======
 func getChainUnaryHandler(interceptors []UnaryServerInterceptor, curr int, info *UnaryServerInfo, finalHandler UnaryHandler) UnaryHandler {
 	if curr == len(interceptors)-1 {
 		return finalHandler
@@ -1202,12 +1167,11 @@ func getChainUnaryHandler(interceptors []UnaryServerInterceptor, curr int, info 
 func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTransport, stream *transport.Stream, info *serviceInfo, md *MethodDesc, trInfo *traceInfo) (err error) {
 	shs := s.opts.statsHandlers
 	if len(shs) != 0 || trInfo != nil || channelz.IsOn() {
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		if channelz.IsOn() {
 			s.incrCallsStarted()
 		}
 		var statsBegin *stats.Begin
-		if sh != nil {
+		for _, sh := range shs {
 			beginTime := time.Now()
 			statsBegin = &stats.Begin{
 				BeginTime:      beginTime,
@@ -1238,7 +1202,7 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 				trInfo.tr.Finish()
 			}
 
-			if sh != nil {
+			for _, sh := range shs {
 				end := &stats.End{
 					BeginTime: statsBegin.BeginTime,
 					EndTime:   time.Now(),
@@ -1335,13 +1299,7 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 	}
 
 	var payInfo *payloadInfo
-<<<<<<< HEAD
-	if sh != nil || binlog != nil {
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	if len(shs) != 0 || binlog != nil {
-=======
 	if len(shs) != 0 || len(binlogs) != 0 {
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		payInfo = &payloadInfo{}
 	}
 	d, err := recvAndDecompress(&parser{r: stream, recvBufferPool: s.opts.recvBufferPool}, stream, dc, s.opts.maxReceiveMessageSize, payInfo, decomp)
@@ -1358,23 +1316,6 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 		if err := s.getCodec(stream.ContentSubtype()).Unmarshal(d, v); err != nil {
 			return status.Errorf(codes.Internal, "grpc: error unmarshalling request: %v", err)
 		}
-<<<<<<< HEAD
-		if sh != nil {
-			sh.HandleRPC(stream.Context(), &stats.InPayload{
-				RecvTime:   time.Now(),
-				Payload:    v,
-				WireLength: payInfo.wireLength + headerLen,
-				Data:       d,
-				Length:     len(d),
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		for _, sh := range shs {
-			sh.HandleRPC(stream.Context(), &stats.InPayload{
-				RecvTime:   time.Now(),
-				Payload:    v,
-				WireLength: payInfo.wireLength + headerLen,
-				Data:       d,
-				Length:     len(d),
-=======
 		for _, sh := range shs {
 			sh.HandleRPC(ctx, &stats.InPayload{
 				RecvTime:         time.Now(),
@@ -1383,7 +1324,6 @@ func (s *Server) processUnaryRPC(ctx context.Context, t transport.ServerTranspor
 				WireLength:       payInfo.compressedLength + headerLen,
 				CompressedLength: payInfo.compressedLength,
 				Data:             d,
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			})
 		}
 		if len(binlogs) != 0 {
@@ -1554,26 +1494,18 @@ func (s *Server) processStreamingRPC(ctx context.Context, t transport.ServerTran
 	if channelz.IsOn() {
 		s.incrCallsStarted()
 	}
-	sh := s.opts.statsHandler
+	shs := s.opts.statsHandlers
 	var statsBegin *stats.Begin
-	if sh != nil {
+	if len(shs) != 0 {
 		beginTime := time.Now()
 		statsBegin = &stats.Begin{
 			BeginTime:      beginTime,
 			IsClientStream: sd.ClientStreams,
 			IsServerStream: sd.ServerStreams,
 		}
-<<<<<<< HEAD
-		sh.HandleRPC(stream.Context(), statsBegin)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		for _, sh := range shs {
-			sh.HandleRPC(stream.Context(), statsBegin)
-		}
-=======
 		for _, sh := range shs {
 			sh.HandleRPC(ctx, statsBegin)
 		}
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	ctx = NewContextWithServerTransportStream(ctx, stream)
 	ss := &serverStream{
@@ -1585,10 +1517,10 @@ func (s *Server) processStreamingRPC(ctx context.Context, t transport.ServerTran
 		maxReceiveMessageSize: s.opts.maxReceiveMessageSize,
 		maxSendMessageSize:    s.opts.maxSendMessageSize,
 		trInfo:                trInfo,
-		statsHandler:          sh,
+		statsHandler:          shs,
 	}
 
-	if sh != nil || trInfo != nil || channelz.IsOn() {
+	if len(shs) != 0 || trInfo != nil || channelz.IsOn() {
 		// See comment in processUnaryRPC on defers.
 		defer func() {
 			if trInfo != nil {
@@ -1602,7 +1534,7 @@ func (s *Server) processStreamingRPC(ctx context.Context, t transport.ServerTran
 				ss.mu.Unlock()
 			}
 
-			if sh != nil {
+			if len(shs) != 0 {
 				end := &stats.End{
 					BeginTime: statsBegin.BeginTime,
 					EndTime:   time.Now(),
@@ -1610,17 +1542,9 @@ func (s *Server) processStreamingRPC(ctx context.Context, t transport.ServerTran
 				if err != nil && err != io.EOF {
 					end.Error = toRPCErr(err)
 				}
-<<<<<<< HEAD
-				sh.HandleRPC(stream.Context(), end)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-				for _, sh := range shs {
-					sh.HandleRPC(stream.Context(), end)
-				}
-=======
 				for _, sh := range shs {
 					sh.HandleRPC(ctx, end)
 				}
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			}
 
 			if channelz.IsOn() {
@@ -1851,7 +1775,7 @@ type streamKey struct{}
 // NewContextWithServerTransportStream creates a new context from ctx and
 // attaches stream to it.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -1866,7 +1790,7 @@ func NewContextWithServerTransportStream(ctx context.Context, stream ServerTrans
 //
 // See also NewContextWithServerTransportStream.
 //
-// Experimental
+// # Experimental
 //
 // Notice: This type is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -1881,7 +1805,7 @@ type ServerTransportStream interface {
 // ctx. Returns nil if the given context has no stream associated with it
 // (which implies it is not an RPC invocation context).
 //
-// Experimental
+// # Experimental
 //
 // Notice: This API is EXPERIMENTAL and may be changed or removed in a
 // later release.
@@ -2002,12 +1926,12 @@ func (s *Server) getCodec(contentSubtype string) baseCodec {
 // When called multiple times, all the provided metadata will be merged.  All
 // the metadata will be sent out when one of the following happens:
 //
-// - grpc.SendHeader is called, or for streaming handlers, stream.SendHeader.
-// - The first response message is sent.  For unary handlers, this occurs when
-//   the handler returns; for streaming handlers, this can happen when stream's
-//   SendMsg method is called.
-// - An RPC status is sent out (error or success).  This occurs when the handler
-//   returns.
+//   - grpc.SendHeader is called, or for streaming handlers, stream.SendHeader.
+//   - The first response message is sent.  For unary handlers, this occurs when
+//     the handler returns; for streaming handlers, this can happen when stream's
+//     SendMsg method is called.
+//   - An RPC status is sent out (error or success).  This occurs when the handler
+//     returns.
 //
 // SetHeader will fail if called after any of the events above.
 //

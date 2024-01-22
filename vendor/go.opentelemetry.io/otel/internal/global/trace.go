@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package global
+package global // import "go.opentelemetry.io/otel/internal/global"
 
 /*
 This file contains the forwarding implementation of the TracerProvider used as
@@ -36,7 +36,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"go.opentelemetry.io/otel/internal/trace/noop"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/embedded"
 )
@@ -92,9 +93,10 @@ func (p *tracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.T
 
 	// At this moment it is guaranteed that no sdk is installed, save the tracer in the tracers map.
 
+	c := trace.NewTracerConfig(opts...)
 	key := il{
 		name:    name,
-		version: trace.NewTracerConfig(opts...).InstrumentationVersion,
+		version: c.InstrumentationVersion(),
 	}
 
 	if p.tracers == nil {
@@ -105,7 +107,7 @@ func (p *tracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.T
 		return val
 	}
 
-	t := &tracer{name: name, opts: opts}
+	t := &tracer{name: name, opts: opts, provider: p}
 	p.tracers[key] = t
 	return t
 }
@@ -120,20 +122,11 @@ type il struct {
 // All Tracer functionality is forwarded to a delegate once configured.
 // Otherwise, all functionality is forwarded to a NoopTracer.
 type tracer struct {
-<<<<<<< HEAD
-	name string
-	opts []trace.TracerOption
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	name     string
-	opts     []trace.TracerOption
-	provider *tracerProvider
-=======
 	embedded.Tracer
 
 	name     string
 	opts     []trace.TracerOption
 	provider *tracerProvider
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	delegate atomic.Value
 }
@@ -153,55 +146,16 @@ func (t *tracer) setDelegate(provider trace.TracerProvider) {
 
 // Start implements trace.Tracer by forwarding the call to t.delegate if
 // set, otherwise it forwards the call to a NoopTracer.
-func (t *tracer) Start(ctx context.Context, name string, opts ...trace.SpanOption) (context.Context, trace.Span) {
+func (t *tracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
 	delegate := t.delegate.Load()
 	if delegate != nil {
 		return delegate.(trace.Tracer).Start(ctx, name, opts...)
 	}
-	return noop.Tracer.Start(ctx, name, opts...)
+
+	s := nonRecordingSpan{sc: trace.SpanContextFromContext(ctx), tracer: t}
+	ctx = trace.ContextWithSpan(ctx, s)
+	return ctx, s
 }
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-
-// nonRecordingSpan is a minimal implementation of a Span that wraps a
-// SpanContext. It performs no operations other than to return the wrapped
-// SpanContext.
-type nonRecordingSpan struct {
-	sc     trace.SpanContext
-	tracer *tracer
-}
-
-var _ trace.Span = nonRecordingSpan{}
-
-// SpanContext returns the wrapped SpanContext.
-func (s nonRecordingSpan) SpanContext() trace.SpanContext { return s.sc }
-
-// IsRecording always returns false.
-func (nonRecordingSpan) IsRecording() bool { return false }
-
-// SetStatus does nothing.
-func (nonRecordingSpan) SetStatus(codes.Code, string) {}
-
-// SetError does nothing.
-func (nonRecordingSpan) SetError(bool) {}
-
-// SetAttributes does nothing.
-func (nonRecordingSpan) SetAttributes(...attribute.KeyValue) {}
-
-// End does nothing.
-func (nonRecordingSpan) End(...trace.SpanEndOption) {}
-
-// RecordError does nothing.
-func (nonRecordingSpan) RecordError(error, ...trace.EventOption) {}
-
-// AddEvent does nothing.
-func (nonRecordingSpan) AddEvent(string, ...trace.EventOption) {}
-
-// SetName does nothing.
-func (nonRecordingSpan) SetName(string) {}
-
-func (s nonRecordingSpan) TracerProvider() trace.TracerProvider { return s.tracer.provider }
-=======
 
 // nonRecordingSpan is a minimal implementation of a Span that wraps a
 // SpanContext. It performs no operations other than to return the wrapped
@@ -243,4 +197,3 @@ func (nonRecordingSpan) AddEvent(string, ...trace.EventOption) {}
 func (nonRecordingSpan) SetName(string) {}
 
 func (s nonRecordingSpan) TracerProvider() trace.TracerProvider { return s.tracer.provider }
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

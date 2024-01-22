@@ -26,14 +26,19 @@ import (
 // contains invalid values that are omitted from the returned Resource.
 var ErrPartialResource = errors.New("partial resource")
 
-// Detector detects OpenTelemetry resource information
+// Detector detects OpenTelemetry resource information.
 type Detector interface {
+	// DO NOT CHANGE: any modification will not be backwards compatible and
+	// must never be done outside of a new major release.
+
 	// Detect returns an initialized Resource based on gathered information.
 	// If the source information to construct a Resource contains invalid
 	// values, a Resource is returned with the valid parts of the source
 	// information used for initialization along with an appropriately
 	// wrapped ErrPartialResource error.
 	Detect(ctx context.Context) (*Resource, error)
+	// DO NOT CHANGE: any modification will not be backwards compatible and
+	// must never be done outside of a new major release.
 }
 
 // Detect calls all input detectors sequentially and merges each result with the previous one.
@@ -63,20 +68,11 @@ func detect(ctx context.Context, res *Resource, detectors []Detector) error {
 				continue
 			}
 		}
-<<<<<<< HEAD
-		autoDetectedRes = Merge(autoDetectedRes, res)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		autoDetectedRes, err = Merge(autoDetectedRes, res)
-		if err != nil {
-			errInfo = append(errInfo, err.Error())
-		}
-=======
 		r, err = Merge(res, r)
 		if err != nil {
 			errs = append(errs, err)
 		}
 		*res = *r
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 
 	if len(errs) == 0 {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otelhttp
+package otelhttp // import "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 import (
 	"io"
@@ -26,13 +26,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
-<<<<<<< HEAD
-	"go.opentelemetry.io/otel/semconv"
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
-=======
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -44,25 +38,15 @@ type middleware struct {
 	tracer            trace.Tracer
 	meter             metric.Meter
 	propagators       propagation.TextMapPropagator
-	spanStartOptions  []trace.SpanOption
+	spanStartOptions  []trace.SpanStartOption
 	readEvent         bool
 	writeEvent        bool
 	filters           []Filter
 	spanNameFormatter func(string, *http.Request) string
-<<<<<<< HEAD
-	counters          map[string]metric.Int64Counter
-	valueRecorders    map[string]metric.Int64ValueRecorder
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	counters          map[string]syncint64.Counter
-	valueRecorders    map[string]syncfloat64.Histogram
-	publicEndpoint    bool
-	publicEndpointFn  func(*http.Request) bool
-=======
 	counters          map[string]metric.Int64Counter
 	valueRecorders    map[string]metric.Float64Histogram
 	publicEndpoint    bool
 	publicEndpointFn  func(*http.Request) bool
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 func defaultHandlerFormatter(operation string, _ *http.Request) string {
@@ -108,15 +92,9 @@ func (h *middleware) configure(c *config) {
 	h.writeEvent = c.WriteEvent
 	h.filters = c.Filters
 	h.spanNameFormatter = c.SpanNameFormatter
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	h.publicEndpoint = c.PublicEndpoint
-	h.publicEndpointFn = c.PublicEndpointFn
-=======
 	h.publicEndpoint = c.PublicEndpoint
 	h.publicEndpointFn = c.PublicEndpointFn
 	h.server = c.ServerName
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 func handleErr(err error) {
@@ -125,57 +103,29 @@ func handleErr(err error) {
 	}
 }
 
-<<<<<<< HEAD
-func (h *Handler) createMeasures() {
-	h.counters = make(map[string]metric.Int64Counter)
-	h.valueRecorders = make(map[string]metric.Int64ValueRecorder)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-func (h *Handler) createMeasures() {
-	h.counters = make(map[string]syncint64.Counter)
-	h.valueRecorders = make(map[string]syncfloat64.Histogram)
-=======
 func (h *middleware) createMeasures() {
 	h.counters = make(map[string]metric.Int64Counter)
 	h.valueRecorders = make(map[string]metric.Float64Histogram)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
-<<<<<<< HEAD
-	requestBytesCounter, err := h.meter.NewInt64Counter(RequestContentLength)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	requestBytesCounter, err := h.meter.SyncInt64().Counter(RequestContentLength)
-=======
 	requestBytesCounter, err := h.meter.Int64Counter(
 		RequestContentLength,
 		metric.WithUnit("By"),
 		metric.WithDescription("Measures the size of HTTP request content length (uncompressed)"),
 	)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	handleErr(err)
 
-<<<<<<< HEAD
-	responseBytesCounter, err := h.meter.NewInt64Counter(ResponseContentLength)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	responseBytesCounter, err := h.meter.SyncInt64().Counter(ResponseContentLength)
-=======
 	responseBytesCounter, err := h.meter.Int64Counter(
 		ResponseContentLength,
 		metric.WithUnit("By"),
 		metric.WithDescription("Measures the size of HTTP response content length (uncompressed)"),
 	)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	handleErr(err)
 
-<<<<<<< HEAD
-	serverLatencyMeasure, err := h.meter.NewInt64ValueRecorder(ServerLatency)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	serverLatencyMeasure, err := h.meter.SyncFloat64().Histogram(ServerLatency)
-=======
 	serverLatencyMeasure, err := h.meter.Float64Histogram(
 		ServerLatency,
 		metric.WithUnit("ms"),
 		metric.WithDescription("Measures the duration of HTTP request handling"),
 	)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	handleErr(err)
 
 	h.counters[RequestContentLength] = requestBytesCounter
@@ -183,17 +133,9 @@ func (h *middleware) createMeasures() {
 	h.valueRecorders[ServerLatency] = serverLatencyMeasure
 }
 
-<<<<<<< HEAD
-// ServeHTTP serves HTTP requests (http.Handler)
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-// ServeHTTP serves HTTP requests (http.Handler).
-func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-=======
 // serveHTTP sets up tracing and calls the given next http.Handler with the span
 // context injected into the request context.
 func (h *middleware) serveHTTP(w http.ResponseWriter, r *http.Request, next http.Handler) {
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	requestStartTime := time.Now()
 	for _, f := range h.filters {
 		if !f(r) {
@@ -203,44 +145,6 @@ func (h *middleware) serveHTTP(w http.ResponseWriter, r *http.Request, next http
 		}
 	}
 
-<<<<<<< HEAD
-	opts := append([]trace.SpanOption{
-		trace.WithAttributes(semconv.NetAttributesFromHTTPRequest("tcp", r)...),
-		trace.WithAttributes(semconv.EndUserAttributesFromHTTPRequest(r)...),
-		trace.WithAttributes(semconv.HTTPServerAttributesFromHTTPRequest(h.operation, "", r)...),
-	}, h.spanStartOptions...) // start with the configured options
-
-	ctx := h.propagators.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-	ctx, span := h.tracer.Start(ctx, h.spanNameFormatter(h.operation, r), opts...)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	ctx := h.propagators.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
-	opts := h.spanStartOptions
-	if h.publicEndpoint || (h.publicEndpointFn != nil && h.publicEndpointFn(r.WithContext(ctx))) {
-		opts = append(opts, trace.WithNewRoot())
-		// Linking incoming span context if any for public endpoint.
-		if s := trace.SpanContextFromContext(ctx); s.IsValid() && s.IsRemote() {
-			opts = append(opts, trace.WithLinks(trace.Link{SpanContext: s}))
-		}
-	}
-
-	opts = append([]trace.SpanStartOption{
-		trace.WithAttributes(semconv.NetAttributesFromHTTPRequest("tcp", r)...),
-		trace.WithAttributes(semconv.EndUserAttributesFromHTTPRequest(r)...),
-		trace.WithAttributes(semconv.HTTPServerAttributesFromHTTPRequest(h.operation, "", r)...),
-	}, opts...) // start with the configured options
-
-	tracer := h.tracer
-
-	if tracer == nil {
-		if span := trace.SpanFromContext(r.Context()); span.SpanContext().IsValid() {
-			tracer = newTracer(span.TracerProvider())
-		} else {
-			tracer = newTracer(otel.GetTracerProvider())
-		}
-	}
-
-	ctx, span := tracer.Start(ctx, h.spanNameFormatter(h.operation, r), opts...)
-=======
 	ctx := h.propagators.Extract(r.Context(), propagation.HeaderCarrier(r.Header))
 	opts := []trace.SpanStartOption{
 		trace.WithAttributes(semconvutil.HTTPServerRequest(h.server, r)...),
@@ -269,7 +173,6 @@ func (h *middleware) serveHTTP(w http.ResponseWriter, r *http.Request, next http
 	}
 
 	ctx, span := tracer.Start(ctx, h.spanNameFormatter(h.operation, r), opts...)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	defer span.End()
 
 	readRecordFunc := func(int64) {}
@@ -280,10 +183,10 @@ func (h *middleware) serveHTTP(w http.ResponseWriter, r *http.Request, next http
 	}
 
 	var bw bodyWrapper
-	// if request body is nil we don't want to mutate the body as it will affect
-	// the identity of it in a unforeseeable way because we assert ReadCloser
-	// fullfills a certain interface and it is indeed nil.
-	if r.Body != nil {
+	// if request body is nil or NoBody, we don't want to mutate the body as it
+	// will affect the identity of it in an unforeseeable way because we assert
+	// ReadCloser fulfills a certain interface and it is indeed nil or NoBody.
+	if r.Body != nil && r.Body != http.NoBody {
 		bw.ReadCloser = r.Body
 		bw.record = readRecordFunc
 		r.Body = &bw
@@ -336,7 +239,8 @@ func (h *middleware) serveHTTP(w http.ResponseWriter, r *http.Request, next http
 	h.counters[RequestContentLength].Add(ctx, bw.read, o)
 	h.counters[ResponseContentLength].Add(ctx, rww.written, o)
 
-	elapsedTime := time.Since(requestStartTime).Microseconds()
+	// Use floating point division here for higher precision (instead of Millisecond method).
+	elapsedTime := float64(time.Since(requestStartTime)) / float64(time.Millisecond)
 
 	h.valueRecorders[ServerLatency].Record(ctx, elapsedTime, o)
 }
@@ -356,15 +260,7 @@ func setAfterServeAttributes(span trace.Span, read, wrote int64, statusCode int,
 		attributes = append(attributes, WroteBytesKey.Int64(wrote))
 	}
 	if statusCode > 0 {
-<<<<<<< HEAD
-		attributes = append(attributes, semconv.HTTPAttributesFromHTTPStatusCode(statusCode)...)
-		span.SetStatus(semconv.SpanStatusFromHTTPStatusCode(statusCode))
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		attributes = append(attributes, semconv.HTTPAttributesFromHTTPStatusCode(statusCode)...)
-		span.SetStatus(semconv.SpanStatusFromHTTPStatusCodeAndSpanKind(statusCode, trace.SpanKindServer))
-=======
 		attributes = append(attributes, semconv.HTTPStatusCode(statusCode))
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	span.SetStatus(semconvutil.HTTPServerStatus(statusCode))
 

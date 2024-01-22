@@ -12,35 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-<<<<<<<< HEAD:vendor/go.opentelemetry.io/otel/semconv/doc.go
-// Package semconv implements OpenTelemetry semantic conventions.
-//
-// This package is currently in a pre-GA phase. Backwards incompatible changes
-// may be introduced in subsequent minor version releases as we work to track
-// the evolving OpenTelemetry specification and user feedback.
-//
-// OpenTelemetry semantic conventions are agreed standardized naming
-// patterns for OpenTelemetry things. This package aims to be the
-// centralized place to interact with these conventions.
-package semconv // import "go.opentelemetry.io/otel/semconv"
-|||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/metric/instrument/instrument.go
-package instrument // import "go.opentelemetry.io/otel/metric/instrument"
-
-// Asynchronous instruments are instruments that are updated within a Callback.
-// If an instrument is observed outside of it's callback it should be an error.
-//
-// This interface is used as a grouping mechanism.
-type Asynchronous interface {
-	asynchronous()
-}
-
-// Synchronous instruments are updated in line with application code.
-//
-// This interface is used as a grouping mechanism.
-type Synchronous interface {
-	synchronous()
-}
-========
 //go:build dragonfly || freebsd || netbsd || openbsd || solaris
 // +build dragonfly freebsd netbsd openbsd solaris
 
@@ -50,4 +21,3 @@ var platformHostIDReader hostIDReader = &hostIDReaderBSD{
 	execCommand: execCommand,
 	readFile:    readFile,
 }
->>>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686)):vendor/go.opentelemetry.io/otel/sdk/resource/host_id_bsd.go

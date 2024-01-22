@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otelgrpc
+package otelgrpc // import "go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 
 // gRPC tracing middleware
 // https://github.com/open-telemetry/opentelemetry-specification/blob/main/specification/trace/semantic_conventions/rpc.md
@@ -20,17 +20,8 @@ import (
 	"context"
 	"io"
 	"net"
-<<<<<<< HEAD
-	"strings"
-
-	"github.com/golang/protobuf/proto" // nolint:staticcheck
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-
-	"github.com/golang/protobuf/proto" // nolint:staticcheck
-=======
 	"strconv"
 	"time"
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 	"google.golang.org/grpc"
 	grpc_codes "google.golang.org/grpc/codes"
@@ -39,19 +30,12 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc/internal"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
-<<<<<<< HEAD
-	"go.opentelemetry.io/otel/semconv"
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	semconv "go.opentelemetry.io/otel/semconv/v1.12.0"
-=======
 	"go.opentelemetry.io/otel/metric"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	"go.opentelemetry.io/otel/trace"
-
-	otelcontrib "go.opentelemetry.io/contrib"
 )
 
 type messageType attribute.KeyValue
@@ -60,34 +44,8 @@ type messageType attribute.KeyValue
 // passed context with a message id.
 func (m messageType) Event(ctx context.Context, id int, _ interface{}) {
 	span := trace.SpanFromContext(ctx)
-<<<<<<< HEAD
-	if p, ok := message.(proto.Message); ok {
-		span.AddEvent("message", trace.WithAttributes(
-			attribute.KeyValue(m),
-			semconv.RPCMessageIDKey.Int(id),
-			semconv.RPCMessageUncompressedSizeKey.Int(proto.Size(p)),
-		))
-	} else {
-		span.AddEvent("message", trace.WithAttributes(
-			attribute.KeyValue(m),
-			semconv.RPCMessageIDKey.Int(id),
-		))
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	if p, ok := message.(proto.Message); ok {
-		span.AddEvent("message", trace.WithAttributes(
-			attribute.KeyValue(m),
-			RPCMessageIDKey.Int(id),
-			RPCMessageUncompressedSizeKey.Int(proto.Size(p)),
-		))
-	} else {
-		span.AddEvent("message", trace.WithAttributes(
-			attribute.KeyValue(m),
-			RPCMessageIDKey.Int(id),
-		))
-=======
 	if !span.IsRecording() {
 		return
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 	span.AddEvent("message", trace.WithAttributes(
 		attribute.KeyValue(m),
@@ -96,8 +54,8 @@ func (m messageType) Event(ctx context.Context, id int, _ interface{}) {
 }
 
 var (
-	messageSent     = messageType(semconv.RPCMessageTypeSent)
-	messageReceived = messageType(semconv.RPCMessageTypeReceived)
+	messageSent     = messageType(RPCMessageTypeSent)
+	messageReceived = messageType(RPCMessageTypeReceived)
 )
 
 // UnaryClientInterceptor returns a grpc.UnaryClientInterceptor suitable
@@ -105,17 +63,12 @@ var (
 //
 // Deprecated: Use [NewClientHandler] instead.
 func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	cfg := newConfig(opts)
-=======
 	cfg := newConfig(opts, "client")
 	tracer := cfg.TracerProvider.Tracer(
 		ScopeName,
 		trace.WithInstrumentationVersion(Version()),
 	)
 
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return func(
 		ctx context.Context,
 		method string,
@@ -124,21 +77,6 @@ func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
 		invoker grpc.UnaryInvoker,
 		callOpts ...grpc.CallOption,
 	) error {
-<<<<<<< HEAD
-		requestMetadata, _ := metadata.FromOutgoingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		i := &InterceptorInfo{
-			Method: method,
-			Type:   UnaryClient,
-		}
-		if cfg.Filter != nil && !cfg.Filter(i) {
-			return invoker(ctx, method, req, reply, cc, callOpts...)
-		}
-
-		requestMetadata, _ := metadata.FromOutgoingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-=======
 		i := &InterceptorInfo{
 			Method: method,
 			Type:   UnaryClient,
@@ -148,33 +86,8 @@ func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
 		}
 
 		name, attr, _ := telemetryAttributes(method, cc.Target())
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
-<<<<<<< HEAD
-		tracer := newConfig(opts).TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(otelcontrib.SemVersion()),
-		)
-
-		name, attr := spanInfo(method, cc.Target())
-		var span trace.Span
-		ctx, span = tracer.Start(
-			ctx,
-			name,
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		tracer := cfg.TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(SemVersion()),
-		)
-
-		name, attr := spanInfo(method, cc.Target())
-		var span trace.Span
-		ctx, span = tracer.Start(
-			ctx,
-			name,
-=======
 		startOpts := append([]trace.SpanStartOption{
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithAttributes(attr...),
 		},
@@ -188,15 +101,7 @@ func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
 		)
 		defer span.End()
 
-<<<<<<< HEAD
-		Inject(ctx, &metadataCopy, opts...)
-		ctx = metadata.NewOutgoingContext(ctx, metadataCopy)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		inject(ctx, &metadataCopy, cfg.Propagators)
-		ctx = metadata.NewOutgoingContext(ctx, metadataCopy)
-=======
 		ctx = inject(ctx, cfg.Propagators)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 		if cfg.SentEvent {
 			messageSent.Event(ctx, 1, req)
@@ -220,35 +125,6 @@ func UnaryClientInterceptor(opts ...Option) grpc.UnaryClientInterceptor {
 	}
 }
 
-<<<<<<< HEAD
-type streamEventType int
-
-type streamEvent struct {
-	Type streamEventType
-	Err  error
-}
-
-const (
-	closeEvent streamEventType = iota
-	receiveEndEvent
-	errorEvent
-)
-
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-type streamEventType int
-
-type streamEvent struct {
-	Type streamEventType
-	Err  error
-}
-
-const (
-	receiveEndEvent streamEventType = iota
-	errorEvent
-)
-
-=======
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 // clientStream  wraps around the embedded grpc.ClientStream, and intercepts the RecvMsg and
 // SendMsg method call.
 type clientStream struct {
@@ -314,85 +190,13 @@ func (w *clientStream) Header() (metadata.MD, error) {
 func (w *clientStream) CloseSend() error {
 	err := w.ClientStream.CloseSend()
 	if err != nil {
-<<<<<<< HEAD
-		w.sendStreamEvent(errorEvent, err)
-	} else {
-		w.sendStreamEvent(closeEvent, nil)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		w.sendStreamEvent(errorEvent, err)
-=======
 		w.endSpan(err)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	}
 
 	return err
 }
 
-<<<<<<< HEAD
-const (
-	clientClosedState byte = 1 << iota
-	receiveEndedState
-)
-
-func wrapClientStream(s grpc.ClientStream, desc *grpc.StreamDesc) *clientStream {
-	events := make(chan streamEvent)
-	eventsDone := make(chan struct{})
-	finished := make(chan error)
-
-	go func() {
-		defer close(eventsDone)
-
-		// Both streams have to be closed
-		state := byte(0)
-
-		for event := range events {
-			switch event.Type {
-			case closeEvent:
-				state |= clientClosedState
-			case receiveEndEvent:
-				state |= receiveEndedState
-			case errorEvent:
-				finished <- event.Err
-				return
-			}
-
-			if state == clientClosedState|receiveEndedState {
-				finished <- nil
-				return
-			}
-		}
-	}()
-
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-func wrapClientStream(ctx context.Context, s grpc.ClientStream, desc *grpc.StreamDesc) *clientStream {
-	events := make(chan streamEvent)
-	eventsDone := make(chan struct{})
-	finished := make(chan error)
-
-	go func() {
-		defer close(eventsDone)
-
-		for {
-			select {
-			case event := <-events:
-				switch event.Type {
-				case receiveEndEvent:
-					finished <- nil
-					return
-				case errorEvent:
-					finished <- event.Err
-					return
-				}
-			case <-ctx.Done():
-				finished <- ctx.Err()
-				return
-			}
-		}
-	}()
-
-=======
 func wrapClientStream(ctx context.Context, s grpc.ClientStream, desc *grpc.StreamDesc, span trace.Span, cfg *config) *clientStream {
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return &clientStream{
 		ClientStream:  s,
 		span:          span,
@@ -419,17 +223,12 @@ func (w *clientStream) endSpan(err error) {
 //
 // Deprecated: Use [NewClientHandler] instead.
 func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	cfg := newConfig(opts)
-=======
 	cfg := newConfig(opts, "client")
 	tracer := cfg.TracerProvider.Tracer(
 		ScopeName,
 		trace.WithInstrumentationVersion(Version()),
 	)
 
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return func(
 		ctx context.Context,
 		desc *grpc.StreamDesc,
@@ -438,21 +237,6 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 		streamer grpc.Streamer,
 		callOpts ...grpc.CallOption,
 	) (grpc.ClientStream, error) {
-<<<<<<< HEAD
-		requestMetadata, _ := metadata.FromOutgoingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		i := &InterceptorInfo{
-			Method: method,
-			Type:   StreamClient,
-		}
-		if cfg.Filter != nil && !cfg.Filter(i) {
-			return streamer(ctx, desc, cc, method, callOpts...)
-		}
-
-		requestMetadata, _ := metadata.FromOutgoingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-=======
 		i := &InterceptorInfo{
 			Method: method,
 			Type:   StreamClient,
@@ -462,46 +246,14 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 		}
 
 		name, attr, _ := telemetryAttributes(method, cc.Target())
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
-<<<<<<< HEAD
-		tracer := newConfig(opts).TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(otelcontrib.SemVersion()),
-		)
-
-		name, attr := spanInfo(method, cc.Target())
-		var span trace.Span
-		ctx, span = tracer.Start(
-			ctx,
-			name,
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		tracer := cfg.TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(SemVersion()),
-		)
-
-		name, attr := spanInfo(method, cc.Target())
-		var span trace.Span
-		ctx, span = tracer.Start(
-			ctx,
-			name,
-=======
 		startOpts := append([]trace.SpanStartOption{
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			trace.WithSpanKind(trace.SpanKindClient),
 			trace.WithAttributes(attr...),
 		},
 			cfg.SpanStartOptions...,
 		)
 
-<<<<<<< HEAD
-		Inject(ctx, &metadataCopy, opts...)
-		ctx = metadata.NewOutgoingContext(ctx, metadataCopy)
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		inject(ctx, &metadataCopy, cfg.Propagators)
-		ctx = metadata.NewOutgoingContext(ctx, metadataCopy)
-=======
 		ctx, span := tracer.Start(
 			ctx,
 			name,
@@ -509,7 +261,6 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 		)
 
 		ctx = inject(ctx, cfg.Propagators)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 		s, err := streamer(ctx, desc, cc, method, callOpts...)
 		if err != nil {
@@ -519,43 +270,7 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 			span.End()
 			return s, err
 		}
-<<<<<<< HEAD
-		stream := wrapClientStream(s, desc)
-
-		go func() {
-			err := <-stream.finished
-
-			if err != nil {
-				s, _ := status.FromError(err)
-				span.SetStatus(codes.Error, s.Message())
-				span.SetAttributes(statusCodeAttr(s.Code()))
-			} else {
-				span.SetAttributes(statusCodeAttr(grpc_codes.OK))
-			}
-
-			span.End()
-		}()
-
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		stream := wrapClientStream(ctx, s, desc)
-
-		go func() {
-			err := <-stream.finished
-
-			if err != nil {
-				s, _ := status.FromError(err)
-				span.SetStatus(codes.Error, s.Message())
-				span.SetAttributes(statusCodeAttr(s.Code()))
-			} else {
-				span.SetAttributes(statusCodeAttr(grpc_codes.OK))
-			}
-
-			span.End()
-		}()
-
-=======
 		stream := wrapClientStream(ctx, s, desc, span, cfg)
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 		return stream, nil
 	}
 }
@@ -565,38 +280,18 @@ func StreamClientInterceptor(opts ...Option) grpc.StreamClientInterceptor {
 //
 // Deprecated: Use [NewServerHandler] instead.
 func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	cfg := newConfig(opts)
-=======
 	cfg := newConfig(opts, "server")
 	tracer := cfg.TracerProvider.Tracer(
 		ScopeName,
 		trace.WithInstrumentationVersion(Version()),
 	)
 
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return func(
 		ctx context.Context,
 		req interface{},
 		info *grpc.UnaryServerInfo,
 		handler grpc.UnaryHandler,
 	) (interface{}, error) {
-<<<<<<< HEAD
-		requestMetadata, _ := metadata.FromIncomingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		i := &InterceptorInfo{
-			UnaryServerInfo: info,
-			Type:            UnaryServer,
-		}
-		if cfg.Filter != nil && !cfg.Filter(i) {
-			return handler(ctx, req)
-		}
-
-		requestMetadata, _ := metadata.FromIncomingContext(ctx)
-		metadataCopy := requestMetadata.Copy()
-=======
 		i := &InterceptorInfo{
 			UnaryServerInfo: info,
 			Type:            UnaryServer,
@@ -607,37 +302,8 @@ func UnaryServerInterceptor(opts ...Option) grpc.UnaryServerInterceptor {
 
 		ctx = extract(ctx, cfg.Propagators)
 		name, attr, metricAttrs := telemetryAttributes(info.FullMethod, peerFromCtx(ctx))
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
-<<<<<<< HEAD
-		entries, spanCtx := Extract(ctx, &metadataCopy, opts...)
-		ctx = baggage.ContextWithValues(ctx, entries...)
-
-		tracer := newConfig(opts).TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(otelcontrib.SemVersion()),
-		)
-
-		name, attr := spanInfo(info.FullMethod, peerFromCtx(ctx))
-		ctx, span := tracer.Start(
-			trace.ContextWithRemoteSpanContext(ctx, spanCtx),
-			name,
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		bags, spanCtx := Extract(ctx, &metadataCopy, opts...)
-		ctx = baggage.ContextWithBaggage(ctx, bags)
-
-		tracer := cfg.TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(SemVersion()),
-		)
-
-		name, attr := spanInfo(info.FullMethod, peerFromCtx(ctx))
-		ctx, span := tracer.Start(
-			trace.ContextWithRemoteSpanContext(ctx, spanCtx),
-			name,
-=======
 		startOpts := append([]trace.SpanStartOption{
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attr...),
 		},
@@ -739,17 +405,12 @@ func wrapServerStream(ctx context.Context, ss grpc.ServerStream, cfg *config) *s
 //
 // Deprecated: Use [NewServerHandler] instead.
 func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	cfg := newConfig(opts)
-=======
 	cfg := newConfig(opts, "server")
 	tracer := cfg.TracerProvider.Tracer(
 		ScopeName,
 		trace.WithInstrumentationVersion(Version()),
 	)
 
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	return func(
 		srv interface{},
 		ss grpc.ServerStream,
@@ -757,16 +418,6 @@ func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 		handler grpc.StreamHandler,
 	) error {
 		ctx := ss.Context()
-<<<<<<< HEAD
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		i := &InterceptorInfo{
-			StreamServerInfo: info,
-			Type:             StreamServer,
-		}
-		if cfg.Filter != nil && !cfg.Filter(i) {
-			return handler(srv, wrapServerStream(ctx, ss))
-		}
-=======
 		i := &InterceptorInfo{
 			StreamServerInfo: info,
 			Type:             StreamServer,
@@ -774,40 +425,11 @@ func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 		if cfg.Filter != nil && !cfg.Filter(i) {
 			return handler(srv, wrapServerStream(ctx, ss, cfg))
 		}
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 
 		ctx = extract(ctx, cfg.Propagators)
 		name, attr, _ := telemetryAttributes(info.FullMethod, peerFromCtx(ctx))
 
-<<<<<<< HEAD
-		entries, spanCtx := Extract(ctx, &metadataCopy, opts...)
-		ctx = baggage.ContextWithValues(ctx, entries...)
-
-		tracer := newConfig(opts).TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(otelcontrib.SemVersion()),
-		)
-
-		name, attr := spanInfo(info.FullMethod, peerFromCtx(ctx))
-		ctx, span := tracer.Start(
-			trace.ContextWithRemoteSpanContext(ctx, spanCtx),
-			name,
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-		bags, spanCtx := Extract(ctx, &metadataCopy, opts...)
-		ctx = baggage.ContextWithBaggage(ctx, bags)
-
-		tracer := cfg.TracerProvider.Tracer(
-			instrumentationName,
-			trace.WithInstrumentationVersion(SemVersion()),
-		)
-
-		name, attr := spanInfo(info.FullMethod, peerFromCtx(ctx))
-		ctx, span := tracer.Start(
-			trace.ContextWithRemoteSpanContext(ctx, spanCtx),
-			name,
-=======
 		startOpts := append([]trace.SpanStartOption{
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 			trace.WithSpanKind(trace.SpanKindServer),
 			trace.WithAttributes(attr...),
 		},
@@ -835,25 +457,6 @@ func StreamServerInterceptor(opts ...Option) grpc.StreamServerInterceptor {
 	}
 }
 
-<<<<<<< HEAD
-// spanInfo returns a span name and all appropriate attributes from the gRPC
-// method and peer address.
-func spanInfo(fullMethod, peerAddress string) (string, []attribute.KeyValue) {
-	attrs := []attribute.KeyValue{semconv.RPCSystemGRPC}
-	name, mAttrs := parseFullMethod(fullMethod)
-	attrs = append(attrs, mAttrs...)
-	attrs = append(attrs, peerAttr(peerAddress)...)
-	return name, attrs
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-// spanInfo returns a span name and all appropriate attributes from the gRPC
-// method and peer address.
-func spanInfo(fullMethod, peerAddress string) (string, []attribute.KeyValue) {
-	attrs := []attribute.KeyValue{RPCSystemGRPC}
-	name, mAttrs := internal.ParseFullMethod(fullMethod)
-	attrs = append(attrs, mAttrs...)
-	attrs = append(attrs, peerAttr(peerAddress)...)
-	return name, attrs
-=======
 // telemetryAttributes returns a span name and span and metric attributes from
 // the gRPC method and peer address.
 func telemetryAttributes(fullMethod, peerAddress string) (string, []attribute.KeyValue, []attribute.KeyValue) {
@@ -866,7 +469,6 @@ func telemetryAttributes(fullMethod, peerAddress string) (string, []attribute.Ke
 	metricAttrs := attrs[:1+len(methodAttrs)]
 	attrs = append(attrs, peerAttrs...)
 	return name, attrs, metricAttrs
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 }
 
 // peerAttr returns attributes about the peer address.
@@ -909,28 +511,7 @@ func peerFromCtx(ctx context.Context) string {
 	return p.Addr.String()
 }
 
-// parseFullMethod returns a span name following the OpenTelemetry semantic
-// conventions as well as all applicable span attribute.KeyValue attributes based
-// on a gRPC's FullMethod.
-func parseFullMethod(fullMethod string) (string, []attribute.KeyValue) {
-	name := strings.TrimLeft(fullMethod, "/")
-	parts := strings.SplitN(name, "/", 2)
-	if len(parts) != 2 {
-		// Invalid format, does not follow `/package.service/method`.
-		return name, []attribute.KeyValue(nil)
-	}
-
-	var attrs []attribute.KeyValue
-	if service := parts[0]; service != "" {
-		attrs = append(attrs, semconv.RPCServiceKey.String(service))
-	}
-	if method := parts[1]; method != "" {
-		attrs = append(attrs, semconv.RPCMethodKey.String(method))
-	}
-	return name, attrs
-}
-
-// statusCodeAttr returns status code attribute based on given gRPC code
+// statusCodeAttr returns status code attribute based on given gRPC code.
 func statusCodeAttr(c grpc_codes.Code) attribute.KeyValue {
 	return GRPCStatusCodeKey.Int64(int64(c))
 }

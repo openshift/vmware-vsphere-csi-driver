@@ -19,10 +19,4 @@
 package grpc
 
 // Version is the current grpc version.
-<<<<<<< HEAD
-const Version = "1.47.0"
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-const Version = "1.49.0"
-=======
 const Version = "1.59.0"
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))

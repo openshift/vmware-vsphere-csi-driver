@@ -45,24 +45,14 @@ type Logger interface {
 // It is used to get a MethodLogger for each individual method.
 var binLogger Logger
 
-<<<<<<< HEAD
-var grpclogLogger = grpclog.Component("binarylog")
-
-// SetLogger sets the binarg logger.
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-var grpclogLogger = grpclog.Component("binarylog")
-
 // SetLogger sets the binary logger.
-=======
-// SetLogger sets the binary logger.
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 //
 // Only call this at init time.
 func SetLogger(l Logger) {
 	binLogger = l
 }
 
-// GetLogger gets the binarg logger.
+// GetLogger gets the binary logger.
 //
 // Only call this at init time.
 func GetLogger() Logger {

@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package otelhttp
+package otelhttp // import "go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 import (
 	"context"
@@ -25,7 +25,7 @@ import (
 var _ io.ReadCloser = &bodyWrapper{}
 
 // bodyWrapper wraps a http.Request.Body (an io.ReadCloser) to track the number
-// of bytes read and the last error
+// of bytes read and the last error.
 type bodyWrapper struct {
 	io.ReadCloser
 	record func(n int64) // must not be nil
@@ -95,14 +95,5 @@ func (w *respWriterWrapper) WriteHeader(statusCode int) {
 		w.wroteHeader = true
 		w.statusCode = statusCode
 	}
-<<<<<<< HEAD
-	w.wroteHeader = true
-	w.statusCode = statusCode
-	w.props.Inject(w.ctx, propagation.HeaderCarrier(w.Header()))
-||||||| parent of 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
-	w.wroteHeader = true
-	w.statusCode = statusCode
-=======
->>>>>>> 60945b63 (UPSTREAM: 2686: Bump OpenTelemetry libs (#2686))
 	w.ResponseWriter.WriteHeader(statusCode)
 }
