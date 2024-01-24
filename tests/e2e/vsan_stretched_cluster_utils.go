@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vmware/govmomi/find"
 	vsan "github.com/vmware/govmomi/vsan"
@@ -44,6 +45,7 @@ import (
 	fdep "k8s.io/kubernetes/test/e2e/framework/deployment"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -83,6 +85,7 @@ func initialiseFdsVar(ctx context.Context) {
 
 // siteFailureInParallel causes site Failure in multiple hosts of the site in parallel
 func siteFailureInParallel(primarySite bool, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	siteFailover(primarySite)
 }
@@ -266,6 +269,7 @@ func wait4AllK8sNodesToBeUp(
 
 // deletePodsInParallel deletes pods in a given namespace in parallel
 func deletePodsInParallel(client clientset.Interface, namespace string, pods []*v1.Pod, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, pod := range pods {
 		fpod.DeletePodOrFail(client, namespace, pod.Name)
@@ -275,6 +279,7 @@ func deletePodsInParallel(client clientset.Interface, namespace string, pods []*
 // createPvcInParallel creates number of PVC in a given namespace in parallel
 func createPvcInParallel(client clientset.Interface, namespace string, diskSize string, sc *storagev1.StorageClass,
 	ch chan *v1.PersistentVolumeClaim, lock *sync.Mutex, wg *sync.WaitGroup, volumeOpsScale int) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for i := 0; i < volumeOpsScale; i++ {
 		pvc, err := createPVC(client, namespace, nil, diskSize, sc, "")
@@ -324,6 +329,7 @@ func waitForPodsToBeInErrorOrRunning(c clientset.Interface, podName, namespace s
 
 // runCmdOnHostsInParallel runs command on multiple ESX in parallel
 func runCmdOnHostsInParallel(hostIP string, sshCmd string, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	op, err := runCommandOnESX("root", hostIP, sshCmd)
 	framework.Logf(op)
@@ -375,6 +381,7 @@ func toggleNetworkFailureParallel(hosts []string, causeNetworkFailure bool) {
 // deletePVCInParallel deletes PVC in a given namespace in parallel
 func deletePvcInParallel(client clientset.Interface, pvclaims []*v1.PersistentVolumeClaim,
 	namespace string, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, pvclaim := range pvclaims {
 		err := fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
@@ -385,6 +392,8 @@ func deletePvcInParallel(client clientset.Interface, pvclaims []*v1.PersistentVo
 // createPodsInParallel creates Pods in a given namespace in parallel
 func createPodsInParallel(client clientset.Interface, namespace string, pvclaims []*v1.PersistentVolumeClaim,
 	ctx context.Context, lock *sync.Mutex, ch chan *v1.Pod, wg *sync.WaitGroup, volumeOpsScale int) {
+
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 
 	for i := 0; i < volumeOpsScale; i++ {
@@ -401,6 +410,7 @@ func createPodsInParallel(client clientset.Interface, namespace string, pvclaims
 // updatePvcLabelsInParallel updates the labels of pvc in a namespace in parallel
 func updatePvcLabelsInParallel(ctx context.Context, client clientset.Interface, namespace string,
 	labels map[string]string, pvclaims []*v1.PersistentVolumeClaim, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, pvc := range pvclaims {
 		framework.Logf(fmt.Sprintf("Updating labels %+v for pvc %s in namespace %s",
@@ -418,12 +428,15 @@ func updatePvcLabelsInParallel(ctx context.Context, client clientset.Interface, 
 // updatePvLabelsInParallel updates the labels of pv in parallel
 func updatePvLabelsInParallel(ctx context.Context, client clientset.Interface, namespace string,
 	labels map[string]string, persistentVolumes []*v1.PersistentVolume, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, pv := range persistentVolumes {
-		framework.Logf(fmt.Sprintf("Updating labels %+v for pv %s in namespace %s",
-			labels, pv.Name, namespace))
+		framework.Logf("Updating labels %+v for pv %s in namespace %s",
+			labels, pv.Name, namespace)
+		pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pv.Name, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		pv.Labels = labels
-		_, err := client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+		_, err = client.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(),
 			"Error on updating pv labels is: %v", err)
 
@@ -539,6 +552,7 @@ func changeLeaderOfContainerToComeUpOnMaster(ctx context.Context, client clients
 // the particular CSI container on the master node in parallel
 func invokeDockerPauseNKillOnContainerInParallel(sshClientConfig *ssh.ClientConfig, k8sMasterIp string,
 	csiContainerName string, k8sVersion string, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	err := execDockerPauseNKillOnContainer(sshClientConfig, k8sMasterIp, csiContainerName, k8sVersion)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -588,12 +602,19 @@ func checkVmStorageCompliance(client clientset.Interface, storagePolicy string) 
 // statefulset, deployment and volumes of statfulset created
 func createStsDeployment(ctx context.Context, client clientset.Interface, namespace string,
 	sc *storagev1.StorageClass, isDeploymentRequired bool, modifyStsSpec bool,
-	replicaCount int32, stsName string) (*appsv1.StatefulSet, *appsv1.Deployment, []string) {
+	replicaCount int32, stsName string,
+	accessMode v1.PersistentVolumeAccessMode) (*appsv1.StatefulSet, *appsv1.Deployment, []string) {
 	var pvclaims []*v1.PersistentVolumeClaim
+	if accessMode == "" {
+		// If accessMode is not specified, set the default accessMode.
+		accessMode = v1.ReadWriteOnce
+	}
 	statefulset := GetStatefulSetFromManifest(namespace)
 	framework.Logf("Creating statefulset")
 	statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-		Annotations["volume.beta.kubernetes.io/storage-class"] = sc.Name
+		Spec.StorageClassName = &sc.Name
+	statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].Spec.AccessModes[0] =
+		accessMode
 	if modifyStsSpec {
 		statefulset.Name = stsName
 		statefulset.Spec.Template.Labels["app"] = statefulset.Name
@@ -630,7 +651,7 @@ func createStsDeployment(ctx context.Context, client clientset.Interface, namesp
 	}
 	if isDeploymentRequired {
 		framework.Logf("Creating PVC")
-		pvclaim, err := createPVC(client, namespace, nil, diskSize, sc, "")
+		pvclaim, err := createPVC(client, namespace, nil, diskSize, sc, accessMode)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		pvclaims = append(pvclaims, pvclaim)
 		persistentvolumes, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
@@ -681,7 +702,7 @@ func volumeLifecycleActions(ctx context.Context, client clientset.Interface, nam
 		"Volume is not attached to the node volHandle: %s, vmUUID: %s", volHandle, vmUUID)
 
 	framework.Logf("Verify the volume is accessible")
-	_, err = framework.LookForStringInPodExec(namespace, pod1.Name,
+	_, err = e2eoutput.LookForStringInPodExec(namespace, pod1.Name,
 		[]string{"/bin/cat", "/mnt/volume1/fstype"}, "", time.Minute)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -817,9 +838,11 @@ func scaleUpStsAndVerifyPodMetadata(ctx context.Context, client clientset.Interf
 						_, err := e2eVSphere.getVMByUUID(ctx, vmUUID)
 						gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					}
-					isDiskAttached, err := e2eVSphere.isVolumeAttachedToVM(client, pv.Spec.CSI.VolumeHandle, vmUUID)
-					gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Disk is not attached to the node")
-					gomega.Expect(isDiskAttached).To(gomega.BeTrue(), "Disk is not attached")
+					if !rwxAccessMode {
+						isDiskAttached, err := e2eVSphere.isVolumeAttachedToVM(client, pv.Spec.CSI.VolumeHandle, vmUUID)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Disk is not attached to the node")
+						gomega.Expect(isDiskAttached).To(gomega.BeTrue(), "Disk is not attached")
+					}
 					framework.Logf("After scale up, verify the attached volumes match those in CNS Cache")
 					err = verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
 						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
@@ -832,6 +855,7 @@ func scaleUpStsAndVerifyPodMetadata(ctx context.Context, client clientset.Interf
 
 // deleteCsiPodInParallel deletes csi pod present in csi namespace in parallel
 func deleteCsiPodInParallel(client clientset.Interface, pod *v1.Pod, namespace string, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	framework.Logf("Deleting the pod: %s", pod.Name)
 	err := fpod.DeletePodWithWait(client, pod)
@@ -877,6 +901,7 @@ func hostFailure(esxHost string, hostDown bool) {
 // scaleStsReplicaInParallel scales statefulset's replica up/down in parallel
 func scaleStsReplicaInParallel(client clientset.Interface, stsList []*appsv1.StatefulSet,
 	regex string, replicas int32, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, statefulset := range stsList {
 		if strings.Contains(statefulset.Name, regex) {
@@ -888,6 +913,7 @@ func scaleStsReplicaInParallel(client clientset.Interface, stsList []*appsv1.Sta
 // deletePvInParallel deletes PVs in parallel from k8s cluster
 func deletePvInParallel(client clientset.Interface, persistentVolumes []*v1.PersistentVolume,
 	wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	for _, pv := range persistentVolumes {
 		framework.Logf("Deleting pv %s", pv.Name)
@@ -901,6 +927,7 @@ func deletePvInParallel(client clientset.Interface, persistentVolumes []*v1.Pers
 func createStaticPvAndPvcInParallel(client clientset.Interface, ctx context.Context, fcdIDs []string,
 	ch chan *v1.PersistentVolumeClaim, namespace string, wg *sync.WaitGroup,
 	volumeOpsScale int) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	staticPVLabels := make(map[string]string)
 	for i := 0; i < volumeOpsScale; i++ {
@@ -928,6 +955,7 @@ func createStaticPvAndPvcInParallel(client clientset.Interface, ctx context.Cont
 // using triggerFullSync() here
 func triggerFullSyncInParallel(ctx context.Context, client clientset.Interface,
 	cnsOperatorClient client.Client, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
 	defer wg.Done()
 	err := waitForFullSyncToFinish(client, ctx, cnsOperatorClient)
 	if err != nil {

@@ -54,6 +54,16 @@ func GetFakeContainerOrchestratorInterface(orchestratorType int) (commonco.COCom
 				"tkgs-ha":                           "true",
 				"list-volumes":                      "true",
 				"csi-internal-generated-cluster-id": "true",
+				"online-volume-extend":              "true",
+				"async-query-volume":                "true",
+				"csi-windows-support":               "true",
+				"use-csinode-id":                    "true",
+				"pv-to-backingdiskobjectid-mapping": "false",
+				"cnsmgr-suspend-create-volume":      "true",
+				"topology-preferential-datastores":  "true",
+				"max-pvscsi-targets-per-vm":         "true",
+				"multi-vcenter-csi-topology":        "true",
+				"listview-tasks":                    "true",
 			},
 		}
 		return fakeCO, nil
@@ -293,4 +303,9 @@ func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstancesList() []interface{} {
 func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstanceByName(nodeName string) (
 	item interface{}, exists bool, err error) {
 	return nil, false, nil
+}
+
+// GetPVCNamespaceFromVolumeID retrieves the pv name from volumeID.
+func (c *FakeK8SOrchestrator) GetPVNameFromCSIVolumeID(volumeID string) (string, bool) {
+	return "", false
 }

@@ -248,6 +248,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		if err != nil {
 			return err
 		}
+		vCenter.Config.ReloadVCConfigForNewClient = true
 		metadataSyncer.host = vCenter.Config.Host
 
 		cnsDeletionMap[metadataSyncer.host] = make(map[string]bool)
@@ -714,7 +715,7 @@ func startTopologyCRInformer(ctx context.Context, cfg *restclient.Config) error 
 	}
 	csiNodeTopologyInformer := dynInformer.Informer()
 	// TODO: Multi-VC: Use a RWLock to guard simultaneous updates to topologyVCMap
-	csiNodeTopologyInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err = csiNodeTopologyInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			topoCRAdded(obj)
 		},
@@ -725,6 +726,9 @@ func startTopologyCRInformer(ctx context.Context, cfg *restclient.Config) error 
 			topoCRDeleted(obj)
 		},
 	})
+	if err != nil {
+		return err
+	}
 	// Start informer.
 	go func() {
 		log.Infof("Informer to watch on %s CR starting..", csinodetopology.CRDSingular)
@@ -737,7 +741,7 @@ func startTopologyCRInformer(ctx context.Context, cfg *restclient.Config) error 
 // in the MetadataSyncer.topologyVCMap parameter.
 func addLabelsToTopologyVCMap(ctx context.Context, nodeTopoObj csinodetopologyv1alpha1.CSINodeTopology) {
 	log := logger.GetLogger(ctx)
-	nodeVM, err := nodeMgr.GetNode(ctx, nodeTopoObj.Spec.NodeUUID, nil)
+	nodeVM, err := nodeMgr.GetNodeVMAndUpdateCache(ctx, nodeTopoObj.Spec.NodeUUID, nil)
 	if err != nil {
 		log.Errorf("Node %q is not yet registered in the node manager. Error: %+v",
 			nodeTopoObj.Spec.NodeUUID, err)
@@ -854,7 +858,7 @@ func topoCRDeleted(obj interface{}) {
 // instance in the MetadataSyncer.topologyVCMap parameter.
 func removeLabelsFromTopologyVCMap(ctx context.Context, nodeTopoObj csinodetopologyv1alpha1.CSINodeTopology) {
 	log := logger.GetLogger(ctx)
-	nodeVM, err := nodeMgr.GetNode(ctx, nodeTopoObj.Spec.NodeUUID, nil)
+	nodeVM, err := nodeMgr.GetNodeVMAndUpdateCache(ctx, nodeTopoObj.Spec.NodeUUID, nil)
 	if err != nil {
 		log.Errorf("Node %q is not yet registered in the node manager. Error: %+v",
 			nodeTopoObj.Spec.NodeUUID, err)

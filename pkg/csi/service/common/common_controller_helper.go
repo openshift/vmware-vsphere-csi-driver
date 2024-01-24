@@ -23,8 +23,8 @@ import (
 	"strings"
 	"time"
 
-	snap "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v4/clientset/versioned"
+	snap "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 
@@ -318,7 +318,7 @@ func IsVolumeSnapshotReady(ctx context.Context, client snapshotterClientSet.Inte
 	var svs *snap.VolumeSnapshot
 
 	waitErr := wait.PollImmediate(5*time.Second, timeout, func() (done bool, err error) {
-		svs, err := client.SnapshotV1().VolumeSnapshots(namespace).
+		svs, err = client.SnapshotV1().VolumeSnapshots(namespace).
 			Get(ctx, supervisorVolumeSnapshotName, metav1.GetOptions{})
 		if err != nil {
 			msg := fmt.Sprintf("unable to fetch volumesnapshot %q/%q "+
@@ -327,14 +327,21 @@ func IsVolumeSnapshotReady(ctx context.Context, client snapshotterClientSet.Inte
 			log.Warnf(msg)
 			return false, logger.LogNewErrorf(log, msg)
 		}
+		if svs == nil || svs.Status == nil || svs.Status.ReadyToUse == nil {
+			log.Infof("Waiting up to %d seconds for VolumeSnapshot %v in namespace %s to be ReadyToUse, %+vs "+
+				"since the start time", timeoutSeconds, supervisorVolumeSnapshotName, namespace,
+				time.Since(startTime).Seconds())
+			return false, nil
+		}
 		isSnapshotReadyToUse := *svs.Status.ReadyToUse
 		if isSnapshotReadyToUse {
 			log.Infof("VolumeSnapshot %s/%s is in ReadyToUse state", namespace, supervisorVolumeSnapshotName)
 			isReadyToUse = true
 			return true, nil
 		} else {
-			log.Warnf("Waiting for VolumeSnapshot %s/%s to be ready since %+vs", namespace,
-				supervisorVolumeSnapshotName, time.Since(startTime).Seconds())
+			log.Infof("Waiting up to %d seconds for VolumeSnapshot %v in namespace %s to be ReadyToUse, %+vs "+
+				"since the start time", timeoutSeconds, supervisorVolumeSnapshotName, namespace,
+				time.Since(startTime).Seconds())
 		}
 		return false, nil
 	})

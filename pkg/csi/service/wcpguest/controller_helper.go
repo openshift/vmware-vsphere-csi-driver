@@ -28,7 +28,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	snap "github.com/kubernetes-csi/external-snapshotter/client/v4/apis/volumesnapshot/v1"
+	snap "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
 	"google.golang.org/grpc/codes"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -52,6 +52,10 @@ const (
 	// Default timeout for resize, used unless overridden by user in
 	// csi-controller YAML.
 	defaultResizeTimeoutInMin = 4
+
+	// Default timeout for create snapshot, used unless overridden by user in
+	// csi-controller YAML.
+	defaultSnapshotTimeoutInMin = 4
 )
 
 // validateGuestClusterCreateVolumeRequest is the helper function to validate
@@ -228,11 +232,12 @@ func getPersistentVolumeClaimSpecWithStorageClass(pvcName string, namespace stri
 }
 
 func constructVolumeSnapshotWithVolumeSnapshotClass(volumeSnapshotName string, namespace string,
-	volumeSnapshotClassName string, pvcName string) *snap.VolumeSnapshot {
+	volumeSnapshotClassName string, pvcName string, annotation map[string]string) *snap.VolumeSnapshot {
 	volumeSnapshot := &snap.VolumeSnapshot{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      volumeSnapshotName,
-			Namespace: namespace,
+			Name:        volumeSnapshotName,
+			Namespace:   namespace,
+			Annotations: annotation,
 		},
 		Spec: snap.VolumeSnapshotSpec{
 			Source: snap.VolumeSnapshotSource{
@@ -341,6 +346,30 @@ func getProvisionTimeoutInMin(ctx context.Context) int {
 		}
 	}
 	return provisionTimeoutInMin
+}
+
+// getSnapshotTimeoutInMin return the timeout for volume snapshot.
+// If environment variable SNAPSHOT_TIMEOUT_MINUTES is set and valid,
+// return the interval value read from environment variable
+// otherwise, use the default timeout 4 mins
+func getSnapshotTimeoutInMin(ctx context.Context) int {
+	log := logger.GetLogger(ctx)
+	snapshotTimeoutInMin := defaultSnapshotTimeoutInMin
+	if v := os.Getenv("SNAPSHOT_TIMEOUT_MINUTES"); v != "" {
+		if value, err := strconv.Atoi(v); err == nil {
+			if value <= 0 {
+				log.Warnf(" snapshotTimeout set in env variable SNAPSHOT_TIMEOUT_MINUTES %s "+
+					"is equal or less than 0, will use the default timeout", v)
+			} else {
+				snapshotTimeoutInMin = value
+				log.Infof("snapshotTimeout is set to %d minutes", snapshotTimeoutInMin)
+			}
+		} else {
+			log.Warnf("snapshotTimeout set in env variable SNAPSHOT_TIMEOUT_MINUTES %s is invalid, "+
+				"will use the default timeout", v)
+		}
+	}
+	return snapshotTimeoutInMin
 }
 
 // getResizeTimeoutInMin returns the timeout for volume resize.

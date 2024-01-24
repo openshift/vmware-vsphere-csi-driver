@@ -140,7 +140,11 @@ func StartWebhookServer(ctx context.Context) error {
 	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 		featureGateTKGSHaEnabled = containerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
 		featureGateVolumeHealthEnabled = containerOrchestratorUtility.IsFSSEnabled(ctx, common.VolumeHealth)
+		featureGateBlockVolumeSnapshotEnabled = containerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
 		startCNSCSIWebhookManager(ctx)
+	} else if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
+		featureGateBlockVolumeSnapshotEnabled = containerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
+		startPVCSIWebhookManager(ctx)
 	} else if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
 		if cfg == nil {
 			cfg, err = getWebHookConfig(ctx)
@@ -164,8 +168,17 @@ func StartWebhookServer(ctx context.Context) error {
 				cfg.WebHookConfig.Port = defaultWebhookServerPort
 			}
 			server = &http.Server{
-				Addr:      fmt.Sprintf(":%v", cfg.WebHookConfig.Port),
-				TLSConfig: &tls.Config{Certificates: []tls.Certificate{certs}},
+				Addr: fmt.Sprintf(":%v", cfg.WebHookConfig.Port),
+				TLSConfig: &tls.Config{
+					Certificates: []tls.Certificate{certs},
+					CipherSuites: []uint16{
+						tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+						tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+						tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+						tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+					},
+					MinVersion: tls.VersionTLS12,
+				},
 			}
 			// Define http server and server handler.
 			mux := http.NewServeMux()
@@ -255,7 +268,7 @@ func validationHandler(w http.ResponseWriter, r *http.Request) {
 			case "StorageClass":
 				admissionResponse = validateStorageClass(ctx, &ar)
 			case "PersistentVolumeClaim":
-				admissionResponse = validatePVC(ctx, &ar)
+				admissionResponse = validatePVC(ctx, ar.Request)
 			default:
 				log.Infof("Skipping validation for resource type: %q", ar.Request.Kind.Kind)
 				admissionResponse = &admissionv1.AdmissionResponse{

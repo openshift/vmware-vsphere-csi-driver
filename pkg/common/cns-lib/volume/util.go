@@ -37,10 +37,6 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
-const (
-	vimFaultPrefix = "vim.fault."
-)
-
 func validateManager(ctx context.Context, m *defaultManager) error {
 	log := logger.GetLogger(ctx)
 	if m.virtualCenter == nil {
@@ -60,6 +56,9 @@ func IsDiskAttached(ctx context.Context, vm *cnsvsphere.VirtualMachine, volumeID
 	if err != nil {
 		log.Errorf("failed to get devices from vm: %s", vm.InventoryPath)
 		return "", err
+	}
+	if len(vmDevices) == 0 {
+		return "", logger.LogNewErrorf(log, "virtual devices list is empty for the vm: %s", vm.InventoryPath)
 	}
 	// Build a map of NVME Controller key : NVME controller name.
 	// This is needed to check if disk in contention is attached to a NVME
@@ -350,7 +349,7 @@ func ExtractFaultTypeFromErr(ctx context.Context, err error) string {
 		faultType = reflect.TypeOf(soapFault.VimFault()).String()
 		log.Infof("Extract vimfault type: +%v. SoapFault Info: +%v from err +%v", faultType, soapFault, err)
 		slice := strings.Split(faultType, ".")
-		vimFaultType := vimFaultPrefix + slice[1]
+		vimFaultType := csifault.VimFaultPrefix + slice[1]
 		return vimFaultType
 	}
 	log.Infof("err %+v is not a SoapFault\n", err)
@@ -374,7 +373,7 @@ func ExtractFaultTypeFromVolumeResponseResult(ctx context.Context,
 			log.Infof("Extract vimfault type: %+v  vimFault: %+v Fault: %+v from resp: %+v",
 				faultType, fault.Fault, fault, resp)
 			slice := strings.Split(faultType, ".")
-			vimFaultType := vimFaultPrefix + slice[1]
+			vimFaultType := csifault.VimFaultPrefix + slice[1]
 			return vimFaultType
 		} else {
 			faultType = reflect.TypeOf(fault).String()
@@ -549,4 +548,12 @@ func queryCreatedSnapshotByName(ctx context.Context, m *defaultManager, volumeID
 		}
 	}
 	return nil, false
+}
+
+// IsNotFoundFault returns true if a given faultType value is vim.fault.NotFound
+func IsNotFoundFault(ctx context.Context, faultType string) bool {
+	log := logger.GetLogger(ctx)
+	log.Infof("Checking fault type: %q is vim.fault.NotFound", faultType)
+	return faultType == "vim.fault.NotFound"
+
 }

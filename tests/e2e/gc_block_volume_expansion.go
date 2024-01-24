@@ -40,6 +40,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
@@ -146,8 +147,9 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 		setResourceQuota(svcClient, svNamespace, defaultrqLimit)
 
 		if isGCCSIDeploymentPODdown {
-			_ = updateDeploymentReplica(client, 1, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
+			_ = updateDeploymentReplica(client, 3, vSphereCSIControllerPodNamePrefix, csiSystemNamespace)
 		}
+		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
 	// Verify offline expansion triggers FS resize.
@@ -185,7 +187,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -205,7 +207,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
-		_ = framework.RunKubectlOrDie(namespace, "cp", testdataFile,
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp", testdataFile,
 			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name))
 
 		// Delete POD.
@@ -286,7 +288,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")
@@ -307,7 +309,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 		}
 
 		ginkgo.By("Checking data consistency after PVC resize")
-		_ = framework.RunKubectlOrDie(namespace, "cp",
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp",
 			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name), testdataFile+"_pod")
 		defer func() {
 			op, err = exec.Command("rm", "-f", testdataFile+"_pod").Output()
@@ -381,7 +383,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -493,7 +495,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")
@@ -905,7 +907,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -990,7 +992,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")
@@ -1185,7 +1187,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -1291,7 +1293,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")
@@ -1433,7 +1435,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		rand.New(rand.NewSource(time.Now().Unix()))
@@ -1447,13 +1449,13 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
-		_ = framework.RunKubectlOrDie(namespace, "cp", testdataFile,
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp", testdataFile,
 			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name))
 
 		onlineVolumeResizeCheck(f, client, namespace, svcPVCName, volHandle, pvclaim, pod)
 
 		ginkgo.By("Checking data consistency after PVC resize")
-		_ = framework.RunKubectlOrDie(namespace, "cp",
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp",
 			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name), testdataFile+"_pod")
 		defer func() {
 			op, err = exec.Command("rm", "-f", testdataFile+"_pod").Output()
@@ -1514,7 +1516,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -2038,7 +2040,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -2126,7 +2128,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")
@@ -2192,7 +2194,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify the volume is accessible and filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput := framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
@@ -2270,7 +2272,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Test", func() {
 
 		ginkgo.By("Verify after expansion the filesystem type is as expected")
 		cmd[1] = pod.Name
-		lastOutput = framework.RunKubectlOrDie(namespace, cmd...)
+		lastOutput = e2ekubectl.RunKubectlOrDie(namespace, cmd...)
 		gomega.Expect(strings.Contains(lastOutput, ext4FSType)).NotTo(gomega.BeFalse())
 
 		ginkgo.By("Waiting for file system resize to finish")

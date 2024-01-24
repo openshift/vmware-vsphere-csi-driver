@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -106,6 +107,11 @@ const (
 var (
 	// ErrUsernameMissing is returned when the provided username is empty.
 	ErrUsernameMissing = errors.New("username is missing")
+
+	// ErrInvalidUsername is returned when vCenter username provided in vSphere config
+	// secret is invalid. e.g. If username is not a fully qualified domain name, then
+	// it will be considered as invalid username.
+	ErrInvalidUsername = errors.New("username is invalid, make sure it is a fully qualified domain username")
 
 	// ErrPasswordMissing is returned when the provided password is empty.
 	ErrPasswordMissing = errors.New("password is missing")
@@ -322,6 +328,18 @@ func FromEnv(ctx context.Context, cfg *Config) error {
 	return nil
 }
 
+// Check if username is valid or not. If username is not a fully qualified domain name, then
+// we consider it as an invalid username.
+func isValidvCenterUsernameWithDomain(username string) bool {
+	// Regular expression to validate vCenter server username.
+	// Allowed username is in the format "userName@domainName" or "domainName\\userName".
+	// If domain name is not provided in username, then functions like HasUserPrivilegeOnEntities
+	// doesn't return any entity for given user and eventually volume creation fails.
+	regex := `^(?:[a-zA-Z0-9.-]+\\[a-zA-Z0-9._-]+|[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+)$`
+	match, _ := regexp.MatchString(regex, username)
+	return match
+}
+
 func validateConfig(ctx context.Context, cfg *Config) error {
 	log := logger.GetLogger(ctx)
 	// Fix default global values.
@@ -369,6 +387,15 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 				return ErrUsernameMissing
 			}
 		}
+
+		// vCenter server username provided in vSphere config secret should contain domain name,
+		// CSI driver will crash if username doesn't contain domain name.
+		if !isValidvCenterUsernameWithDomain(vcConfig.User) {
+			log.Errorf("username %v specified in vSphere config secret is invalid, "+
+				"make sure that username is a fully qualified domain name.", vcConfig.User)
+			return ErrInvalidUsername
+		}
+
 		if vcConfig.Password == "" {
 			vcConfig.Password = cfg.Global.Password
 			if vcConfig.Password == "" {
@@ -401,7 +428,7 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 	}
 	if cfg.NetPermissions == nil {
 		// If no net permissions are given, assume default.
-		log.Info("No Net Permissions given in Config. Using default permissions.")
+		log.Debug("No Net Permissions given in Config. Using default permissions.")
 		if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
 			cfg.NetPermissions = map[string]*NetPermissionConfig{"#": GetDefaultNetPermission()}
 		}
@@ -734,4 +761,32 @@ func GetConfigPath(ctx context.Context) string {
 		}
 	}
 	return cfgPath
+}
+
+// GetSessionUserAgent returns clusterwise unique useragent
+func GetSessionUserAgent(ctx context.Context) (string, error) {
+	log := logger.GetLogger(ctx)
+	clusterFlavor, err := GetClusterFlavor(ctx)
+	if err != nil {
+		log.Errorf("failed retrieving cluster flavor. Error: %+v", err)
+		return "", err
+	}
+	cfg, err := GetConfig(ctx)
+	if err != nil {
+		log.Errorf("failed to read config. Error: %+v", err)
+		return "", err
+	}
+	useragent := "k8s-csi-useragent"
+	if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
+		if cfg.Global.ClusterID != "" {
+			useragent = useragent + "-" + cfg.Global.ClusterID
+		} else {
+			useragent = useragent + "-" + GeneratedVanillaClusterID
+		}
+	} else if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if cfg.Global.SupervisorID != "" {
+			useragent = useragent + "-" + cfg.Global.SupervisorID
+		}
+	}
+	return useragent, nil
 }

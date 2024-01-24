@@ -528,12 +528,7 @@ func (cm *controllerManager) engageStopProcedure(stopComplete <-chan struct{}) e
 	//
 	// The shutdown context immediately expires if the gracefulShutdownTimeout is not set.
 	var shutdownCancel context.CancelFunc
-	if cm.gracefulShutdownTimeout < 0 {
-		// We want to wait forever for the runnables to stop.
-		cm.shutdownCtx, shutdownCancel = context.WithCancel(context.Background())
-	} else {
-		cm.shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), cm.gracefulShutdownTimeout)
-	}
+	cm.shutdownCtx, shutdownCancel = context.WithTimeout(context.Background(), cm.gracefulShutdownTimeout)
 	defer shutdownCancel()
 
 	// Start draining the errors before acquiring the lock to make sure we don't deadlock

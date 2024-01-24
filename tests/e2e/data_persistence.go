@@ -35,6 +35,7 @@ import (
 	"k8s.io/kubernetes/test/e2e/framework"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
+	e2eoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	admissionapi "k8s.io/pod-security-admission/api"
 )
@@ -110,11 +111,15 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		if guestCluster {
 			svcClient, svNamespace := getSvcClientAndNamespace()
 			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
+			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
+		}
+		if supervisorCluster {
+			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
 	})
 
 	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-guest] [csi-block-vanilla-parallelized] "+
-		"Should create and delete pod with the same volume source", func() {
+		"Should create and delete pod with the same volume source and data", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var sc *storagev1.StorageClass
@@ -343,7 +348,7 @@ var _ = ginkgo.Describe("Data Persistence", func() {
 		gomega.Expect(isDiskAttached).To(gomega.BeTrue(), "Volume is not attached to the node %s", vmUUID)
 
 		ginkgo.By("Verify that filesystem type is xfs as expected")
-		_, err = framework.LookForStringInPodExec(namespace, pod.Name, []string{"/bin/cat", "/mnt/volume1/fstype"},
+		_, err = e2eoutput.LookForStringInPodExec(namespace, pod.Name, []string{"/bin/cat", "/mnt/volume1/fstype"},
 			xfsFSType, time.Minute)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 

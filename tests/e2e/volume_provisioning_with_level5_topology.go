@@ -154,7 +154,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 	*/
 
 	ginkgo.It("Provisioning volume when no topology details specified in storage class "+
-		"and using default pod management policy for statefulset", func() {
+		"and using default pod management policy for statefulset", ginkgo.Label(p0, topology, block,
+		vanilla, level5), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		// Creating StorageClass when no topology details are specified using WFC Binding mode
@@ -190,13 +191,15 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 
 		// Verify PV node affinity and that the PODS are running on appropriate nodes
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset to 0 replicas
 		replicas -= 3
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -250,7 +253,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		*(statefulset.Spec.Replicas) = 3
 		statefulset.Spec.PodManagementPolicy = apps.ParallelPodManagement
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Annotations["volume.beta.kubernetes.io/storage-class"] = sc.Name
+			Spec.StorageClassName = &sc.Name
 		CreateStatefulSet(namespace, statefulset, client)
 		replicas := *(statefulset.Spec.Replicas)
 
@@ -265,28 +268,33 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 
 		// Verify PV node affinity and that the PODS are running on appropriate node
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate nodes")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
-			statefulset, namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
+			statefulset, namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale up statefulset replica count to 5
 		replicas += 5
 		ginkgo.By("Scale up statefulset replica count to 5")
-		scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replica count to 1
 		replicas -= 1
 		ginkgo.By("Scale down statefulset replica count to 1")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Verify newly created PV node affinity details  and that the new PODS are running on appropriate nodes
 		ginkgo.By("Verify newly created PV node affinity details  and that the new PODS are running on appropriate nodes")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 0
 		replicas = 0
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -338,7 +346,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		*(statefulset.Spec.Replicas) = 3
 		statefulset.Spec.PodManagementPolicy = apps.ParallelPodManagement
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Annotations["volume.beta.kubernetes.io/storage-class"] = sc.Name
+			Spec.StorageClassName = &sc.Name
 		ginkgo.By("Creating statefulset")
 		CreateStatefulSet(namespace, statefulset, client)
 		replicas := *(statefulset.Spec.Replicas)
@@ -356,25 +364,29 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		appropriate node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale up statefulset replicas to 5
 		replicas += 5
 		ginkgo.By("Scale up statefulset replica count to 5")
-		scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		/* Verify newly created PV node affinity and that the news PODS are running
 		on appropriate node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify newly created PV node affinity and that the news PODS " +
 			"are running on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 0
 		replicas = 0
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -444,30 +456,35 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale up statefulset replicas to 5
 		replicas += 5
 		ginkgo.By("Scale up statefulset replica count to 5")
-		scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 1
 		replicas -= 1
 		ginkgo.By("Scale down statefulset replica count to 1")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		/* "Verify newly created PV node affinity and that the new PODS are
 		running on appropriate node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify newly created PV node affinity and that the new PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 0
 		replicas = 0
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -528,7 +545,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		*(statefulset.Spec.Replicas) = 3
 		statefulset.Spec.PodManagementPolicy = apps.ParallelPodManagement
 		statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-			Annotations["volume.beta.kubernetes.io/storage-class"] = storageclass.Name
+			Spec.StorageClassName = &storageclass.Name
 		ginkgo.By("Creating statefulset")
 		CreateStatefulSet(namespace, statefulset, client)
 		replicas := *(statefulset.Spec.Replicas)
@@ -546,30 +563,35 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale up statefulset replicas to 5
 		replicas += 5
 		ginkgo.By("Scale up statefulset replica count to 5")
-		scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 1
 		replicas -= 1
 		ginkgo.By("Scale down statefulset replica count to 1")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		/* Verify newly created PV node affinity and that the new PODS are running on
 		appropriate node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify newly created PV node affinity and that the new PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset replicas to 0
 		replicas = 0
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -646,8 +668,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		node as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForDeploymentSetsLevel5(ctx, client, deployment,
-			namespace, allowedTopologyForSC, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForDeploymentSetsLevel5(ctx, client, deployment,
+			namespace, allowedTopologyForSC, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -671,7 +694,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 
 	ginkgo.It("Provisioning volume when storage class specified with multiple labels "+
 		"without specifying datastore url and using default pod management policy "+
-		"for statefulset", func() {
+		"for statefulset", ginkgo.Label(p2, topology, block, vanilla, level5), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		// Get allowed topologies for Storage Class rack > (rack1,rack2,rack3)
@@ -713,13 +736,15 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
+			namespace, allowedTopologies, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Scale down statefulset to 0 replicas
 		replicas -= 3
 		ginkgo.By("Scale down statefulset replica count to 0")
-		scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -908,8 +933,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+			allowedTopologies, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -993,8 +1019,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+			allowedTopologies, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	/*
@@ -1120,8 +1147,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+			allowedTopologies, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	})
 
@@ -1262,8 +1290,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+			allowedTopologies, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Deleting Pod
 		ginkgo.By("Deleting the Pod")
@@ -1328,8 +1357,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		verifyPVnodeAffinityAndPODnodedetailsFoStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+			allowedTopologies, false)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Verify volume metadata for POD, PVC and PV
 		ginkgo.By("Verify volume metadata for POD, PVC and PV")

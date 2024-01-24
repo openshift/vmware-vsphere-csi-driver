@@ -12,6 +12,7 @@ import (
 	"github.com/vmware/govmomi/vim25/types"
 
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
@@ -87,21 +88,16 @@ func (l *ListViewImpl) createListView(ctx context.Context, tasks []types.Managed
 		return err
 	}
 	l.listView = listView
-	log.Infof("created listView object %+v for virtualCenter: %+v", l.listView.Reference(), l.virtualCenter)
+	log.Infof("created listView object %+v for virtualCenter: %+v",
+		l.listView.Reference(), l.virtualCenter.Config.Host)
 	return nil
 }
 
 // SetVirtualCenter is a setter method for vc. use case: ReloadConfiguration
-func (l *ListViewImpl) SetVirtualCenter(ctx context.Context, virtualCenter *cnsvsphere.VirtualCenter) error {
+func (l *ListViewImpl) SetVirtualCenter(ctx context.Context, virtualCenter *cnsvsphere.VirtualCenter) {
 	log := logger.GetLogger(ctx)
 	l.virtualCenter = virtualCenter
-	client, err := virtualCenter.NewClient(ctx)
-	if err != nil {
-		return logger.LogNewErrorf(log, "failed to create a govmomiClient for listView. error: %+v", err)
-	}
-	client.Timeout = noTimeout
-	l.govmomiClient = client
-	return nil
+	log.Debugf("New virtualCenter object stored for use by ListView")
 }
 
 func getListViewWaitFilter(listView *view.ListView) *property.WaitFilter {
@@ -122,11 +118,6 @@ func getListViewWaitFilter(listView *view.ListView) *property.WaitFilter {
 func (l *ListViewImpl) AddTask(ctx context.Context, taskMoRef types.ManagedObjectReference, ch chan TaskResult) error {
 	log := logger.GetLogger(ctx)
 	log.Infof("AddTask called for %+v", taskMoRef)
-	err := l.listView.Add(l.ctx, []types.ManagedObjectReference{taskMoRef})
-	if err != nil {
-		return logger.LogNewErrorf(log, "failed to add task to ListView. error: %+v", err)
-	}
-	log.Infof("task %+v added to listView", taskMoRef)
 
 	l.taskMap.Upsert(taskMoRef, TaskDetails{
 		Reference:        taskMoRef,
@@ -134,6 +125,13 @@ func (l *ListViewImpl) AddTask(ctx context.Context, taskMoRef types.ManagedObjec
 		ResultCh:         ch,
 	})
 	log.Debugf("task %+v added to map", taskMoRef)
+
+	err := l.listView.Add(l.ctx, []types.ManagedObjectReference{taskMoRef})
+	if err != nil {
+		l.taskMap.Delete(taskMoRef)
+		return logger.LogNewErrorf(log, "failed to add task to ListView. error: %+v", err)
+	}
+	log.Infof("task %+v added to listView", taskMoRef)
 	return nil
 }
 
@@ -166,8 +164,18 @@ func (l *ListViewImpl) isClientValid() error {
 	} else if userSession != nil {
 		return nil
 	}
+
+	err := cnsvsphere.ReadVCConfigs(l.ctx, l.virtualCenter)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to read VC config. err: %v", err)
+	}
 	// If session has expired, create a new instance.
-	client, err := l.virtualCenter.NewClient(l.ctx)
+	useragent, err := config.GetSessionUserAgent(l.ctx)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get useragent for vCenter session. error: %+v", err)
+	}
+	useragent = useragent + "-listview"
+	client, err := l.virtualCenter.NewClient(l.ctx, useragent)
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to create a govmomi client for listView. error: %+v", err)
 	}
@@ -229,7 +237,8 @@ func (l *ListViewImpl) listenToTaskUpdates() {
 		// we want to immediately return a fault for all the pending tasks in the map
 		// note: this is not a task error but an error from the vc
 		if err != nil {
-			log.Errorf("WaitForUpdates returned err: %v for vc: %+v", err, l.virtualCenter)
+			log.Errorf("WaitForUpdates returned err: %v for vc: %+v", err,
+				l.virtualCenter.Config.Host)
 			recreateView = true
 			l.reportErrorOnAllPendingTasks(err)
 		}
@@ -317,5 +326,17 @@ func (l *ListViewImpl) MarkTaskForDeletion(ctx context.Context, taskMoRef types.
 	taskDetails.MarkedForRemoval = true
 	l.taskMap.Upsert(taskMoRef, taskDetails)
 	log.Infof("%v marked for deletion", taskMoRef)
+	return nil
+}
+
+// LogoutSession is a setter method to logout vcenter session created
+func (l *ListViewImpl) LogoutSession(ctx context.Context) error {
+	log := logger.GetLogger(ctx)
+	err := l.govmomiClient.Logout(l.ctx)
+	if err != nil {
+		log.Errorf("Error while logout vCenter session (list-view) for host %s, Error: %+v", l.virtualCenter.Config.Host, err)
+		return err
+	}
+	log.Infof("Logged out list-view vCenter session for host %s", l.virtualCenter.Config.Host)
 	return nil
 }

@@ -155,7 +155,6 @@ data:
   "async-query-volume": "true"
   "block-volume-snapshot": "true"
   "csi-windows-support": "true"
-  "use-csinode-id": "true"
   "list-volumes": "true"
   "pv-to-backingdiskobjectid-mapping": "false"
   "cnsmgr-suspend-create-volume": "true"
@@ -163,7 +162,7 @@ data:
   "max-pvscsi-targets-per-vm": "true"
   "multi-vcenter-csi-topology": "true"
   "csi-internal-generated-cluster-id": "true"
-  "listview-tasks": "false"
+  "listview-tasks": "true"
 kind: ConfigMap
 metadata:
   name: internal-feature-states.csi.vsphere.vmware.com
@@ -244,7 +243,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: csi-attacher
-          image: k8s.gcr.io/sig-storage/csi-attacher:v4.2.0
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.3.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -262,7 +261,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: csi-resizer
-          image: k8s.gcr.io/sig-storage/csi-resizer:v1.7.0
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.8.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -281,7 +280,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.0.2
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.1.2
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -307,6 +306,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /etc/cloud
               name: vsphere-config-volume
@@ -329,7 +332,7 @@ spec:
             periodSeconds: 180
             failureThreshold: 3
         - name: liveness-probe
-          image: k8s.gcr.io/sig-storage/livenessprobe:v2.9.0
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.10.0
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
@@ -337,12 +340,12 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: vsphere-syncer
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.0.2
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.1.2
           args:
             - "--leader-election"
-            - "--leader-election-lease-duration=120s"
-            - "--leader-election-renew-deadline=60s"
-            - "--leader-election-retry-period=30s"
+            - "--leader-election-lease-duration=30s"
+            - "--leader-election-renew-deadline=20s"
+            - "--leader-election-retry-period=10s"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
           imagePullPolicy: "Always"
@@ -367,12 +370,16 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /etc/cloud
               name: vsphere-config-volume
               readOnly: true
         - name: csi-provisioner
-          image: k8s.gcr.io/sig-storage/csi-provisioner:v3.4.0
+          image: registry.k8s.io/sig-storage/csi-provisioner:v3.5.0
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -394,7 +401,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: csi-snapshotter
-          image: k8s.gcr.io/sig-storage/csi-snapshotter:v6.2.1
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v6.2.2
           args:
             - "--v=4"
             - "--kube-api-qps=100"
@@ -445,7 +452,7 @@ spec:
       dnsPolicy: "ClusterFirstWithHostNet"
       containers:
         - name: node-driver-registrar
-          image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.7.0
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.8.0
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
@@ -468,7 +475,7 @@ spec:
               - --mode=kubelet-registration-probe
             initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.0.2
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.1.2
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -530,7 +537,7 @@ spec:
             periodSeconds: 5
             failureThreshold: 3
         - name: liveness-probe
-          image: k8s.gcr.io/sig-storage/livenessprobe:v2.9.0
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.10.0
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
@@ -592,7 +599,7 @@ spec:
       serviceAccountName: vsphere-csi-node
       containers:
         - name: node-driver-registrar
-          image: k8s.gcr.io/sig-storage/csi-node-driver-registrar:v2.7.0
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.8.0
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
@@ -615,7 +622,7 @@ spec:
               - --mode=kubelet-registration-probe
             initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.0.2
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.1.2
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -672,7 +679,7 @@ spec:
             periodSeconds: 5
             failureThreshold: 3
         - name: liveness-probe
-          image: k8s.gcr.io/sig-storage/livenessprobe:v2.9.0
+          image: registry.k8s.io/sig-storage/livenessprobe:v2.10.0
           args:
             - "--v=4"
             - "--csi-address=/csi/csi.sock"
