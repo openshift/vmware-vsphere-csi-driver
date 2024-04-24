@@ -26,7 +26,7 @@ rules:
     verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "create"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
@@ -71,7 +71,13 @@ rules:
     verbs: ["get"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["cnsvolumeoperationrequests"]
-    verbs: ["create", "get", "list", "update", "delete"]
+    verbs: ["create", "get", "list", "update", "delete", "watch"]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["storagepolicyusages"]
+    verbs: ["create", "get", "list", "patch", "delete"]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["storagepolicyquotas"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list"]
@@ -90,6 +96,9 @@ rules:
   - apiGroups: [ "snapshot.storage.k8s.io" ]
     resources: [ "volumesnapshotcontents/status" ]
     verbs: [ "update", "patch" ]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["cnsvolumeinfoes"]
+    verbs: ["create", "get", "list", "watch", "delete", "patch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -213,12 +222,13 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: csi-provisioner
-          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v3.4.0_vmware.1
+          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v3.4.0_vmware.2
           args:
             - "--v=4"
             - "--timeout=300s"
             - "--csi-address=$(ADDRESS)"
             - "--feature-gates=Topology=true"
+            - "--extra-create-metadata=false"
             - "--strict-topology"
             - "--leader-election"
             - "--enable-hostlocal-placement=true"
@@ -226,6 +236,7 @@ spec:
             - "--kube-api-burst=100"
             - "--default-fstype=ext4"
             - "--use-service-for-placement-engine=false"
+            - "--podvm-on-stretched-supervisor=false"
             - "--tkgs-ha=true"
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
@@ -331,12 +342,16 @@ spec:
             - name: LOGGER_LEVEL
               value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
             - name: INCLUSTER_CLIENT_QPS
-              value: "50"
+              value: "200"
             - name: INCLUSTER_CLIENT_BURST
-              value: "50"
+              value: "200"
             - name: GODEBUG
               value: x509sha1=1
           imagePullPolicy: "IfNotPresent"
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /etc/vmware/wcp
               name: vsphere-config-volume
@@ -379,9 +394,9 @@ spec:
             - name: LOGGER_LEVEL
               value: "PRODUCTION" # Options: DEVELOPMENT, PRODUCTION
             - name: INCLUSTER_CLIENT_QPS
-              value: "50"
+              value: "200"
             - name: INCLUSTER_CLIENT_BURST
-              value: "50"
+              value: "200"
             - name: GODEBUG
               value: x509sha1=1
           imagePullPolicy: "IfNotPresent"
@@ -389,6 +404,10 @@ spec:
             - containerPort: 2113
               name: prometheus
               protocol: TCP
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /etc/vmware/wcp
               name: vsphere-config-volume
@@ -437,7 +456,6 @@ data:
   "volume-health": "true"
   "online-volume-extend": "true"
   "file-volume": "true"
-  "csi-auth-check": "true"
   "trigger-csi-fullsync": "false"
   "csi-sv-feature-states-replication": "true"
   "fake-attach": "true"
@@ -449,6 +467,7 @@ data:
   "list-volumes": "true"
   "cnsmgr-suspend-create-volume": "true"
   "listview-tasks": "true"
+  "podvm-on-stretched-supervisor": "false"
 kind: ConfigMap
 metadata:
   name: csi-feature-states
@@ -667,6 +686,10 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
           volumeMounts:
             - mountPath: /tmp/k8s-webhook-server/serving-certs
               name: webhook-certs

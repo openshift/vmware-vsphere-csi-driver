@@ -27,11 +27,14 @@ import (
 	"github.com/google/uuid"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	clientset "k8s.io/client-go/kubernetes"
+	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
+	cnsstoragepolicyquotasv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
@@ -49,7 +52,7 @@ const (
 func isDatastoreAccessibleToCluster(ctx context.Context, vc *vsphere.VirtualCenter,
 	clusterID string, datastoreURL string) bool {
 	log := logger.GetLogger(ctx)
-	sharedDatastores, _, err := vsphere.GetCandidateDatastoresInCluster(ctx, vc, clusterID)
+	sharedDatastores, _, err := vsphere.GetCandidateDatastoresInCluster(ctx, vc, clusterID, false)
 	if err != nil {
 		log.Errorf("Failed to get candidate datastores for cluster: %s with err: %+v", clusterID, err)
 		return false
@@ -58,6 +61,29 @@ func isDatastoreAccessibleToCluster(ctx context.Context, vc *vsphere.VirtualCent
 		if ds.Info.Url == datastoreURL {
 			log.Infof("Found datastoreUrl: %s is accessible to cluster: %s", datastoreURL, clusterID)
 			return true
+		}
+	}
+	return false
+}
+
+// isDatastoreAccessibleToAZClusters verifies if the datastoreUrl is accessible to
+// any of the az cluster for the given azClustersMap.
+func isDatastoreAccessibleToAZClusters(ctx context.Context, vc *vsphere.VirtualCenter,
+	azClustersMap map[string][]string, datastoreURL string) bool {
+	log := logger.GetLogger(ctx)
+	for _, clusterIDs := range azClustersMap {
+		for _, clusterID := range clusterIDs {
+			sharedDatastores, _, err := vsphere.GetCandidateDatastoresInCluster(ctx, vc, clusterID, false)
+			if err != nil {
+				log.Warnf("Failed to get candidate datastores for cluster: %s with err: %+v", clusterID, err)
+				continue
+			}
+			for _, ds := range sharedDatastores {
+				if ds.Info.Url == datastoreURL {
+					log.Infof("Found datastoreUrl: %s is accessible to cluster: %s", datastoreURL, clusterID)
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -107,10 +133,11 @@ func constructCreateSpecForInstance(r *ReconcileCnsRegisterVolume,
 	return createSpec
 }
 
-// getK8sStorageClassName gets the storage class name in K8S mapping the vsphere
+// getK8sStorageClassNameWithImmediateBindingModeForPolicy gets the storage class name in K8S mapping the vsphere
 // storagepolicy id. The policy must also be assigned to the passed namespace.
-func getK8sStorageClassName(ctx context.Context, k8sClient clientset.Interface,
-	storagePolicyID string, namespace string) (string, error) {
+func getK8sStorageClassNameWithImmediateBindingModeForPolicy(ctx context.Context, k8sClient clientset.Interface,
+	client ctrlruntimeclient.Client, storagePolicyID string, namespace string,
+	isPodVMOnStretchedSupervisorEnabled bool) (string, error) {
 	log := logger.GetLogger(ctx)
 	scList, err := k8sClient.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -122,41 +149,81 @@ func getK8sStorageClassName(ctx context.Context, k8sClient clientset.Interface,
 		for paramName, val := range scParams {
 			param := strings.ToLower(paramName)
 			if param == common.AttributeStoragePolicyID && val == storagePolicyID {
-				scName = sc.Name
-				break // Only one storage class in a cluster with a given policy ID.
-			}
-		}
-	}
-
-	/*
-		Resource Quotas
-			Name:                                                                   <namespace>-storagequota
-			Resource                                                                Used  Hard
-			--------                                                                ---   ---
-			<storage-class-name>.storageclass.storage.k8s.io/requests.storage  		0     5Gi
-	*/
-	quotaList, err := k8sClient.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return "", logger.LogNewErrorf(log, "Failed to get resource quotas on the namespace: %s", namespace)
-	}
-
-	if scName != "" && len(quotaList.Items) > 0 {
-		for _, quota := range quotaList.Items {
-			// Looping over each named resource in the storage quota to check if
-			// it matches the storage class.
-			for resource := range quota.Spec.Hard {
-				if scName+scResourceNameSuffix == resource.String() {
-					log.Debugf("Found k8s storage class: %s with storagePolicyId: %s and "+
-						"the policy is assigned to namespace: %s", scName, storagePolicyID, namespace)
-					return scName, nil
+				if *sc.VolumeBindingMode != storagev1.VolumeBindingWaitForFirstConsumer {
+					scName = sc.Name
+					break
 				}
 			}
 		}
 	}
 
-	return "", logger.LogNewErrorf(log, "Failed to find matching K8s Storageclass. "+
-		"Either storagepolicyId: %s doesn't match any storage class, or the policy is not assigned to namespace: %s",
-		storagePolicyID, namespace)
+	if !isPodVMOnStretchedSupervisorEnabled {
+		/*
+			Resource Quotas
+				Name:                                                                   <namespace>-storagequota
+				Resource                                                                Used  Hard
+				--------                                                                ---   ---
+				<storage-class-name>.storageclass.storage.k8s.io/requests.storage  		0     5Gi
+		*/
+		quotaList, err := k8sClient.CoreV1().ResourceQuotas(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return "", logger.LogNewErrorf(log, "Failed to get resource quotas on the namespace: %s", namespace)
+		}
+
+		if scName != "" && len(quotaList.Items) > 0 {
+			for _, quota := range quotaList.Items {
+				// Looping over each named resource in the storage quota to check if
+				// it matches the storage class.
+				for resource := range quota.Spec.Hard {
+					if scName+scResourceNameSuffix == resource.String() {
+						log.Debugf("Found k8s storage class: %s with storagePolicyId: %s and "+
+							"the policy is assigned to namespace: %s", scName, storagePolicyID, namespace)
+						return scName, nil
+					}
+				}
+			}
+		}
+		return "", logger.LogNewErrorf(log, "Failed to find matching K8s Storageclass. "+
+			"Either storagepolicyId: %s doesn't match any storage class, or the policy is not assigned to namespace: %s",
+			storagePolicyID, namespace)
+	} else {
+		storagePolicyQuotaList := &cnsstoragepolicyquotasv1alpha1.StoragePolicyQuotaList{}
+		err := client.List(ctx, storagePolicyQuotaList, &ctrlruntimeclient.ListOptions{
+			Namespace: namespace,
+		})
+		if err != nil {
+			return "", logger.LogNewErrorf(log, "Failed to list StoragePolicyQuota CR on the namespace: %s", namespace)
+		}
+		log.Debugf("Found scName %s which has matching storagePolicyId %s", scName, storagePolicyID)
+		log.Debugf("Fetch storagePolicyQuotaList: %+v  in namespace %s", storagePolicyQuotaList, namespace)
+		foundMatchStoragePolicyQuotaCR := false
+		matchedStoragePolicyQuotaCR := cnsstoragepolicyquotasv1alpha1.StoragePolicyQuota{}
+		if scName != "" && len(storagePolicyQuotaList.Items) > 0 {
+			for _, storagePolicyQuota := range storagePolicyQuotaList.Items {
+				if storagePolicyQuota.Spec.StoragePolicyId == storagePolicyID {
+					log.Debugf("Found storagePlicyQuota CR with matching storagePolicyId:%s in namespaces:%s",
+						storagePolicyID, namespace)
+					foundMatchStoragePolicyQuotaCR = true
+					matchedStoragePolicyQuotaCR = storagePolicyQuota
+					break
+				}
+			}
+			// NOTE: Below code expects StoragePolicyQuota CR status will be populated with all fields with zero values from the
+			// start (to be taken care by quota controller), otherwise this code will always return error.
+			if foundMatchStoragePolicyQuotaCR && len(matchedStoragePolicyQuotaCR.Status.SCLevelQuotaStatuses) > 0 {
+				for _, quota := range matchedStoragePolicyQuotaCR.Status.SCLevelQuotaStatuses {
+					if quota.StorageClassName == scName {
+						log.Debugf("Found k8s storage class: %s with storagePolicyId: %s and "+
+							"the policy is assigned to namespace: %s", scName, storagePolicyID, namespace)
+						return scName, nil
+					}
+				}
+			}
+		}
+		return "", logger.LogNewErrorf(log, "Failed to find matching K8s Storageclass. "+
+			"Either storagepolicyId: %s doesn't match any storage class, or the policy is not assigned to namespace: %s",
+			storagePolicyID, namespace)
+	}
 }
 
 // getPersistentVolumeSpec to create PV volume spec for the given input params.

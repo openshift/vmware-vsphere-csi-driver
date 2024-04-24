@@ -156,29 +156,11 @@ func GetHostsForSegment(ctx context.Context, topoSegment map[string]string, vCen
 			hostList = append(hostList, hosts...)
 		}
 		log.Infof("Hosts returned for topology category: %q and tag: %q are %v", key, tag, hostList)
-		uniqueHostList := removeDuplicateHosts(hostList)
-		allhostSlices = append(allhostSlices, uniqueHostList)
+		allhostSlices = append(allhostSlices, hostList)
 	}
 	commonHosts := findCommonHostsforAllTopologyKeys(ctx, allhostSlices)
 	log.Infof("common hosts: %v for all segments: %v", commonHosts, topoSegment)
 	return commonHosts, nil
-}
-
-// removeDuplicateHosts removes duplicate entries found in the given host list.
-// This could happen for example if both a cluster and one of its hosts are
-// tagged at the same time. The list would then have the same host entry twice,
-// which breaks assumptions in findCommonHostsforAllTopologyKeys. By removing
-// duplicate entries first, this configuration can still be allowed to work.
-func removeDuplicateHosts(hostList []*cnsvsphere.HostSystem) []*cnsvsphere.HostSystem {
-	hostMap := make(map[string]bool)
-	var uniqueHosts []*cnsvsphere.HostSystem
-	for _, host := range hostList {
-		if _, exists := hostMap[host.String()]; !exists {
-			hostMap[host.String()] = true
-			uniqueHosts = append(uniqueHosts, host)
-		}
-	}
-	return uniqueHosts
 }
 
 // findCommonHostsforAllTopologyKeys helps find common hosts across all slices in hostLists
@@ -297,6 +279,18 @@ func fetchHosts(ctx context.Context, entity mo.Reference, vCenter *cnsvsphere.Vi
 				entity.Reference(), err)
 		}
 		hosts = append(hosts, hostList...)
+	case "ComputeResource":
+		cr := object.NewComputeResource(vCenter.Client.Client, entity.Reference())
+		hostList, err := cr.Hosts(ctx)
+		if err != nil {
+			return nil, logger.LogNewErrorf(log,
+				"failed to retrieve host from stand alone host (Compute Resource) %+v. Error: %+v",
+				entity.Reference(), err)
+		}
+		for _, host := range hostList {
+			hosts = append(hosts,
+				&cnsvsphere.HostSystem{HostSystem: object.NewHostSystem(vCenter.Client.Client, host.Reference())})
+		}
 	case "HostSystem":
 		host := cnsvsphere.HostSystem{HostSystem: object.NewHostSystem(vCenter.Client.Client, entity.Reference())}
 		hosts = append(hosts, &host)

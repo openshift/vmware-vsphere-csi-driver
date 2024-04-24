@@ -31,6 +31,7 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/vim25/methods"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/crypto/ssh"
 
@@ -46,6 +47,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
+	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 )
@@ -728,8 +730,6 @@ func readVsphereConfCredentialsInMultiVcSetup(cfg string) (e2eTestConfig, error)
 			if strconvErr != nil {
 				return config, fmt.Errorf("invalid value for csi-fetch-preferred-datastores-intervalinmin: %s", value)
 			}
-		case "targetvSANFileShareDatastoreURLs":
-			config.Global.TargetvSANFileShareDatastoreURLs = value
 		case "query-limit":
 			config.Global.QueryLimit, strconvErr = strconv.Atoi(value)
 			if strconvErr != nil {
@@ -1011,6 +1011,178 @@ func deleteNamespace(client clientset.Interface, ctx context.Context, nsName str
 	err := client.CoreV1().Namespaces().Delete(ctx, nsName, metav1.DeleteOptions{})
 	if err != nil {
 		return err
+	}
+	return nil
+}
+
+// This util method takes cluster name as input parameter and powers off esxi host of that cluster
+func powerOffEsxiHostsInMultiVcCluster(ctx context.Context, vs *multiVCvSphere,
+	esxCount int, hostsInCluster []*object.HostSystem) []string {
+	var powerOffHostsList []string
+	for i := 0; i < esxCount; i++ {
+		for _, esxInfo := range tbinfo.esxHosts {
+			host := hostsInCluster[i].Common.InventoryPath
+			hostIp := strings.Split(host, "/")
+			if hostIp[len(hostIp)-1] == esxInfo["ip"] {
+				esxHostName := esxInfo["vmName"]
+				powerOffHostsList = append(powerOffHostsList, esxHostName)
+				err := vMPowerMgmt(tbinfo.user, tbinfo.location, tbinfo.podname, esxHostName, false)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				err = waitForHostToBeDown(esxInfo["ip"])
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+		}
+	}
+	return powerOffHostsList
+}
+
+/*
+suspendDatastore util suspends the datastore in one of the multivc setup passed in the
+input parameter
+Here, this util is expecting what datastore operation to perform, it can be suspend, off etc.
+Next input parameter is the datastore name on which suspend operation needs to be performed
+and last is on which of the multivc setup we need to perform this datastore operation
+*/
+func suspendDatastore(opName string, dsNameToPowerOff string, testbedInfoJsonIndex string) string {
+	dsName := ""
+	readVcEsxIpsViaTestbedInfoJson(GetAndExpectStringEnvVar(testbedInfoJsonIndex))
+
+	for _, dsInfo := range tbinfo.datastores {
+		if strings.Contains(dsInfo["vmName"], dsNameToPowerOff) {
+			dsName = dsInfo["vmName"]
+			err := datatoreOperations(tbinfo.user, tbinfo.location, tbinfo.podname, dsName, opName)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			err = waitForHostToBeDown(dsInfo["ip"])
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			break
+		}
+	}
+	return dsName
+}
+
+/*
+resumeDatastore util resumes the datastore in one of the multivc setup passed in the
+input parameter
+Here, this util is expecting what datastore operation to perform, it can be resume, on etc.
+Next input parameter is the datastore name on which resume operation needs to be performed
+and last is on which of the multivc setup we need to perform this datastore operation
+*/
+func resumeDatastore(datastoreToPowerOn string, opName string, testbedInfoJsonIndex string) {
+
+	readVcEsxIpsViaTestbedInfoJson(GetAndExpectStringEnvVar(testbedInfoJsonIndex))
+	err := datatoreOperations(tbinfo.user, tbinfo.location, tbinfo.podname, datastoreToPowerOn, opName)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, dsInfo := range tbinfo.datastores {
+		if strings.Contains(dsInfo["vmName"], datastoreToPowerOn) {
+			err = waitForHostToBeUp(dsInfo["ip"])
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			break
+		}
+	}
+}
+
+/*
+createStaticPVCInMultiVC util creates static PV/PVC and returns the fcd-id, pv and pvc metadata
+*/
+func createStaticFCDPvAndPvc(ctx context.Context, f *framework.Framework,
+	client clientset.Interface, namespace string, defaultDatastore *object.Datastore,
+	pandoraSyncWaitTime int, allowedTopologies []v1.TopologySelectorLabelRequirement, clientIndex int,
+	sc *storagev1.StorageClass) (string, *v1.PersistentVolumeClaim, *v1.PersistentVolume) {
+	curtime := time.Now().Unix()
+
+	ginkgo.By("Creating FCD Disk")
+	curtimeinstring := strconv.FormatInt(curtime, 10)
+	fcdID, err := multiVCe2eVSphere.createFCDInMultiVC(ctx, "BasicStaticFCD"+curtimeinstring, diskSizeInMb,
+		defaultDatastore.Reference(), clientIndex)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	framework.Logf("FCD ID :", fcdID)
+
+	ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow newly created FCD:%s to sync with pandora",
+		pandoraSyncWaitTime, fcdID))
+	time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
+
+	staticPVLabels := make(map[string]string)
+	staticPVLabels["fcd-id"] = fcdID
+
+	// Creating PV using above created SC and FCD
+	ginkgo.By("Creating the PV")
+	staticPv := getPersistentVolumeSpecWithStorageClassFCDNodeSelector(fcdID,
+		v1.PersistentVolumeReclaimDelete, sc.Name, staticPVLabels,
+		diskSize, allowedTopologies)
+	staticPv, err = client.CoreV1().PersistentVolumes().Create(ctx, staticPv, metav1.CreateOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	err = multiVCe2eVSphere.waitForCNSVolumeToBeCreatedInMultiVC(staticPv.Spec.CSI.VolumeHandle)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Creating PVC using above created PV
+	ginkgo.By("Creating static PVC")
+	staticPvc := getPersistentVolumeClaimSpec(namespace, staticPVLabels, staticPv.Name)
+	staticPvc.Spec.StorageClassName = &sc.Name
+	staticPvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, staticPvc,
+		metav1.CreateOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Wait for PV and PVC to Bind.
+	ginkgo.By("Wait for PV and PVC to Bind")
+	framework.ExpectNoError(fpv.WaitOnPVandPVC(client, framework.NewTimeoutContextWithDefaults(),
+		namespace, staticPv, staticPvc))
+
+	ginkgo.By("Verifying CNS entry is present in cache")
+	_, err = multiVCe2eVSphere.queryCNSVolumeWithResultInMultiVC(staticPv.Spec.CSI.VolumeHandle)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	return fcdID, staticPvc, staticPv
+}
+
+// createFCDForMultiVC creates an FCD disk on a multiVC setup
+func (vs *multiVCvSphere) createFCDInMultiVC(ctx context.Context, fcdname string,
+	diskCapacityInMB int64, dsRef vim25types.ManagedObjectReference, clientIndex int) (string, error) {
+	KeepAfterDeleteVM := false
+	spec := vim25types.VslmCreateSpec{
+		Name:              fcdname,
+		CapacityInMB:      diskCapacityInMB,
+		KeepAfterDeleteVm: &KeepAfterDeleteVM,
+		BackingSpec: &vim25types.VslmCreateSpecDiskFileBackingSpec{
+			VslmCreateSpecBackingSpec: vim25types.VslmCreateSpecBackingSpec{
+				Datastore: dsRef,
+			},
+			ProvisioningType: string(vim25types.BaseConfigInfoDiskFileBackingInfoProvisioningTypeThin),
+		},
+	}
+	req := vim25types.CreateDisk_Task{
+		This: *vs.multiVcClient[clientIndex].ServiceContent.VStorageObjectManager,
+		Spec: spec,
+	}
+	res, err := methods.CreateDisk_Task(ctx, vs.multiVcClient[clientIndex].Client, &req)
+	if err != nil {
+		return "", err
+	}
+	task := object.NewTask(vs.multiVcClient[clientIndex].Client, res.Returnval)
+	taskInfo, err := task.WaitForResult(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	fcdID := taskInfo.Result.(vim25types.VStorageObject).Config.Id.Id
+	return fcdID, nil
+}
+
+// deleteFCDInMultiVc deletes an FCD disk from a multivc setup
+func (vs *multiVCvSphere) deleteFCDInMultiVc(ctx context.Context, fcdID string,
+	dsRef vim25types.ManagedObjectReference, clientIndex int) error {
+	req := vim25types.DeleteVStorageObject_Task{
+		This:      *vs.multiVcClient[clientIndex].ServiceContent.VStorageObjectManager,
+		Datastore: dsRef,
+		Id:        vim25types.ID{Id: fcdID},
+	}
+	res, err := methods.DeleteVStorageObject_Task(ctx, vs.multiVcClient[clientIndex].Client, &req)
+	if err != nil {
+		return err
+	}
+	task := object.NewTask(vs.multiVcClient[clientIndex].Client, res.Returnval)
+	_, err = task.WaitForResult(ctx, nil)
+	if err != nil {
+		framework.Logf(err.Error())
 	}
 	return nil
 }

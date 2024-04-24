@@ -19,13 +19,16 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/vmware/govmomi/object"
 	"golang.org/x/crypto/ssh"
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -90,9 +93,6 @@ var _ = ginkgo.Describe("statefulset", func() {
 	ginkgo.AfterEach(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		if supervisorCluster {
-			deleteResourceQuota(client, namespace)
-		}
 		ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
 		fss.DeleteAllStatefulSets(client, namespace)
 		ginkgo.By(fmt.Sprintf("Deleting service nginx in namespace: %v", namespace))
@@ -100,10 +100,14 @@ var _ = ginkgo.Describe("statefulset", func() {
 		if !apierrors.IsNotFound(err) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
+		if supervisorCluster {
+			deleteResourceQuota(client, namespace)
+			dumpSvcNsEventsOnTestFailure(client, namespace)
+		}
 	})
 
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized]"+
-		"Statefulset testing with default a podManagementPolicy", func() {
+	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] Statefulset "+
+		"testing with default podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
@@ -298,8 +302,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 		8. Delete all PVCs from the tests namespace.
 		9. Delete the storage class.
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized]"+
-		"Statefulset testing with parallel podManagementPolicy", func() {
+	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] Statefulset "+
+		"testing with parallel podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
@@ -495,11 +499,14 @@ var _ = ginkgo.Describe("statefulset", func() {
 			10. scale down statefulset to 0
 			11. delete statefulset and all PVC's and SC's
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] "+
-		"Verify online volume expansion on statefulset", func() {
+	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] [csi-vcp-mig] Verify online volume "+
+		"expansion on statefulset", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var pvcSizeBeforeExpansion int64
+		var sc, scSpec *storagev1.StorageClass
+		var err error
+		var volHandle string
 		scParameters := make(map[string]string)
 		scParameters[scParamFsType] = ext4FSType
 
@@ -516,10 +523,14 @@ var _ = ginkgo.Describe("statefulset", func() {
 			// create resource quota
 			createResourceQuota(client, namespace, rqLimit, storageClassName)
 		}
-
-		scSpec := getVSphereStorageClassSpec(storageClassName, scParameters, nil, "", "", true)
-		sc, err := client.StorageV1().StorageClasses().Create(ctx, scSpec, metav1.CreateOptions{})
+		if !vcptocsi {
+			scSpec = getVSphereStorageClassSpec(storageClassName, scParameters, nil, "", "", true)
+		} else {
+			scSpec = getVcpVSphereStorageClassSpec(storageClassName, scParameters, nil, "", "", true)
+		}
+		sc, err = client.StorageV1().StorageClasses().Create(ctx, scSpec, metav1.CreateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
 		defer func() {
 			err := client.StorageV1().StorageClasses().Delete(ctx, sc.Name, *metav1.NewDeleteOptions(0))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -560,6 +571,23 @@ var _ = ginkgo.Describe("statefulset", func() {
 					gomega.Expect(pvclaim).NotTo(gomega.BeNil())
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+					//Minimum Version of k8s Support for Resize migrated volume is k8s 1.26 and
+					//CSI by default migrates volume.Hence Manual Migration is not needed
+					if vcptocsi {
+						ginkgo.By("Verify annotations on PVCs created after migration")
+						_, err := waitForPvcMigAnnotations(ctx, client, pvclaimName, pvclaim.Namespace, false)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("Verify annotations on PV created after migration")
+						_, err = waitForPvMigAnnotations(ctx, client, pv.Name, false)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						vpath := getvSphereVolumePathFromClaim(ctx, client, namespace, pvclaimName)
+						crd, err := waitForCnsVSphereVolumeMigrationCrd(ctx, vpath)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						volHandle = crd.Spec.VolumeID
+
+					} else {
+						volHandle = pv.Spec.CSI.VolumeHandle
+					}
 
 					ginkgo.By("Expanding current pvc")
 					sizeBeforeexpansion := pvclaim.Status.Capacity[v1.ResourceStorage]
@@ -577,7 +605,7 @@ var _ = ginkgo.Describe("statefulset", func() {
 					_, err = waitForFSResize(pvclaim, client)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-					err = verifyVolumeMetadataInCNS(&e2eVSphere, pv.Spec.CSI.VolumeHandle,
+					err = verifyVolumeMetadataInCNS(&e2eVSphere, volHandle,
 						volumespec.PersistentVolumeClaim.ClaimName, pv.ObjectMeta.Name, sspod.Name)
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				}
@@ -622,6 +650,16 @@ var _ = ginkgo.Describe("statefulset", func() {
 						ctx, pvclaimName, metav1.GetOptions{})
 					gomega.Expect(pvclaim).NotTo(gomega.BeNil())
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
+
+					if vcptocsi {
+						ginkgo.By("Verify annotations on PVCs created after migration")
+						_, err = waitForPvcMigAnnotations(ctx, client, pvclaimName, pvclaim.Namespace, false)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+						ginkgo.By("Verify annotations on PV created after migration")
+						_, err = waitForPvMigAnnotations(ctx, client, pv.Name, false)
+						gomega.Expect(err).NotTo(gomega.HaveOccurred())
+					}
 
 					sizeAfterExpansion := pvclaim.Status.Capacity[v1.ResourceStorage]
 					pvcSizeAfterExpansion, _ := sizeAfterExpansion.AsInt64()
@@ -665,7 +703,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 	  12. Inncrease the CSI driver  replica to 3
 
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] ListVolumeResponse Validation", func() {
+	ginkgo.It("[csi-block-vanilla] [csi-supervisor] ListVolumeResponse "+
+		"Validation", ginkgo.Label(p1, listVolume, block, vanilla, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var svcMasterPswd string
@@ -831,6 +870,109 @@ var _ = ginkgo.Describe("statefulset", func() {
 
 		_, _, err = getCSIPodWhereListVolumeResponseIsPresent(ctx, client, sshClientConfig, containerName, logMessage, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	})
+
+	/*
+		Steps :
+		1. Create statefulset with 5 replicas and deployment.
+		2. EMM host in EvacuateAllData mode.
+		3. Verify EMM passes.
+		4. Verify CSI pods are running and statefulsets are in running state.
+		5. Scale up replica to 5.
+		6. Exit MM and clean up all pods and PVs.
+	*/
+	ginkgo.It("[csi-supervisor] Test MM workflow on statefulset", ginkgo.Label(
+		p1, block, wcp, core), func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var mmTimeout int32 = 300
+		var hostInMM *object.HostSystem
+
+		// create resource quota
+		createResourceQuota(client, namespace, rqLimit, storagePolicyName)
+
+		ginkgo.By("Get the storageclass from Supervisor")
+		sc, err := client.StorageV1().StorageClasses().Get(ctx, storagePolicyName, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Creating service")
+		service := CreateService(namespace, client)
+		defer func() {
+			deleteService(namespace, client, service)
+		}()
+
+		ginkgo.By("Creating statfulset and deployment from storageclass")
+		statefulset, _, _ := createStsDeployment(ctx, client, namespace, sc, true,
+			false, 0, "", "", false)
+		replicas := *(statefulset.Spec.Replicas)
+		csiNs := GetAndExpectStringEnvVar(envCSINamespace)
+		csipods, err := client.CoreV1().Pods(csiNs).List(ctx, metav1.ListOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		defer func() {
+			scaleDownNDeleteStsDeploymentsInNamespace(ctx, client, namespace)
+			pvcs, err := client.CoreV1().PersistentVolumeClaims(namespace).List(ctx, metav1.ListOptions{})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			for _, claim := range pvcs.Items {
+				pv := getPvFromClaim(client, namespace, claim.Name)
+				err := fpv.DeletePersistentVolumeClaim(client, claim.Name, namespace)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				ginkgo.By("Verify it's PV and corresponding volumes are deleted from CNS")
+				err = fpv.WaitForPersistentVolumeDeleted(client, pv.Name, poll,
+					pollTimeout)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				volumeHandle := pv.Spec.CSI.VolumeHandle
+				err = e2eVSphere.waitForCNSVolumeToBeDeleted(volumeHandle)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred(),
+					fmt.Sprintf("Volume: %s should not be present in the CNS after it is deleted from "+
+						"kubernetes", volumeHandle))
+			}
+		}()
+
+		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		stsPod := ssPodsBeforeScaleDown.Items[0]
+		nodeName := stsPod.Spec.NodeName
+		framework.Logf("nodeName: %v", nodeName)
+		clusterComputeResource, _, err := getClusterName(ctx, &e2eVSphere)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Get host name where statfulset pod is located")
+		computeCluster := GetAndExpectStringEnvVar(envComputeClusterName)
+		hostsInCluster := getHostsByClusterName(ctx, clusterComputeResource, computeCluster)
+		for _, host := range hostsInCluster {
+			hostPath := host.Common.InventoryPath
+			hostDetails := strings.Split(hostPath, "/")
+			hostIP := hostDetails[len(hostDetails)-1]
+			hostName := getHostName(hostIP)
+			hostName = strings.Trim(hostName, ".")
+			framework.Logf("hostname: %v", hostName)
+			if hostName == nodeName {
+				hostInMM = host
+				break
+			}
+		}
+
+		ginkgo.By("Put host into EvacuateAlldata maintenance mode")
+		enterHostIntoMM(ctx, hostInMM, evacMModeType, mmTimeout, true)
+		enterMaintenanceMode := true
+		defer func() {
+			if enterMaintenanceMode {
+				framework.Logf("Exit the host from MM before terminating the test")
+				exitHostMM(ctx, hostInMM, mmTimeout)
+			}
+		}()
+
+		err = fpod.WaitForPodsRunningReady(client, csiNs, int32(csipods.Size()), 0, pollTimeout, nil)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		ginkgo.By("Scale up statefulset replica to 5")
+		replicas = replicas + 2
+		scaleUpStsAndVerifyPodMetadata(ctx, client, namespace, statefulset,
+			replicas, true, true)
+
+		ginkgo.By("Exit the host from maintenance mode")
+		exitHostMM(ctx, hostInMM, mmTimeout)
+		enterMaintenanceMode = false
+
 	})
 
 })

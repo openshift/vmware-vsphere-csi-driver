@@ -14,7 +14,6 @@ export BIN_OUT ?= $(BUILD_OUT)/bin
 # DIST_OUT is the directory containting the distribution packages
 export DIST_OUT ?= $(BUILD_OUT)/dist
 
--include hack/make/docker.mk
 
 ################################################################################
 ##                             VERIFY GO VERSION                              ##
@@ -123,7 +122,7 @@ export SYNCER_BIN_SRCS
 endif
 
 syncer_manifest: controller-gen
-	$(CONTROLLER_GEN) crd:trivialVersions=true paths=./pkg/apis/storagepool/... output:crd:dir=pkg/apis/storagepool/config
+	$(CONTROLLER_GEN) crd paths=./pkg/apis/storagepool/... output:crd:dir=pkg/apis/storagepool/config
 # find or download controller-gen
 # download controller-gen if necessary
 controller-gen:
@@ -133,7 +132,7 @@ ifeq (, $(shell which controller-gen))
 	CONTROLLER_GEN_TMP_DIR=$$(mktemp -d) ;\
 	cd $$CONTROLLER_GEN_TMP_DIR ;\
 	go mod init tmp ;\
-	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.6.2 ;\
+	go install sigs.k8s.io/controller-tools/cmd/controller-gen@v0.14.0 ;\
 	rm -rf $$CONTROLLER_GEN_TMP_DIR ;\
 	}
 CONTROLLER_GEN=$(GOBIN)/controller-gen

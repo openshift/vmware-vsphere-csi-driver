@@ -2,23 +2,50 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 
 	"google.golang.org/grpc/codes"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	apitypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 
+	"github.com/davecgh/go-spew/spew"
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 
+	storagepolicyusagev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
+)
+
+const (
+	// These are the values required for geenrating events on a K8s object
+
+	// Syncer component name
+	syncerComponent = "VSphere CSI Syncer"
+	// reason for PV creation failure when static volume provioining fails
+	staticVolumeProvisioningFailure = "static volume provisioning failed"
+	// reason for successful PV creation for static volumes
+	staticVolumeProvisioningSuccessReason = "static volume provisioning succeeded"
+	// message for successful PV creation for static volumes
+	staticVolumeProvisioningSuccessMessage = "Successfully created container volume"
 )
 
 // getPVsInBoundAvailableOrReleased return PVs in Bound, Available or Released
@@ -67,6 +94,29 @@ func getBoundPVs(ctx context.Context, metadataSyncer *metadataSyncInformer) ([]*
 		}
 	}
 	return boundPVs, nil
+}
+
+// getPVCsInPendingState is a helper function for fetching PVCs not in Bound state.
+func getPVCsInPendingState(ctx context.Context, metadataSyncer *metadataSyncInformer) ([]*v1.PersistentVolumeClaim,
+	error) {
+	log := logger.GetLogger(ctx)
+	var pendingPVCs []*v1.PersistentVolumeClaim
+	// Get all PVCs from kubernetes.
+	allPVCs, err := metadataSyncer.pvcLister.List(labels.Everything())
+	if err != nil {
+		return nil, err
+	}
+	for _, pvc := range allPVCs {
+		if pvc.ObjectMeta.Annotations[common.AnnStorageProvisioner] == csitypes.Name {
+			log.Debugf("getPVCsInPendingState: pvc %s in namespace %s is in state %v",
+				pvc.Name, pvc.Namespace, pvc.Status.Phase)
+			if pvc.Status.Phase == v1.ClaimPending {
+				pendingPVCs = append(pendingPVCs, pvc)
+			}
+		}
+	}
+	log.Infof("getPVCsInPendingState: pendingPVCs %v", pendingPVCs)
+	return pendingPVCs, nil
 }
 
 // fullSyncGetInlineMigratedVolumesInfo is a helper function for retrieving
@@ -472,6 +522,11 @@ func getVcHostFromTopologySegments(ctx context.Context, topologySegments []map[s
 	log := logger.GetLogger(ctx)
 	var vcHost string
 
+	if len(topologySegments) == 0 {
+		return "", logger.LogNewErrorf(log,
+			"Invalid volume %s as it does not have node affinity rules", volumeName)
+	}
+
 	for _, topology := range topologySegments {
 
 		vc, err := getVCForTopologySegments(ctx, topology)
@@ -566,7 +621,7 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 				pv.Spec.VsphereVolume != nil {
 				return nil, logger.LogNewErrorf(log,
 					"In-tree volumes are not supported on a multi VC set up."+
-						"Found in-tree volume %s.", pv.Name)
+						"Found in-tree volume %q.", pv.Name)
 			}
 			return nil, logger.LogNewErrorf(log,
 				"Invalid PV %s with empty volume handle.", pv.Name)
@@ -574,9 +629,13 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 
 		// Check if the PV is a file share volume.
 		if IsMultiAttachAllowed(pv) {
-			return nil, logger.LogNewErrorf(log,
-				"File share volumes are not supported on a multi VC set up."+
-					"Found file share volume %s.", pv.Name)
+			isTopologyAwareFileVolumeEnabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx,
+				common.TopologyAwareFileVolume)
+			if !isTopologyAwareFileVolumeEnabled {
+				return nil, logger.LogNewErrorf(log,
+					"File share volumes are not supported on a multi VC set up."+
+						"Found file share volume %s.", pv.Name)
+			}
 		}
 
 		if volumeInfoService == nil {
@@ -597,19 +656,21 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 		}
 	}
 
-	// Try to locate the VC for all the left out PVs from their nodeAffinity rules.
 	if len(leftOutPvs) != 0 {
 		for _, volume := range leftOutPvs {
-			topologySegments := getTopologySegmentsFromNodeAffinityRules(ctx, volume)
-			vCenter, err := getVcHostFromTopologySegments(ctx, topologySegments, volume.Name)
-			if err != nil {
-				return nil, logger.LogNewErrorf(log,
-					"Failed to find which VC volume %+v belongs to from ndeAffinityrules",
-					volume.Spec.CSI.VolumeHandle)
-			}
+			if !IsMultiAttachAllowed(volume) {
+				// Try to locate the VC for all the left out PVs from their nodeAffinity rules.
+				topologySegments := getTopologySegmentsFromNodeAffinityRules(ctx, volume)
+				vCenter, err := getVcHostFromTopologySegments(ctx, topologySegments, volume.Name)
+				if err != nil {
+					log.Debugf("Failed to find which VC volume %+v belongs to from nodeAffinityRules",
+						volume.Spec.CSI.VolumeHandle)
+					continue
+				}
 
-			if vCenter == vc {
-				k8svolumes = append(k8svolumes, volume)
+				if vCenter == vc {
+					k8svolumes = append(k8svolumes, volume)
+				}
 			}
 
 		}
@@ -622,4 +683,257 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 	log.Debugf("List of K8s volumes for VC %s: %+v", vc, k8svolumeIDs)
 
 	return k8svolumes, nil
+}
+
+// createVolumeOnMultiVc attempts to create a static volume on each VC until it gets SUCCESS.
+// If while creating the volume, CNS returns CnsAlreadyRegisteredFault,
+// it means that the volume does not need to be re-created.
+func createVolumeOnMultiVc(ctx context.Context, pv *v1.PersistentVolume,
+	metadataSyncer *metadataSyncInformer, volumeType string, metadataList []cnstypes.BaseCnsEntityMetadata,
+	volumeHandle string) (string, volumes.Manager, error) {
+	log := logger.GetLogger(ctx)
+
+	vcconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, metadataSyncer.configInfo.Cfg)
+	if err != nil {
+		return "", nil, logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err: %v", err)
+	}
+
+	for _, vcconfig := range vcconfigs {
+		log.Debugf("Attempting to create volume on VC %s", vcconfig.Host)
+		volManager, err := getVolManagerForVcHost(ctx, vcconfig.Host, metadataSyncer)
+		if err != nil {
+			continue
+		}
+		err = createCnsVolume(ctx, pv, metadataSyncer, volManager, volumeType, vcconfig.Host, metadataList, volumeHandle)
+		if err == nil {
+			return vcconfig.Host, volManager, nil
+		}
+		log.Debugf("Failed to create volume %q on VC %s", volumeHandle, vcconfig.Host)
+	}
+	return "", nil, logger.LogNewErrorf(log,
+		"Failed to create volume %s on any of the VCs", volumeHandle)
+}
+
+func generateEventOnPv(ctx context.Context, pv *v1.PersistentVolume,
+	eventType string, failureReason string, errorMsg string) {
+	log := logger.GetLogger(ctx)
+
+	eventBroadcaster := record.NewBroadcaster()
+	k8sClient, err := k8s.NewClient(ctx)
+	if err != nil {
+		log.Errorf("Failed to create k8s client. Err: %v", err)
+		return
+	}
+
+	eventBroadcaster.StartRecordingToSink(&typedcorev1.EventSinkImpl{Interface: k8sClient.CoreV1().Events("")})
+	eventRecorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: syncerComponent})
+	eventRecorder.Event(pv, eventType, failureReason, errorMsg)
+}
+
+func createCnsVolume(ctx context.Context, pv *v1.PersistentVolume,
+	metadataSyncer *metadataSyncInformer, cnsVolumeMgr volumes.Manager, volumeType string,
+	vcHost string, metadataList []cnstypes.BaseCnsEntityMetadata, volumeHandle string) error {
+	log := logger.GetLogger(ctx)
+
+	vcHostObj, vcHostObjFound := metadataSyncer.configInfo.Cfg.VirtualCenter[vcHost]
+	if !vcHostObjFound {
+		return logger.LogNewErrorf(log,
+			"Failed to find VC host for given volume: %q.", volumeHandle)
+	}
+
+	containerCluster := cnsvsphere.GetContainerCluster(clusterIDforVolumeMetadata,
+		vcHostObj.User, metadataSyncer.clusterFlavor,
+		metadataSyncer.configInfo.Cfg.Global.ClusterDistribution)
+
+	createSpec := &cnstypes.CnsVolumeCreateSpec{
+		Name:       pv.Name,
+		VolumeType: volumeType,
+		Metadata: cnstypes.CnsVolumeMetadata{
+			ContainerCluster:      containerCluster,
+			ContainerClusterArray: []cnstypes.CnsContainerCluster{containerCluster},
+			EntityMetadata:        metadataList,
+		},
+	}
+
+	if volumeType == common.BlockVolumeType {
+		createSpec.BackingObjectDetails = &cnstypes.CnsBlockBackingDetails{
+			CnsBackingObjectDetails: cnstypes.CnsBackingObjectDetails{},
+			BackingDiskId:           pv.Spec.CSI.VolumeHandle,
+		}
+	} else {
+		createSpec.BackingObjectDetails = &cnstypes.CnsVsanFileShareBackingDetails{
+			CnsFileBackingDetails: cnstypes.CnsFileBackingDetails{
+				BackingFileId: pv.Spec.CSI.VolumeHandle,
+			},
+		}
+	}
+	log.Debugf("vSphere CSI Driver is creating volume %q with create spec %+v",
+		pv.Name, spew.Sdump(createSpec))
+	_, _, err := cnsVolumeMgr.CreateVolume(ctx, createSpec, nil)
+	if err != nil {
+		log.Errorf("Failed to create disk %s with error %+v", pv.Name, err)
+		return err
+	} else {
+		log.Infof("vSphere CSI Driver has successfully marked volume: %q as the container volume.",
+			pv.Spec.CSI.VolumeHandle)
+		if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+			// Create CNSVolumeInfo CR for the volume ID.
+			err = volumeInfoService.CreateVolumeInfo(ctx, pv.Spec.CSI.VolumeHandle, vcHost)
+			if err != nil {
+				log.Errorf("Failed to store volumeID %q for vCenter %q in CNSVolumeInfo CR. Error: %+v",
+					pv.Spec.CSI.VolumeHandle, vcHost, err)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func createMissingFileVolumeInfoCrs(ctx context.Context, metadataSyncer *metadataSyncInformer) {
+
+	log := logger.GetLogger(ctx)
+
+	// Get all K8s volumes in "Bound", "Available" or "Released" states.
+	allPvs, err := getPVsInBoundAvailableOrReleased(ctx, metadataSyncer)
+	if err != nil {
+		log.Errorf("Failed to get PVs in the cluster. Err: %v", err)
+		return
+	}
+
+	fileVolumes := make([]*v1.PersistentVolume, 0)
+	for _, pv := range allPvs {
+		if pv.Spec.CSI == nil {
+			if metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.CSIMigration) &&
+				pv.Spec.VsphereVolume != nil {
+				log.Errorf("In-tree volumes are not supported on a multi VC set up."+
+					"Found in-tree volume %s.", pv.Name)
+				return
+			}
+			log.Errorf("Invalid PV %s with empty volume handle.", pv.Name)
+			return
+		}
+		// Check if the PV is a file volume.
+		if IsMultiAttachAllowed(pv) {
+			fileVolumes = append(fileVolumes, pv)
+		}
+	}
+
+	if len(fileVolumes) == 0 {
+		log.Debugf("There are no file volumes on the cluster")
+		return
+	}
+
+	fileVolumesWithMissingCrs := make([]*v1.PersistentVolume, 0)
+	if volumeInfoService == nil {
+		log.Errorf("VolumeInfoService is not initialized")
+		return
+	}
+
+	for _, pv := range fileVolumes {
+		crExists, err := volumeInfoService.VolumeInfoCrExistsForVolume(ctx, pv.Spec.CSI.VolumeHandle)
+		if err != nil {
+			log.Errorf("Failed to find VolumeInfo CR for volume %s."+
+				"Error: %+v", pv.Spec.CSI.VolumeHandle, err)
+			continue
+		}
+		// Create VolumeInfo CR if not found.
+		if !crExists {
+			fileVolumesWithMissingCrs = append(fileVolumesWithMissingCrs, pv)
+		}
+	}
+
+	if len(fileVolumesWithMissingCrs) == 0 {
+		log.Debugf("There are no missing volume info CRs for file volumes")
+		return
+	}
+
+	// This is a best effort attempt.
+	// If some of the PVs could not be created, it can be attempted in the next cycle.
+	for _, pv := range fileVolumesWithMissingCrs {
+
+		var metadataList []cnstypes.BaseCnsEntityMetadata
+		pvMetadata := cnsvsphere.GetCnsKubernetesEntityMetaData(pv.Name, pv.GetLabels(), false,
+			string(cnstypes.CnsKubernetesEntityTypePV), "", clusterIDforVolumeMetadata, nil)
+		metadataList = append(metadataList, cnstypes.BaseCnsEntityMetadata(pvMetadata))
+
+		_, _, err = createVolumeOnMultiVc(ctx, pv, metadataSyncer,
+			common.FileVolumeType, metadataList, pv.Spec.CSI.VolumeHandle)
+		if err == nil {
+			if !isDynamicallyCreatedVolume(ctx, pv) {
+				generateEventOnPv(ctx, pv, v1.EventTypeNormal,
+					staticVolumeProvisioningSuccessReason, staticVolumeProvisioningSuccessMessage)
+			}
+		}
+	}
+}
+
+func isDynamicallyCreatedVolume(ctx context.Context, pv *v1.PersistentVolume) bool {
+	isdynamicCSIPV := false
+	if pv.Spec.CSI != nil {
+		_, isdynamicCSIPV = pv.Spec.CSI.VolumeAttributes[attribCSIProvisionerID]
+	}
+	return isdynamicCSIPV
+}
+
+func getPatchData(oldObj, newObj interface{}) ([]byte, error) {
+	oldData, err := json.Marshal(oldObj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal old object failed: %v", err)
+	}
+	newData, err := json.Marshal(newObj)
+	if err != nil {
+		return nil, fmt.Errorf("marshal new object failed: %v", err)
+	}
+	patchBytes, err := jsonpatch.CreateMergePatch(oldData, newData)
+	if err != nil {
+		return nil, fmt.Errorf("CreateMergePatch failed: %v", err)
+	}
+	return patchBytes, nil
+}
+
+// PatchStoragePolicyUsage patches the StoragePolicyUsage CR based
+func PatchStoragePolicyUsage(ctx context.Context, cnsOperatorClient client.Client,
+	oldObj *storagepolicyusagev1alpha1.StoragePolicyUsage,
+	newObj *storagepolicyusagev1alpha1.StoragePolicyUsage) error {
+	log := logger.GetLogger(ctx)
+	patch, err := getPatchData(oldObj, newObj)
+	if err != nil {
+		log.Errorf("error fetching PatchData StoragePolicyUsage CR. err: %v", err)
+		return err
+	}
+	patch, err = addResourceVersion(patch, oldObj.ResourceVersion)
+	if err != nil {
+		log.Errorf("applying ResourceVersion to patch data failed: %v", err)
+		return err
+	}
+	rawPatch := client.RawPatch(apitypes.MergePatchType, patch)
+	err = cnsOperatorClient.Patch(ctx, oldObj, rawPatch)
+	log.Debugf("Patching the StoragePolicyUsageCR %q on namespace: %q with the quota usage data: %+v",
+		oldObj.Name, oldObj.Namespace, newObj.Status.ResourceTypeLevelQuotaUsage)
+	if err != nil {
+		log.Errorf("failed to patch StoragePolicyUsage instance: %q on namespace: %q. Error: %+v",
+			oldObj.Name, oldObj.Namespace, err)
+		return err
+	}
+	return nil
+}
+
+// addResourceVersion sets the resource version for the patch obj
+func addResourceVersion(patchBytes []byte, resourceVersion string) ([]byte, error) {
+	var patchMap map[string]interface{}
+	err := json.Unmarshal(patchBytes, &patchMap)
+	if err != nil {
+		return nil, fmt.Errorf("error unmarshalling patch: %v", err)
+	}
+	u := unstructured.Unstructured{Object: patchMap}
+	a, err := meta.Accessor(&u)
+	if err != nil {
+		return nil, fmt.Errorf("error creating accessor: %v", err)
+	}
+	a.SetResourceVersion(resourceVersion)
+	versionBytes, err := json.Marshal(patchMap)
+	if err != nil {
+		return nil, fmt.Errorf("error marshalling json patch: %v", err)
+	}
+	return versionBytes, nil
 }
