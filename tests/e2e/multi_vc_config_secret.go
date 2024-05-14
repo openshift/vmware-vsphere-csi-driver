@@ -220,10 +220,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Change vCenter password on one of the multi-vc setup and update the same "+
-		"in csi vsphere conf", func() {
+		"in csi vsphere conf", ginkgo.Label(p1, vsphereConfigSecret, block, vanilla,
+		multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		clientIndex := 0
 		stsReplicas = 3
 		scaleUpReplicaCount = 5
@@ -303,6 +304,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		service, statefulset, err := createStafeulSetAndVerifyPVAndPodNodeAffinty(ctx, client, namespace,
 			parallelPodPolicy, stsReplicas, nodeAffinityToSet, allowedTopologies, allowedTopologyLen,
 			podAntiAffinityToSet, parallelStatefulSetCreation, false, "", "", nil, verifyTopologyAffinity)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			fss.DeleteAllStatefulSets(client, namespace)
 			deleteService(namespace, client, service)
@@ -323,7 +325,9 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	Observe the system behaviour , Expectation is CSI pod's should show CLBO or should show error
 	*/
 
-	ginkgo.It("Copy same vCenter details twice in csi vsphere conf in a multi-vc setup", func() {
+	ginkgo.It("Copy same vCenter details twice in csi vsphere conf in a multi-vc setup", ginkgo.Label(p2,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -413,7 +417,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		ginkgo.By("Expect claim to fail as invalid storage policy is specified in Storage Class")
 		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
 			client, pvclaim.Namespace, pvclaim.Name, framework.Poll, framework.ClaimProvisionTimeout))
-		expectedErrMsg := "waiting for a volume to be created"
+		expectedErrMsg := "Waiting for a volume to be created"
 		err = waitForEvent(ctx, client, namespace, expectedErrMsg, pvclaim.Name)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Expected error : %q", expectedErrMsg))
 	})
@@ -435,10 +439,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Use VC-hostname instead of VC-IP for one VC and try to switch the same during"+
-		"a workload vcreation in a multivc setup", func() {
+		"a workload vcreation in a multivc setup", ginkgo.Label(p1,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		stsReplicas = 10
 		scaleUpReplicaCount = 5
 		scaleDownReplicaCount = 2
@@ -462,7 +467,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		vCenterIPVC2 := vCenterList[1]
 
 		ginkgo.By("Fetch vcenter hotsname for VC2")
-		vCenterHostName := getVcenterHostName(vCenterList[1])
+		vCenterHostName := getHostName(vCenterList[1])
 		vCenterList[1] = vCenterHostName
 		vsphereCfg.Global.VCenterHostname = strings.Join(vCenterList, ",")
 
@@ -508,7 +513,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 		ginkgo.By("Use VC-IP for VC2 and VC-hostname for VC1 in a multi VC setup")
 		ginkgo.By("Fetch vcenter hotsname of VC1")
-		vCenterHostNameVC1 := getVcenterHostName(vCenterList[0])
+		vCenterHostNameVC1 := getHostName(vCenterList[0])
 		vCenterList[0] = vCenterHostNameVC1
 		vCenterList[1] = vCenterIPVC2
 		vsphereCfg.Global.VCenterHostname = strings.Join(vCenterList, ",")
@@ -548,10 +553,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Install CSI driver on different namespace and restart CSI-controller and node daemon sets"+
-		"in between the statefulset creation", func() {
+		"in between the statefulset creation", ginkgo.Label(p2,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		stsReplicas = 5
 		sts_count := 3
 		ignoreLabels := make(map[string]string)
@@ -717,10 +723,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	    8. Clean up the data
 	*/
 
-	ginkgo.It("Keep different passwords on each VC and check Statefulset creation and reboot VC", func() {
+	ginkgo.It("Keep different passwords on each VC and check Statefulset creation and reboot VC", ginkgo.Label(p2,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky, negative), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		stsReplicas = 3
 		scaleUpReplicaCount = 5
 		scaleDownReplicaCount = 2
@@ -898,10 +905,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Change VC in the UI but not on the vsphere secret and verify "+
-		"volume creation workflow on a multivc setup", func() {
+		"volume creation workflow on a multivc setup", ginkgo.Label(p2,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		clientIndex := 0
 
 		ginkgo.By("Changing password on the vCenter VC1 host")
@@ -952,7 +960,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		ginkgo.By("Expect claim to fail as invalid storage policy is specified in Storage Class")
 		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
 			client, pvclaim.Namespace, pvclaim.Name, framework.Poll, framework.ClaimProvisionTimeout))
-		expectedErrMsg := "waiting for a volume to be created"
+		expectedErrMsg := "Waiting for a volume to be created"
 		err = waitForEvent(ctx, client, namespace, expectedErrMsg, pvclaim.Name)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Expected error : %q", expectedErrMsg))
 	})
@@ -965,10 +973,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	vsphere-secret is fixed
 	*/
 
-	ginkgo.It("Add any wrong entry in vsphere conf and verify csi pods behaviour", func() {
+	ginkgo.It("Add any wrong entry in vsphere conf and verify csi pods behaviour", ginkgo.Label(p2,
+		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		wrongPortNoVC1 := "337"
 
 		// read original vsphere config secret
@@ -1051,9 +1060,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		ginkgo.By("Expect claim to fail as invalid storage policy is specified in Storage Class")
 		framework.ExpectError(fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
 			client, pvclaim.Namespace, pvclaim.Name, framework.Poll, framework.ClaimProvisionTimeout))
-		expectedErrMsg := "waiting for a volume to be created"
+		expectedErrMsg := "Waiting for a volume to be created"
 		err = waitForEvent(ctx, client, namespace, expectedErrMsg, pvclaim.Name)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Expected error : %q", expectedErrMsg))
 	})
-
 })

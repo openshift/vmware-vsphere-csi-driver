@@ -27,6 +27,7 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	apitypes "k8s.io/apimachinery/pkg/types"
@@ -39,6 +40,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	storagepolicyusagev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
+
+	clientConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 	apis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
@@ -46,7 +51,9 @@ import (
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
@@ -65,6 +72,10 @@ var (
 	backOffDurationMapMutex = sync.Mutex{}
 )
 
+var topologyMgr commoncotypes.ControllerTopologyService
+var isPodVMOnStretchedSupervisorEnabled bool
+var clusterComputeResourceMoIds []string
+
 // Add creates a new CnsRegisterVolume Controller and adds it to the Manager,
 // ConfigurationInfo and VirtualCenterTypes. The Manager will set fields on
 // the Controller and Start it when the Manager is Started.
@@ -75,16 +86,34 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		log.Debug("Not initializing the CnsRegisterVolume Controller as its a non-WCP CSI deployment")
 		return nil
 	}
+	var volumeInfoService cnsvolumeinfo.VolumeInfoService
 	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
-			clusterComputeResourceMoIds, err := common.GetClusterComputeResourceMoIds(ctx)
+			var err error
+			clusterComputeResourceMoIds, err = common.GetClusterComputeResourceMoIds(ctx)
 			if err != nil {
 				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
 				return err
 			}
-			if len(clusterComputeResourceMoIds) > 1 {
-				log.Infof("Not initializing the CnsRegisterVolume Controller as stretched supervisor is detected.")
-				return nil
+			isPodVMOnStretchedSupervisorEnabled =
+				commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor)
+			if isPodVMOnStretchedSupervisorEnabled {
+				topologyMgr, err = commonco.ContainerOrchestratorUtility.InitTopologyServiceInController(ctx)
+				if err != nil {
+					log.Errorf("failed to init topology manager. err: %v", err)
+					return err
+				}
+				log.Info("Creating CnsVolumeInfo Service to persist mapping for VolumeID to storage policy info")
+				volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
+				if err != nil {
+					return logger.LogNewErrorf(log, "error initializing volumeInfoService. Error: %+v", err)
+				}
+				log.Infof("Successfully initialized VolumeInfoService")
+			} else {
+				if len(clusterComputeResourceMoIds) > 1 {
+					log.Infof("Not initializing the CnsRegisterVolume Controller as stretched supervisor is detected.")
+					return nil
+				}
 			}
 		}
 	}
@@ -104,14 +133,15 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		},
 	)
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme, v1.EventSource{Component: apis.GroupName})
-	return add(mgr, newReconciler(mgr, configInfo, volumeManager, recorder))
+	return add(mgr, newReconciler(mgr, configInfo, volumeManager, recorder, volumeInfoService))
 }
 
 // newReconciler returns a new reconcile.Reconciler.
 func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationInfo,
-	volumeManager volumes.Manager, recorder record.EventRecorder) reconcile.Reconciler {
+	volumeManager volumes.Manager, recorder record.EventRecorder,
+	volumeInfoService cnsvolumeinfo.VolumeInfoService) reconcile.Reconciler {
 	return &ReconcileCnsRegisterVolume{client: mgr.GetClient(), scheme: mgr.GetScheme(),
-		configInfo: configInfo, volumeManager: volumeManager, recorder: recorder}
+		configInfo: configInfo, volumeManager: volumeManager, recorder: recorder, volumeInfoService: volumeInfoService}
 }
 
 // add adds a new Controller to mgr with r as the reconcile.Reconciler.
@@ -146,11 +176,12 @@ var _ reconcile.Reconciler = &ReconcileCnsRegisterVolume{}
 type ReconcileCnsRegisterVolume struct {
 	// This client, initialized using mgr.Client() above, is a split client
 	// that reads objects from the cache and writes to the apiserver.
-	client        client.Client
-	scheme        *runtime.Scheme
-	configInfo    *commonconfig.ConfigurationInfo
-	volumeManager volumes.Manager
-	recorder      record.EventRecorder
+	client            client.Client
+	scheme            *runtime.Scheme
+	configInfo        *commonconfig.ConfigurationInfo
+	volumeManager     volumes.Manager
+	recorder          record.EventRecorder
+	volumeInfoService cnsvolumeinfo.VolumeInfoService
 }
 
 // Reconcile reads that state of the cluster for a CnsRegisterVolume object
@@ -222,15 +253,16 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 	var (
-		volumeID string
-		pvName   string
+		volumeID       string
+		pvName         string
+		pvNodeAffinity *v1.VolumeNodeAffinity
 	)
 	// Create Volume for the input CnsRegisterVolume instance.
 	createSpec := constructCreateSpecForInstance(r, instance, vc.Config.Host, isTKGSHAEnabled)
 	log.Infof("Creating CNS volume: %+v for CnsRegisterVolume request with name: %q on namespace: %q",
 		instance, instance.Name, instance.Namespace)
 	log.Debugf("CNS Volume create spec is: %+v", createSpec)
-	volInfo, _, err := r.volumeManager.CreateVolume(ctx, createSpec)
+	volInfo, _, err := r.volumeManager.CreateVolume(ctx, createSpec, nil)
 	if err != nil {
 		msg := "failed to create CNS volume"
 		log.Errorf(msg)
@@ -267,18 +299,33 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	// Verify if the volume is accessible to Pacific cluster.
-	isAccessible := isDatastoreAccessibleToCluster(ctx, vc, r.configInfo.Cfg.Global.ClusterID, volume.DatastoreUrl)
-	if !isAccessible {
-		log.Errorf("Volume: %s present on datastore: %s is not accessible to all nodes in the cluster: %s",
-			volumeID, volume.DatastoreUrl, r.configInfo.Cfg.Global.ClusterID)
-		setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to all nodes in the cluster")
-		// Untag the CNS volume which was created previously.
-		_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
-		if err != nil {
-			log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+	if isPodVMOnStretchedSupervisorEnabled && len(clusterComputeResourceMoIds) > 1 {
+		azClustersMap := topologyMgr.GetAZClustersMap(ctx)
+		isAccessible := isDatastoreAccessibleToAZClusters(ctx, vc, azClustersMap, volume.DatastoreUrl)
+		if !isAccessible {
+			log.Errorf("Volume: %s present on datastore: %s is not accessible to any of the AZ clusters: %v",
+				volumeID, volume.DatastoreUrl, azClustersMap)
+			setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to any of the AZ clusters")
+			_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+			if err != nil {
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+			}
+			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
-		return reconcile.Result{RequeueAfter: timeout}, nil
+	} else {
+		// Verify if the volume is accessible to Supervisor cluster.
+		isAccessible := isDatastoreAccessibleToCluster(ctx, vc, r.configInfo.Cfg.Global.ClusterID, volume.DatastoreUrl)
+		if !isAccessible {
+			log.Errorf("Volume: %s present on datastore: %s is not accessible to all nodes in the cluster: %s",
+				volumeID, volume.DatastoreUrl, r.configInfo.Cfg.Global.ClusterID)
+			setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to all nodes in the cluster")
+			// Untag the CNS volume which was created previously.
+			_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+			if err != nil {
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+			}
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
 	}
 	// Verify if storage policy is empty.
 	if volume.StoragePolicyId == "" {
@@ -292,6 +339,39 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
+	if isPodVMOnStretchedSupervisorEnabled && len(clusterComputeResourceMoIds) > 1 {
+		// Calculate accessible topology for the provisioned volume.
+		datastoreAccessibleTopology, err := topologyMgr.GetTopologyInfoFromNodes(ctx,
+			commoncotypes.WCPRetrieveTopologyInfoParams{
+				DatastoreURL:        volume.DatastoreUrl,
+				StorageTopologyType: "zonal",
+				TopologyRequirement: nil,
+				Vc:                  vc})
+		if err != nil {
+			msg := fmt.Sprintf("failed to find volume topology. Error: %v", err)
+			log.Error(msg)
+			setInstanceError(ctx, r, instance, msg)
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+		matchExpressions := make([]v1.NodeSelectorRequirement, 0)
+		for key, value := range datastoreAccessibleTopology[0] {
+			matchExpressions = append(matchExpressions, v1.NodeSelectorRequirement{
+				Key:      key,
+				Operator: v1.NodeSelectorOpIn,
+				Values:   []string{value},
+			})
+		}
+		pvNodeAffinity = &v1.VolumeNodeAffinity{
+			Required: &v1.NodeSelector{
+				NodeSelectorTerms: []v1.NodeSelectorTerm{
+					{
+						MatchExpressions: matchExpressions,
+					},
+				},
+			},
+		}
+	}
+
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
 		log.Errorf("Failed to initialize K8S client when registering the CnsRegisterVolume "+
@@ -300,8 +380,9 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	// Get K8S storageclass name mapping the storagepolicy id.
-	storageClassName, err := getK8sStorageClassName(ctx, k8sclient, volume.StoragePolicyId, request.Namespace)
+	// Get K8S storageclass name mapping the storagepolicy id with Immediate volume binding mode
+	storageClassName, err := getK8sStorageClassNameWithImmediateBindingModeForPolicy(ctx, k8sclient, r.client,
+		volume.StoragePolicyId, request.Namespace, isPodVMOnStretchedSupervisorEnabled)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to find K8S Storageclass mapping storagepolicyId: %s and assigned to namespace: %s",
 			volume.StoragePolicyId, request.Namespace)
@@ -331,6 +412,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			}
 			pvSpec := getPersistentVolumeSpec(pvName, volumeID, capacityInMb,
 				accessMode, storageClassName, claimRef)
+			pvSpec.Spec.NodeAffinity = pvNodeAffinity
 			log.Debugf("PV spec is: %+v", pvSpec)
 			pv, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, pvSpec, metav1.CreateOptions{})
 			if err != nil {
@@ -398,6 +480,13 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			log.Errorf("Failed to create PVC with spec: %+v. Error: %+v", pvcSpec, err)
 			setInstanceError(ctx, r, instance,
 				fmt.Sprintf("Failed to create PVC: %s for volume with err: %+v", instance.Spec.PvcName, err))
+			// Delete PV created above.
+			err = k8sclient.CoreV1().PersistentVolumes().Delete(ctx, pvName, *metav1.NewDeleteOptions(0))
+			if err != nil {
+				log.Errorf("Delete PV %s failed with error: %+v", pvName, err)
+			}
+			setInstanceError(ctx, r, instance,
+				fmt.Sprintf("Delete PV %s failed with error: %+v", pvName, err))
 			return reconcile.Result{RequeueAfter: timeout}, nil
 		}
 	} else {
@@ -407,6 +496,104 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
 	if isBound {
 		log.Infof("PVC: %s is bound", instance.Spec.PvcName)
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor) {
+			// Create CNSVolumeInfo CR for static pv
+			capacityInBytes := capacityInMb * common.MbInBytes
+			capacity := resource.NewQuantity(capacityInBytes, resource.BinarySI)
+			err = r.volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, instance.Namespace,
+				volume.StoragePolicyId, storageClassName, vc.Config.Host, capacity)
+			if err != nil {
+				log.Errorf("failed to store volumeID %q namespace %s StoragePolicyID %q StorageClassName %q and vCenter %q "+
+					"in CNSVolumeInfo CR. Error: %+v", volumeID, instance.Namespace, volume.StoragePolicyId,
+					storageClassName, vc.Config.Host, err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+
+			restConfig, err := clientConfig.GetConfig()
+			if err != nil {
+				log.Errorf("failed to get Kubernetes config. Err: %+v", err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+			cnsOperatorClient, err := k8s.NewClientForGroup(ctx,
+				restConfig, apis.GroupName)
+			if err != nil {
+				log.Errorf("failed to create cns operator client. Err: %v", err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+
+			namespace := instance.Namespace
+			storagePolicyUsageCRName := storageClassName + "-" +
+				storagepolicyusagev1alpha1.NameSuffixForPVC
+			storagePolicyUsageCR := &storagepolicyusagev1alpha1.StoragePolicyUsage{}
+			err = cnsOperatorClient.Get(ctx, apitypes.NamespacedName{
+				Namespace: namespace,
+				Name:      storagePolicyUsageCRName},
+				storagePolicyUsageCR)
+			if err != nil {
+				log.Errorf("failed to fetch %s instance with name %q from supervisor namespace %q. Error: %+v",
+					storagepolicyusagev1alpha1.CRDSingular, storagePolicyUsageCRName,
+					namespace, err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+
+			// Patch an increase of "reserved" in storagePolicyUsageCR.
+			patchedStoragePolicyUsageCR := storagePolicyUsageCR.DeepCopy()
+			if storagePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage != nil {
+				patchedStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Add(*capacity)
+			} else {
+				var (
+					usedQty     resource.Quantity
+					reservedQty resource.Quantity
+				)
+				reservedQty = *resource.NewQuantity(capacity.Value(), capacity.Format)
+				patchedStoragePolicyUsageCR.Status = storagepolicyusagev1alpha1.StoragePolicyUsageStatus{
+					ResourceTypeLevelQuotaUsage: &storagepolicyusagev1alpha1.QuotaUsageDetails{
+						Reserved: &reservedQty,
+						Used:     &usedQty,
+					},
+				}
+			}
+			err = syncer.PatchStoragePolicyUsage(ctx, cnsOperatorClient, storagePolicyUsageCR,
+				patchedStoragePolicyUsageCR)
+			if err != nil {
+				log.Errorf("patching operation failed for StoragePolicyUsage CR: %q in namespace: %q. err: %v",
+					storagePolicyUsageCR.Name, storagePolicyUsageCR.Namespace, err)
+			}
+			// Retrieve the CR
+			currentStoragePolicyUsageCR := &storagepolicyusagev1alpha1.StoragePolicyUsage{}
+			finalStoragePolicyUsageCR := &storagepolicyusagev1alpha1.StoragePolicyUsage{}
+			key := apitypes.NamespacedName{Namespace: storagePolicyUsageCR.Namespace,
+				Name: storagePolicyUsageCR.Name}
+			err = cnsOperatorClient.Get(ctx, key, currentStoragePolicyUsageCR)
+			if err != nil {
+				log.Errorf("failed to get %s CR from supervisor namespace %q. Error: %+v",
+					storagePolicyUsageCR.Name, storagePolicyUsageCR.Namespace, err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+			finalStoragePolicyUsageCR = currentStoragePolicyUsageCR.DeepCopy()
+			// Decrease the Reserved field for StoragePolicyUsageCR
+			finalStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Sub(
+				*resource.NewQuantity(currentStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Value(),
+					currentStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Format))
+			// Increase the Used field for StoragePolicyUsageCR
+			finalStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Used.Add(
+				*currentStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved)
+			err = syncer.PatchStoragePolicyUsage(ctx, cnsOperatorClient, currentStoragePolicyUsageCR,
+				finalStoragePolicyUsageCR)
+			if err != nil {
+				log.Errorf("patching operation failed for StoragePolicyUsage CR: %q in namespace: %q. err: %v",
+					currentStoragePolicyUsageCR.Name, currentStoragePolicyUsageCR.Namespace, err)
+			} else {
+				log.Infof("Successfully decreased the reserved field by %v Mb "+
+					"for storagepolicyusage CR: %q in namespace: %q",
+					currentStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Value(), finalStoragePolicyUsageCR.Name,
+					finalStoragePolicyUsageCR.Namespace)
+				log.Infof("Successfully increased the used field by %v Mb "+
+					"for storagepolicyusage CR: %q in namespace: %q",
+					currentStoragePolicyUsageCR.Status.ResourceTypeLevelQuotaUsage.Reserved.Value(), finalStoragePolicyUsageCR.Name,
+					finalStoragePolicyUsageCR.Namespace)
+			}
+		}
 	} else {
 		log.Errorf("PVC: %s is not bound. Error: %+v", instance.Spec.PvcName, err)
 		setInstanceError(ctx, r, instance, fmt.Sprintf("PVC: %s is not bound", instance.Spec.PvcName))

@@ -118,6 +118,7 @@ func GetSharedDatastores(ctx context.Context, reqParams interface{}) (
 				if len(compatibleDatastores) == 0 {
 					log.Infof("No compatible shared datastores found for storage policy %q on vCenter: %q",
 						params.StoragePolicyID, params.Vcenter.Config.Host)
+					continue
 				} else {
 					log.Infof("Shared datastores compatible with storage policy %q are %+v for vCenter: %q",
 						params.StoragePolicyID, compatibleDatastores, params.Vcenter.Config.Host)
@@ -244,6 +245,54 @@ func getExpandedTopologySegments(ctx context.Context, requestedSegments map[stri
 	}
 
 	return completeTopologySegments, nil
+}
+
+// GetAllAccessibleDSInTopology returns a list of accessible datastores for requested topology.
+func GetAllAccessibleDSInTopology(ctx context.Context,
+	topologyArr []map[string]string, vcenter *cnsvsphere.VirtualCenter) ([]*cnsvsphere.DatastoreInfo,
+	error) {
+	log := logger.GetLogger(ctx)
+
+	var candidateDatastores []*cnsvsphere.DatastoreInfo
+	for _, reqSegment := range topologyArr {
+		// For each segment belonging to the VC, get the matching hosts.
+		hostMoRefs, err := common.GetHostsForSegment(ctx, reqSegment, vcenter)
+		if err != nil {
+			log.Errorf("failed to fetch hosts belonging to topology %+v. Error: %+v", reqSegment, err)
+			continue
+		}
+		if len(hostMoRefs) == 0 {
+			log.Infof("No hosts present in topology segment: %+v", reqSegment)
+			continue
+		}
+		// Get the union of all datastores accessible to each host.
+		accessibleDatastoresForHosts, err := cnsvsphere.GetAllAccessibleDatastoresForHosts(ctx, hostMoRefs)
+		if err != nil {
+			// If we do not find datastores for a particular segment, we move onto the next segment.
+			if err == cnsvsphere.ErrNoAccessibleDSFound {
+				log.Warnf("no datastores found for hosts %+v belonging to topology segment: %+v",
+					hostMoRefs, reqSegment)
+				continue
+			}
+			return nil, logger.LogNewErrorf(log, "failed to get accessible datastores for hosts: %+v "+
+				"in topology segment %+v in VC: %q. Error: %+v", hostMoRefs, reqSegment, vcenter.Config.Host, err)
+		}
+		// Add the datastore list to sharedDatastores without duplicates.
+		for _, candidateDS := range accessibleDatastoresForHosts {
+			var found bool
+			for _, ds := range candidateDatastores {
+				if ds.Info.Url == candidateDS.Info.Url {
+					found = true
+					break
+				}
+			}
+			if !found {
+				candidateDatastores = append(candidateDatastores, candidateDS)
+			}
+		}
+	}
+	log.Infof("Obtained candidate datastores: %+v", candidateDatastores)
+	return candidateDatastores, nil
 }
 
 // GetTopologyInfoFromNodes retrieves the topology information of the given

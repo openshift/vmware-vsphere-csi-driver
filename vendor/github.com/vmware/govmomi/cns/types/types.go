@@ -612,11 +612,23 @@ type CnsSnapshotNotFoundFault struct {
 	CnsFault
 
 	VolumeId   CnsVolumeId   `xml:"volumeId,omitempty"`
-	SnapshotId CnsSnapshotId `xml:"snapshotId"`
+	SnapshotId CnsSnapshotId `xml:"SnapshotId"`
 }
 
 func init() {
 	types.Add("CnsSnapshotNotFoundFault", reflect.TypeOf((*CnsSnapshotNotFoundFault)(nil)).Elem())
+}
+
+type CnsSnapshotCreatedFault struct {
+	CnsFault
+
+	VolumeId   CnsVolumeId                  `xml:"volumeId"`
+	SnapshotId CnsSnapshotId                `xml:"SnapshotId"`
+	Datastore  types.ManagedObjectReference `xml:"datastore"`
+}
+
+func init() {
+	types.Add("CnsSnapshotCreatedFault", reflect.TypeOf((*CnsSnapshotCreatedFault)(nil)).Elem())
 }
 
 type CnsConfigureVolumeACLs CnsConfigureVolumeACLsRequestType

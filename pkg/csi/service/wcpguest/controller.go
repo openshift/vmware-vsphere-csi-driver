@@ -17,6 +17,7 @@ limitations under the License.
 package wcpguest
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -29,8 +30,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
-	"golang.org/x/net/context"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -1244,7 +1244,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 
 			// SV PVC is already in FileSystemResizePending condition indicates
 			// that SV PV has already been expanded to required size.
-			if checkPVCCondition(ctx, svPVC, corev1.PersistentVolumeClaimFileSystemResizePending) {
+			if checkPVCCondition(ctx, svPVC, corev1.PersistentVolumeClaimFileSystemResizePending, gcPvcRequestSize) {
 				waitForSvPvcCondition = false
 			} else {
 				// SV PVC is not in FileSystemResizePending condition and GC PVC request size is equal to SV PVC capacity
@@ -1265,7 +1265,8 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		if waitForSvPvcCondition {
 			// Wait for Supervisor PVC to change status to FilesystemResizePending
 			err = checkForSupervisorPVCCondition(ctx, c.supervisorClient, svPVC,
-				corev1.PersistentVolumeClaimFileSystemResizePending, time.Duration(getResizeTimeoutInMin(ctx))*time.Minute)
+				corev1.PersistentVolumeClaimFileSystemResizePending, gcPvcRequestSize,
+				time.Duration(getResizeTimeoutInMin(ctx))*time.Minute)
 			if err != nil {
 				msg := fmt.Sprintf("failed to expand volume %s in namespace %s of supervisor cluster. Error: %+v",
 					volumeID, c.supervisorNamespace, err)
@@ -1623,5 +1624,10 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 
 func (c *controller) ControllerGetVolume(ctx context.Context, req *csi.ControllerGetVolumeRequest) (
 	*csi.ControllerGetVolumeResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "")
+}
+
+func (c *controller) ControllerModifyVolume(ctx context.Context, req *csi.ControllerModifyVolumeRequest) (
+	*csi.ControllerModifyVolumeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "")
 }

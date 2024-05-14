@@ -33,6 +33,7 @@ const (
 	attacherContainerName                      = "csi-attacher"
 	nginxImage                                 = "registry.k8s.io/nginx-slim:0.26"
 	nginxImage4upg                             = "registry.k8s.io/nginx-slim:0.27"
+	retainClaimPolicy                          = "Retain"
 	configSecret                               = "vsphere-config-secret"
 	contollerClusterKubeConfig                 = "CONTROLLER_CLUSTER_KUBECONFIG"
 	crdCNSNodeVMAttachment                     = "cnsnodevmattachments"
@@ -41,6 +42,9 @@ const (
 	crdtriggercsifullsyncsName                 = "csifullsync"
 	crdGroup                                   = "cns.vmware.com"
 	crdVersion                                 = "v1alpha1"
+	crdVirtualMachineImages                    = "virtualmachineimages"
+	crdVirtualMachines                         = "virtualmachines"
+	crdVirtualMachineService                   = "virtualmachineservice"
 	csiSystemNamespace                         = "vmware-system-csi"
 	csiFssCM                                   = "internal-feature-states.csi.vsphere.vmware.com"
 	csiVolAttrVolType                          = "vSphere CNS Block Volume"
@@ -63,27 +67,39 @@ const (
 	envClusterFlavor                           = "CLUSTER_FLAVOR"
 	envDiskSizeLarge                           = "LARGE_DISK_SIZE"
 	envCSINamespace                            = "CSI_NAMESPACE"
+	envContentLibraryUrl                       = "CONTENT_LIB_URL"
+	envContentLibraryUrlSslThumbprint          = "CONTENT_LIB_THUMBPRINT"
 	envEsxHostIP                               = "ESX_TEST_HOST_IP"
 	envFileServiceDisabledSharedDatastoreURL   = "FILE_SERVICE_DISABLED_SHARED_VSPHERE_DATASTORE_URL"
 	envFullSyncWaitTime                        = "FULL_SYNC_WAIT_TIME"
+	envGatewayVmIp                             = "GATEWAY_VM_IP"
+	envGatewayVmUser                           = "GATEWAY_VM_USER"
+	envGatewayVmPasswd                         = "GATEWAY_VM_PASSWD"
+	envHciMountRemoteDs                        = "USE_HCI_MESH_DS"
 	envInaccessibleZoneDatastoreURL            = "INACCESSIBLE_ZONE_VSPHERE_DATASTORE_URL"
 	envNonSharedStorageClassDatastoreURL       = "NONSHARED_VSPHERE_DATASTORE_URL"
 	envPandoraSyncWaitTime                     = "PANDORA_SYNC_WAIT_TIME"
 	envK8sNodesUpWaitTime                      = "K8S_NODES_UP_WAIT_TIME"
 	envRegionZoneWithNoSharedDS                = "TOPOLOGY_WITH_NO_SHARED_DATASTORE"
 	envRegionZoneWithSharedDS                  = "TOPOLOGY_WITH_SHARED_DATASTORE"
+	envRemoteHCIDsUrl                          = "REMOTE_HCI_DS_URL"
 	envSharedDatastoreURL                      = "SHARED_VSPHERE_DATASTORE_URL"
 	envSharedVVOLDatastoreURL                  = "SHARED_VVOL_DATASTORE_URL"
 	envSharedNFSDatastoreURL                   = "SHARED_NFS_DATASTORE_URL"
 	envSharedVMFSDatastoreURL                  = "SHARED_VMFS_DATASTORE_URL"
 	envSharedVMFSDatastore2URL                 = "SHARED_VMFS_DATASTORE2_URL"
+	envVMClass                                 = "VM_CLASS"
 	envVsanDirectSetup                         = "USE_VSAN_DIRECT_DATASTORE_IN_WCP"
 	envVsanDDatastoreURL                       = "SHARED_VSAND_DATASTORE_URL"
 	envVsanDDatastore2URL                      = "SHARED_VSAND_DATASTORE2_URL"
 	envStoragePolicyNameForNonSharedDatastores = "STORAGE_POLICY_FOR_NONSHARED_DATASTORES"
 	envStoragePolicyNameForSharedDatastores    = "STORAGE_POLICY_FOR_SHARED_DATASTORES"
+	envStoragePolicyNameForHCIRemoteDatastores = "STORAGE_POLICY_FOR_HCI_REMOTE_DS"
 	envStoragePolicyNameForVsanVmfsDatastores  = "STORAGE_POLICY_FOR_VSAN_VMFS_DATASTORES"
 	envStoragePolicyNameForSharedDatastores2   = "STORAGE_POLICY_FOR_SHARED_DATASTORES_2"
+	envStoragePolicyNameForVmfsDatastores      = "STORAGE_POLICY_FOR_VMFS_DATASTORES"
+	envStoragePolicyNameForNfsDatastores       = "STORAGE_POLICY_FOR_NFS_DATASTORES"
+	envStoragePolicyNameForVvolDatastores      = "STORAGE_POLICY_FOR_VVOL_DATASTORES"
 	envStoragePolicyNameFromInaccessibleZone   = "STORAGE_POLICY_FROM_INACCESSIBLE_ZONE"
 	envStoragePolicyNameWithThickProvision     = "STORAGE_POLICY_WITH_THICK_PROVISIONING"
 	envSupervisorClusterNamespace              = "SVC_NAMESPACE"
@@ -94,9 +110,11 @@ const (
 	envNumberOfGoRoutines                      = "NUMBER_OF_GO_ROUTINES"
 	envWorkerPerRoutine                        = "WORKER_PER_ROUTINE"
 	envVmdkDiskURL                             = "DISK_URL_PATH"
+	envVmsvcVmImageName                        = "VMSVC_IMAGE_NAME"
 	envVolumeOperationsScale                   = "VOLUME_OPS_SCALE"
 	envComputeClusterName                      = "COMPUTE_CLUSTER_NAME"
 	envTKGImage                                = "TKG_IMAGE_NAME"
+	envVmknic4Vsan                             = "VMKNIC_FOR_VSAN"
 	execCommand                                = "/bin/df -T /mnt/volume1 | " +
 		"/bin/awk 'FNR == 2 {print $2}' > /mnt/volume1/fstype && while true ; do sleep 2 ; done"
 	execRWXCommandPod = "echo 'Hello message from Pod' > /mnt/volume1/Pod.html  && " +
@@ -111,6 +129,8 @@ const (
 	evacMModeType                             = "evacuateAllData"
 	fcdName                                   = "BasicStaticFCD"
 	fileSizeInMb                              = int64(2048)
+	filePathPod1                              = "/mnt/volume1/Pod1.html"
+	filePathFsType                            = "/mnt/volume1/fstype"
 	fullSyncFss                               = "trigger-csi-fullsync"
 	gcNodeUser                                = "vmware-system-user"
 	gcKubeConfigPath                          = "GC_KUBE_CONFIG"
@@ -184,6 +204,7 @@ const (
 	vanillaClusterDistribution                = "CSI-Vanilla"
 	vanillaClusterDistributionWithSpecialChar = "CSI-\tVanilla-#Test"
 	vcClusterAPI                              = "/api/vcenter/namespace-management/clusters"
+	vcRestSessionIdHeaderName                 = "vmware-api-session-Id"
 	vpxdServiceName                           = "vpxd"
 	vpxdReducedTaskTimeoutSecsInt             = 90
 	vSphereCSIControllerPodNamePrefix         = "vsphere-csi-controller"
@@ -199,12 +220,12 @@ const (
 	waitTimeForCNSNodeVMAttachmentReconciler  = 30 * time.Second
 	wcpServiceName                            = "wcp"
 	vmcWcpHost                                = "10.2.224.24" //This is the LB IP of VMC WCP and its constant
-	devopsTKG                                 = "test-cluster-e2e-script-2"
-	cloudadminTKG                             = "test-cluster-e2e-script-3"
+	devopsTKG                                 = "test-cluster-e2e-script"
+	cloudadminTKG                             = "test-cluster-e2e-script-1"
 	vmOperatorAPI                             = "/apis/vmoperator.vmware.com/v1alpha1/"
 	devopsUser                                = "testuser"
 	zoneKey                                   = "failure-domain.beta.kubernetes.io/zone"
-	tkgAPI                                    = "/apis/run.tanzu.vmware.com/v1alpha1/namespaces" +
+	tkgAPI                                    = "/apis/run.tanzu.vmware.com/v1alpha3/namespaces" +
 		"/test-gc-e2e-demo-ns/tanzukubernetesclusters/"
 	topologykey                                = "topology.csi.vmware.com"
 	topologyMap                                = "TOPOLOGY_MAP"
@@ -220,6 +241,7 @@ const (
 	topologyCluster                            = "TOPOLOGY_CLUSTERS"
 	topologyLength                             = 5
 	tkgshaTopologyLevels                       = 1
+	vmClassBestEffortSmall                     = "best-effort-small"
 	vmcPrdEndpoint                             = "https://vmc.vmware.com/vmc/api/orgs/"
 	vsphereClusterIdConfigMapName              = "vsphere-csi-cluster-id"
 	authAPI                                    = "https://console.cloud.vmware.com/csp/gateway/am/api/auth" +
@@ -251,16 +273,16 @@ const (
 	wcp                 = "wcp"
 	tkg                 = "tkg"
 	vanilla             = "vanilla"
-	topology            = "topology"
 	preferential        = "preferential"
 	vsphereConfigSecret = "vsphereConfigSecret"
 	snapshot            = "snapshot"
 	stable              = "stable"
-	newTests            = "newTests"
+	newTest             = "newTest"
 	multiVc             = "multiVc"
 	block               = "block"
 	file                = "file"
 	core                = "core"
+	hci                 = "hci"
 	p0                  = "p0"
 	p1                  = "p1"
 	p2                  = "p2"
@@ -275,6 +297,8 @@ const (
 	semiAutomated       = "semiAutomated"
 	level2              = "level2"
 	level5              = "level5"
+	negative            = "negative"
+	listVolume          = "listVolume"
 )
 
 // The following variables are required to know cluster type to run common e2e
@@ -285,6 +309,8 @@ var (
 	guestCluster         bool
 	rwxAccessMode        bool
 	wcpVsanDirectCluster bool
+	vcptocsi             bool
+	windowsEnv           bool
 )
 
 // For busybox pod image
@@ -356,12 +382,31 @@ var (
 	envStoragePolicyNameInVC1VC2      = "STORAGE_POLICY_NAME_COMMON_IN_VC1_VC2"
 	envPreferredDatastoreUrlVC1       = "PREFERRED_DATASTORE_URL_VC1"
 	envPreferredDatastoreUrlVC2       = "PREFERRED_DATASTORE_URL_VC2"
+	envTestbedInfoJsonPathVC1         = "TESTBEDINFO_JSON_VC1"
+	envTestbedInfoJsonPathVC2         = "TESTBEDINFO_JSON_VC2"
+	envTestbedInfoJsonPathVC3         = "TESTBEDINFO_JSON_VC3"
 )
 
 // VolumeSnapshotClass env variables for tkg-snapshot
 var (
 	envVolSnapClassDel = "VOLUME_SNAPSHOT_CLASS_DELETE"
 	deletionPolicy     = "Delete"
+)
+
+// windows env variables
+var (
+	envWindowsUser    = "WINDOWS_USER"
+	envWindowsPwd     = "WINDOWS_PWD"
+	invalidNtfsFSType = "NtFs1"
+	ntfsFSType        = "NTFS"
+	windowsImageOnMcr = "servercore"
+	windowsExecCmd    = "while (1) " +
+		" { Add-Content -Encoding Ascii /mnt/volume1/fstype.txt $([System.IO.DriveInfo]::getdrives() " +
+		"| Where-Object {$_.DriveType -match 'Fixed'} | Select-Object -Property DriveFormat); sleep 1 }"
+	windowsExecRWXCommandPod = "while (1) " +
+		" { Add-Content /mnt/volume1/Pod.html 'Hello message from Pod'; sleep 1 }"
+	windowsExecRWXCommandPod1 = "while (1) " +
+		" { Add-Content /mnt/volume1/Pod1.html 'Hello message from Pod1'; sleep 1 }"
 )
 
 // GetAndExpectStringEnvVar parses a string from env variable.
@@ -402,5 +447,16 @@ func setClusterFlavor(clusterFlavor cnstypes.CnsClusterFlavor) {
 	kind := os.Getenv("ACCESS_MODE")
 	if strings.TrimSpace(string(kind)) == "RWX" {
 		rwxAccessMode = true
+	}
+
+	// Check if its the vcptocsi tesbed
+	mode := os.Getenv("VCPTOCSI")
+	if strings.TrimSpace(string(mode)) == "1" {
+		vcptocsi = true
+	}
+	//Check if its windows env
+	workerNode := os.Getenv("WORKER_TYPE")
+	if strings.TrimSpace(string(workerNode)) == "WINDOWS" {
+		windowsEnv = true
 	}
 }

@@ -94,8 +94,8 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			}
 		}
 
-		volumeManager, err = volumes.GetManager(ctx, vCenter, nil,
-			false, false, false, commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ListViewPerf))
+		volumeManager, err = volumes.GetManager(ctx, vCenter, nil, false, false, false,
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.ListViewPerf), clusterFlavor)
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 		}
@@ -149,14 +149,20 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 				stretchedSupervisor = true
 			}
 		}
-		if !stretchedSupervisor {
+		if stretchedSupervisor {
+			log.Info("Observed stretchedSupervisor setup")
+		}
+		if !stretchedSupervisor ||
+			(stretchedSupervisor && commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor)) {
 			// Create CnsRegisterVolume CRD from manifest.
+			log.Infof("Creating %q CRD", cnsoperatorv1alpha1.CnsRegisterVolumePlural)
 			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, cnsoperatorconfig.EmbedCnsRegisterVolumeCRFile,
 				cnsoperatorconfig.EmbedCnsRegisterVolumeCRFileName)
 			if err != nil {
 				log.Errorf("Failed to create %q CRD. Err: %+v", cnsoperatorv1alpha1.CnsRegisterVolumePlural, err)
 				return err
 			}
+			log.Infof("%q CRD is created successfully", cnsoperatorv1alpha1.CnsRegisterVolumePlural)
 		}
 
 		if !stretchedSupervisor {
@@ -181,8 +187,10 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			}
 		}
 
-		if !stretchedSupervisor {
+		if !stretchedSupervisor ||
+			(stretchedSupervisor && commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor)) {
 			// Clean up routine to cleanup successful CnsRegisterVolume instances.
+			log.Info("Starting go routine to cleanup successful CnsRegisterVolume instances.")
 			err = watcher(ctx, cnsOperator)
 			if err != nil {
 				log.Error("Failed to watch on config file for changes to CnsRegisterVolumesCleanupIntervalInMin. Error: %+v",

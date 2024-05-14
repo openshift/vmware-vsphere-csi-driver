@@ -32,6 +32,9 @@ const (
 	// VSphere70u3Version is a 3 digit value to indicate the minimum vSphere
 	// version to use query volume async API.
 	VSphere70u3Version int = 703
+	// VSphere80u3Version is a 3 digit value to indicate the minimum vSphere
+	// version to ensure calling supported 8.0u3 APIs
+	VSphere80u3Version int = 803
 )
 
 var (
@@ -97,6 +100,17 @@ func IsVimFaultNotFoundError(err error) bool {
 		_, isNotFoundError = soap.ToVimFault(err).(*types.NotFound)
 	}
 	return isNotFoundError
+}
+
+// IsCnsSnapshotCreatedFaultError checks if err is the CnsSnapshotCreatedFault fault returned by
+// CNS CreateSnapshots API. This fault is returned by CNS in case snapshot creation is successful,
+// but post-processing failed (like update db failed).
+func IsCnsSnapshotCreatedFaultError(err error) bool {
+	isCnsSnapshotCreatedFaultError := false
+	if soap.IsVimFault(err) {
+		_, isCnsSnapshotCreatedFaultError = soap.ToVimFault(err).(cnstypes.CnsSnapshotCreatedFault)
+	}
+	return isCnsSnapshotCreatedFaultError
 }
 
 // IsCnsSnapshotNotFoundError checks if err is the CnsSnapshotNotFoundFault fault returned by CNS QuerySnapshots API
@@ -174,11 +188,6 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 		return nil, err
 	}
 
-	var targetDatastoreUrlsForFile []string
-	if strings.TrimSpace(cfg.VirtualCenter[host].TargetvSANFileShareDatastoreURLs) != "" {
-		targetDatastoreUrlsForFile = strings.Split(cfg.VirtualCenter[host].TargetvSANFileShareDatastoreURLs, ",")
-	}
-
 	var targetvSANClustersForFile []string
 	if strings.TrimSpace(cfg.VirtualCenter[host].TargetvSANFileShareClusters) != "" {
 		targetvSANClustersForFile = strings.Split(cfg.VirtualCenter[host].TargetvSANFileShareClusters, ",")
@@ -200,19 +209,18 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 	vcThumbprint := cfg.Global.Thumbprint
 
 	vcConfig := &VirtualCenterConfig{
-		Host:                             host,
-		Port:                             port,
-		CAFile:                           vcCAFile,
-		Thumbprint:                       vcThumbprint,
-		Username:                         cfg.VirtualCenter[host].User,
-		Password:                         cfg.VirtualCenter[host].Password,
-		Insecure:                         cfg.VirtualCenter[host].InsecureFlag,
-		TargetvSANFileShareDatastoreURLs: targetDatastoreUrlsForFile,
-		TargetvSANFileShareClusters:      targetvSANClustersForFile,
-		VCClientTimeout:                  vcClientTimeout,
-		QueryLimit:                       cfg.Global.QueryLimit,
-		ListVolumeThreshold:              cfg.Global.ListVolumeThreshold,
-		MigrationDataStoreURL:            cfg.VirtualCenter[host].MigrationDataStoreURL,
+		Host:                        host,
+		Port:                        port,
+		CAFile:                      vcCAFile,
+		Thumbprint:                  vcThumbprint,
+		Username:                    cfg.VirtualCenter[host].User,
+		Password:                    cfg.VirtualCenter[host].Password,
+		Insecure:                    cfg.VirtualCenter[host].InsecureFlag,
+		TargetvSANFileShareClusters: targetvSANClustersForFile,
+		VCClientTimeout:             vcClientTimeout,
+		QueryLimit:                  cfg.Global.QueryLimit,
+		ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
+		MigrationDataStoreURL:       cfg.VirtualCenter[host].MigrationDataStoreURL,
 	}
 
 	log.Debugf("Setting the queryLimit = %v, ListVolumeThreshold = %v", vcConfig.QueryLimit, vcConfig.ListVolumeThreshold)
@@ -223,16 +231,6 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 		}
 	}
 
-	// Validate if target file volume datastores present are vsan datastores.
-	for idx := range vcConfig.TargetvSANFileShareDatastoreURLs {
-		vcConfig.TargetvSANFileShareDatastoreURLs[idx] = strings.TrimSpace(vcConfig.TargetvSANFileShareDatastoreURLs[idx])
-		if vcConfig.TargetvSANFileShareDatastoreURLs[idx] == "" {
-			return nil, logger.LogNewError(log, "invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
-		}
-		if !strings.HasPrefix(vcConfig.TargetvSANFileShareDatastoreURLs[idx], "ds:///vmfs/volumes/vsan:") {
-			return nil, logger.LogNewError(log, "non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
-		}
-	}
 	return vcConfig, nil
 }
 
@@ -250,10 +248,6 @@ func GetVirtualCenterConfigs(ctx context.Context, cfg *config.Config) ([]*Virtua
 		port, err := strconv.Atoi(cfg.VirtualCenter[vCenterIP].VCenterPort)
 		if err != nil {
 			return nil, err
-		}
-		var targetDatastoreUrlsForFile []string
-		if strings.TrimSpace(cfg.VirtualCenter[vCenterIP].TargetvSANFileShareDatastoreURLs) != "" {
-			targetDatastoreUrlsForFile = strings.Split(cfg.VirtualCenter[vCenterIP].TargetvSANFileShareDatastoreURLs, ",")
 		}
 
 		var targetvSANClustersForFile []string
@@ -276,18 +270,17 @@ func GetVirtualCenterConfigs(ctx context.Context, cfg *config.Config) ([]*Virtua
 		vcThumbprint := cfg.Global.Thumbprint
 
 		vcConfig := &VirtualCenterConfig{
-			Host:                             vCenterIP,
-			Port:                             port,
-			CAFile:                           vcCAFile,
-			Thumbprint:                       vcThumbprint,
-			Username:                         cfg.VirtualCenter[vCenterIP].User,
-			Password:                         cfg.VirtualCenter[vCenterIP].Password,
-			Insecure:                         cfg.VirtualCenter[vCenterIP].InsecureFlag,
-			TargetvSANFileShareDatastoreURLs: targetDatastoreUrlsForFile,
-			TargetvSANFileShareClusters:      targetvSANClustersForFile,
-			VCClientTimeout:                  vcClientTimeout,
-			QueryLimit:                       cfg.Global.QueryLimit,
-			ListVolumeThreshold:              cfg.Global.ListVolumeThreshold,
+			Host:                        vCenterIP,
+			Port:                        port,
+			CAFile:                      vcCAFile,
+			Thumbprint:                  vcThumbprint,
+			Username:                    cfg.VirtualCenter[vCenterIP].User,
+			Password:                    cfg.VirtualCenter[vCenterIP].Password,
+			Insecure:                    cfg.VirtualCenter[vCenterIP].InsecureFlag,
+			TargetvSANFileShareClusters: targetvSANClustersForFile,
+			VCClientTimeout:             vcClientTimeout,
+			QueryLimit:                  cfg.Global.QueryLimit,
+			ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
 		}
 
 		log.Debugf("Setting the queryLimit = %v, ListVolumeThreshold = %v", vcConfig.QueryLimit, vcConfig.ListVolumeThreshold)
@@ -295,17 +288,6 @@ func GetVirtualCenterConfigs(ctx context.Context, cfg *config.Config) ([]*Virtua
 			vcConfig.DatacenterPaths = strings.Split(cfg.VirtualCenter[vCenterIP].Datacenters, ",")
 			for idx := range vcConfig.DatacenterPaths {
 				vcConfig.DatacenterPaths[idx] = strings.TrimSpace(vcConfig.DatacenterPaths[idx])
-			}
-		}
-
-		// Validate if target file volume datastores present are vsan datastores.
-		for idx := range vcConfig.TargetvSANFileShareDatastoreURLs {
-			vcConfig.TargetvSANFileShareDatastoreURLs[idx] = strings.TrimSpace(vcConfig.TargetvSANFileShareDatastoreURLs[idx])
-			if vcConfig.TargetvSANFileShareDatastoreURLs[idx] == "" {
-				return nil, logger.LogNewError(log, "invalid datastore URL specified in targetvSANFileShareDatastoreURLs")
-			}
-			if !strings.HasPrefix(vcConfig.TargetvSANFileShareDatastoreURLs[idx], "ds:///vmfs/volumes/vsan:") {
-				return nil, logger.LogNewError(log, "non vSAN datastore specified for targetvSANFileShareDatastoreURLs")
 			}
 		}
 		VirtualCenterConfigs = append(VirtualCenterConfigs, vcConfig)
@@ -414,14 +396,10 @@ func GetTagManager(ctx context.Context, vc *VirtualCenter) (*tags.Manager, error
 // managed datastores of given VC cluster.
 // The 1st output parameter will be shared datastores.
 // The 2nd output parameter will be vSAN-direct managed datastores.
-func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clusterID string) (
-	[]*DatastoreInfo, []*DatastoreInfo, error) {
+// NOTE: The second output will be an empty list if `includevSANDirectDatastores` is set to false.
+func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clusterID string,
+	includevSANDirectDatastores bool) ([]*DatastoreInfo, []*DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
-	// Get all vsan direct datastore urls in VC. Later, filter in this cluster.
-	allVsanDirectUrls, err := getVsanDirectDatastores(ctx, vc, clusterID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get vSAN Direct VMFS datastores. Err: %+v", err)
-	}
 
 	// Find datastores shared across all hosts in given cluster.
 	hosts, err := vc.GetHostsByCluster(ctx, clusterID)
@@ -431,6 +409,7 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 	if len(hosts) == 0 {
 		return nil, nil, fmt.Errorf("empty List of hosts returned from VC")
 	}
+
 	sharedDatastores := make([]*DatastoreInfo, 0)
 	vsanDirectDatastores := make([]*DatastoreInfo, 0)
 	for index, host := range hosts {
@@ -440,7 +419,16 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 		}
 		if index == 0 {
 			for _, accessibleDs := range accessibleDatastores {
-				if allVsanDirectUrls[accessibleDs.Info.Url] {
+				var dsType string
+				if includevSANDirectDatastores {
+					_, dsType, err = accessibleDs.GetDatastoreURLAndType(ctx)
+					if err != nil {
+						return nil, nil, logger.LogNewErrorf(log,
+							"Unable to find datastore type and URL for %q. Error: %+v",
+							accessibleDs.Reference().Value, err)
+					}
+				}
+				if dsType == vsanDType {
 					vsanDirectDatastores = append(vsanDirectDatastores, accessibleDs)
 				} else {
 					sharedDatastores = append(sharedDatastores, accessibleDs)
@@ -449,7 +437,16 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 		} else {
 			var sharedAccessibleDatastores []*DatastoreInfo
 			for _, accessibleDs := range accessibleDatastores {
-				if allVsanDirectUrls[accessibleDs.Info.Url] {
+				var dsType string
+				if includevSANDirectDatastores {
+					_, dsType, err = accessibleDs.GetDatastoreURLAndType(ctx)
+					if err != nil {
+						return nil, nil, logger.LogNewErrorf(log,
+							"Unable to find datastore type and URL for %q. Error: %+v",
+							accessibleDs.Reference().Value, err)
+					}
+				}
+				if dsType == vsanDType {
 					vsanDirectDatastores = append(vsanDirectDatastores, accessibleDs)
 					continue
 				}
@@ -472,33 +469,6 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 	log.Infof("Found shared datastores: %+v and vSAN Direct datastores: %+v", sharedDatastores,
 		vsanDirectDatastores)
 	return sharedDatastores, vsanDirectDatastores, nil
-}
-
-// getVsanDirectDatastores returns the datastore URLs of all the vSAN-Direct
-// managed datatores in the given VirtualCenter.
-func getVsanDirectDatastores(ctx context.Context, vc *VirtualCenter, clusterID string) (map[string]bool, error) {
-	log := logger.GetLogger(ctx)
-	var datastores = make(map[string]bool)
-
-	// Get all datastores in this cluster.
-	datastoreInfos, err := vc.GetDatastoresByCluster(ctx, clusterID)
-	if err != nil {
-		log.Warnf("Not able to fetch datastores in cluster %q. Err: %v", clusterID, err)
-		return nil, err
-	}
-
-	// Filter them by datastore type of vsanD.
-	for _, dsInfo := range datastoreInfos {
-		dsURL, dsType, err := dsInfo.GetDatastoreURLAndType(ctx)
-		if err != nil {
-			log.Errorf("Not able to find datastore type and url for %s. Err: %v", dsInfo.Reference().Value, err)
-			return nil, err
-		}
-		if dsType == vsanDType {
-			datastores[dsURL] = true
-		}
-	}
-	return datastores, nil
 }
 
 // GetDatastoreInfoByURL returns info of a datastore found in given cluster
@@ -535,7 +505,7 @@ func isVsan67u3Release(ctx context.Context, m *defaultVirtualCenterManager, host
 // IsvSphereVersion70U3orAbove checks if specified version is 7.0 Update 3 or
 // higher. The method takes aboutInfo as input which contains details about
 // VC version, build number and so on. If the version is 7.0 Update 3 or higher,
-// returns true, else returns false along with appropriate errors for the failue.
+// returns true, else returns false along with appropriate errors for the failure.
 func IsvSphereVersion70U3orAbove(ctx context.Context, aboutInfo types.AboutInfo) (bool, error) {
 	log := logger.GetLogger(ctx)
 	items := strings.Split(aboutInfo.Version, ".")
@@ -548,6 +518,29 @@ func IsvSphereVersion70U3orAbove(ctx context.Context, aboutInfo types.AboutInfo)
 		}
 		// Check if the current vSphere version is 7.0.3 or higher.
 		if vSphereVersionInt >= VSphere70u3Version {
+			return true, nil
+		}
+	}
+	// For all other versions.
+	return false, nil
+}
+
+// IsvSphereVersion80U3orAbove checks if specified version is 8.0 Update 3 or
+// higher. The method takes aboutInfo as input which contains details about
+// VC version, build number and so on. If the version is 8.0 Update 3 or higher,
+// returns true, else returns false along with appropriate errors for the failure.
+func IsvSphereVersion80U3orAbove(ctx context.Context, aboutInfo types.AboutInfo) (bool, error) {
+	log := logger.GetLogger(ctx)
+	items := strings.Split(aboutInfo.Version, ".")
+	version := strings.Join(items[:], "")
+	// Convert version string to int: e.g. "8.0.3" to 803, "8.0.3.1" to 803.
+	if len(version) >= 3 {
+		vSphereVersionInt, err := strconv.Atoi(version[0:3])
+		if err != nil {
+			return false, logger.LogNewErrorf(log, "error while converting version %q to integer, err %+v", version, err)
+		}
+		// Check if the current vSphere version is 8.0.3 or higher.
+		if vSphereVersionInt >= VSphere80u3Version {
 			return true, nil
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -26,10 +27,13 @@ import (
 	gomega "github.com/onsi/gomega"
 	"k8s.io/kubernetes/test/e2e/framework"
 	"k8s.io/kubernetes/test/e2e/framework/config"
+
+	_ "k8s.io/kubernetes/test/e2e/framework/debug/init"
 )
 
 const kubeconfigEnvVar = "KUBECONFIG"
 const busyBoxImageEnvVar = "BUSYBOX_IMAGE"
+const windowsImageEnvVar = "WINDOWS_IMAGE"
 
 func init() {
 	// k8s.io/kubernetes/tests/e2e/framework requires env KUBECONFIG to be set
@@ -46,6 +50,10 @@ func init() {
 	if os.Getenv(busyBoxImageEnvVar) != "" {
 		busyBoxImageOnGcr = os.Getenv(busyBoxImageEnvVar)
 	}
+
+	if os.Getenv(windowsImageEnvVar) != "" {
+		windowsImageOnMcr = os.Getenv(windowsImageEnvVar)
+	}
 }
 
 func TestE2E(t *testing.T) {
@@ -59,6 +67,9 @@ func TestE2E(t *testing.T) {
 func handleFlags() {
 	config.CopyFlags(config.Flags, flag.CommandLine)
 	framework.RegisterCommonFlags(flag.CommandLine)
-	framework.RegisterClusterFlags(flag.CommandLine)
+	framework.TestContext.KubeConfig = os.Getenv(kubeconfigEnvVar)
+	mydir, err := os.Getwd()
+	framework.ExpectNoError(err)
+	framework.TestContext.RepoRoot = strings.ReplaceAll(mydir, "/tests/e2e", "")
 	flag.Parse()
 }

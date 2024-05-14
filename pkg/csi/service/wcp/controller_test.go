@@ -178,7 +178,8 @@ func getControllerTest(t *testing.T) *controllerTest {
 			t.Fatalf("Failed to create co agnostic interface. err=%v", err)
 		}
 
-		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true, false, false, false)
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, fakeOpStore, true, false, false, false,
+			cnstypes.CnsClusterFlavorWorkload)
 		if err != nil {
 			t.Fatalf("failed to create an instance of volume manager. err=%v", err)
 		}
@@ -204,7 +205,8 @@ func getControllerTest(t *testing.T) *controllerTest {
 }
 
 func getFakeDatastores(ctx context.Context, vc *cnsvsphere.VirtualCenter,
-	clusterID string) ([]*cnsvsphere.DatastoreInfo, []*cnsvsphere.DatastoreInfo, error) {
+	clusterID string, includevSANDirectDatastores bool) ([]*cnsvsphere.DatastoreInfo,
+	[]*cnsvsphere.DatastoreInfo, error) {
 	var sharedDatastoreURL string
 	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
 		sharedDatastoreURL = v

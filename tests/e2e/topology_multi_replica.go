@@ -215,7 +215,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			19. Verify StatefulSet Pod's, PVC's are deleted successfully.
 		*/
 
-		ginkgo.It("Volume provisioning when CSI Provisioner is deleted during statefulset creation", func() {
+		ginkgo.It("Volume provisioning when CSI Provisioner is deleted during statefulset "+
+			"creation", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-provisioner"
@@ -415,7 +417,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			15. Delete Statefulsets and Delete PVCs.
 		*/
 
-		ginkgo.It("Volume provisioning when CSI Attacher is deleted during statefulset creation", func() {
+		ginkgo.It("Volume provisioning when CSI Attacher is deleted during statefulset "+
+			"creation", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-attacher"
@@ -597,7 +601,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			18. Delete Statefulsets and Delete PVCs.
 		*/
 
-		ginkgo.It("Volume provisioning when node daemonset restarts during statefulset creation", func() {
+		ginkgo.It("Volume provisioning when node daemonset restarts during statefulset "+
+			"creation", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-attacher"
@@ -768,7 +774,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 		*/
 
 		ginkgo.It("Verify behaviour when CSI-resizer deleted and VSAN-Health "+
-			"is down during online Volume expansion", func() {
+			"is down during online Volume expansion", ginkgo.Label(p1, block, vanilla, level5,
+			stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-resizer"
@@ -969,7 +977,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			and filesystem for the volume on the pod should also be expanded.
 			8. Delete Pod, PVC and SC
 		*/
-		ginkgo.It("Verify the behaviour when CSI-resizer deleted during offline volume expansion", func() {
+		ginkgo.It("Verify the behaviour when CSI-resizer deleted during offline "+
+			"volume expansion", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-resizer"
@@ -1177,7 +1187,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			10. Delete deployments and Delete PVCs.
 		*/
 
-		ginkgo.It("Verify behaviour when CSI Attacher is deleted during deployments pod creation", func() {
+		ginkgo.It("Verify behaviour when CSI Attacher is deleted during deployments pod "+
+			"creation", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-attacher"
@@ -1318,7 +1330,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			16. Delete Statefulsets and Delete PVCs.
 		*/
 
-		ginkgo.It("Volume provisioning when sps service is down during statefulset creation", func() {
+		ginkgo.It("Volume provisioning when sps service is down during statefulset "+
+			"creation", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-provisioner"
@@ -1509,7 +1523,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			9. Delete POD's, PVC's and SC.
 		*/
 
-		ginkgo.It("Verify dynamic provisioning with Thick policy when CSI-provisioner goes down", func() {
+		ginkgo.It("Verify dynamic provisioning with Thick policy when CSI-provisioner "+
+			"goes down", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-provisioner"
@@ -1685,7 +1701,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			15. Delete POD, PVC and SC
 		*/
 
-		ginkgo.It("Password rotation during multiple pvc creations", func() {
+		ginkgo.It("Password rotation during multiple pvc creations", ginkgo.Label(p2, block, vanilla,
+			level5, stable, negative), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "csi-provisioner"
@@ -1922,7 +1940,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			15. Expect all volume metadata, PVC metadata, Pod metadata should be present on the CNS.
 			16. Delete the POD's , PVC's and PV's
 		*/
-		ginkgo.It("Verify behaviour when CSI syncer is deleted and check fullsync", func() {
+		ginkgo.It("Verify behaviour when CSI syncer is deleted and check "+
+			"fullsync", ginkgo.Label(p1, block, vanilla, level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "vsphere-syncer"
@@ -2203,7 +2223,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 		   11. Verify CNS metadata for PVC's and PV's , Make sure label entries should got removed
 		*/
 
-		ginkgo.It("Verify Label update when syncer container goes down", func() {
+		ginkgo.It("Verify Label update when syncer container goes down", ginkgo.Label(p1, block, vanilla,
+			level5, stable), func() {
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			container_name = "vsphere-syncer"

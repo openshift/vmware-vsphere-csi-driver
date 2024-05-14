@@ -17,6 +17,7 @@ limitations under the License.
 package common
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +29,6 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
-	"golang.org/x/net/context"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -56,9 +56,8 @@ type VanillaCreateBlockVolParamsForMultiVC struct {
 
 // CreateBlockVolumeUtil is the helper function to create CNS block volume.
 func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, manager *Manager,
-	spec *CreateVolumeSpec, sharedDatastores []*vsphere.DatastoreInfo,
-	filterSuspendedDatastores bool, useSupervisorId,
-	checkCompatibleDataStores bool) (*cnsvolume.CnsVolumeInfo, string, error) {
+	spec *CreateVolumeSpec, sharedDatastores []*vsphere.DatastoreInfo, filterSuspendedDatastores bool, useSupervisorId,
+	checkCompatibleDataStores bool, extraParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error) {
 	log := logger.GetLogger(ctx)
 	vc, err := GetVCenter(ctx, manager)
 	if err != nil {
@@ -306,7 +305,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 	}
 
 	log.Debugf("vSphere CSI driver creating volume %s with create spec %+v", spec.Name, spew.Sdump(createSpec))
-	volumeInfo, faultType, err := manager.VolumeManager.CreateVolume(ctx, createSpec)
+	volumeInfo, faultType, err := manager.VolumeManager.CreateVolume(ctx, createSpec, extraParams)
 	if err != nil {
 		log.Errorf("failed to create disk %s with error %+v faultType %q", spec.Name, err, faultType)
 		return nil, faultType, err
@@ -444,7 +443,7 @@ func CreateBlockVolumeUtilForMultiVC(ctx context.Context, reqParams interface{})
 	}
 
 	log.Debugf("vSphere CSI driver creating volume %s with create spec %+v", params.Spec.Name, spew.Sdump(createSpec))
-	volumeInfo, faultType, err := params.VolumeManager.CreateVolume(ctx, createSpec)
+	volumeInfo, faultType, err := params.VolumeManager.CreateVolume(ctx, createSpec, nil)
 	if err != nil {
 		log.Errorf("failed to create disk %s on vCenter %q with error %+v faultType %q",
 			params.Spec.Name, params.Vcenter.Config.Host, err, faultType)
@@ -457,9 +456,8 @@ func CreateBlockVolumeUtilForMultiVC(ctx context.Context, reqParams interface{})
 // datastores.
 func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 	vc *vsphere.VirtualCenter, volumeManager cnsvolume.Manager, cnsConfig *config.Config, spec *CreateVolumeSpec,
-	datastores []*vsphere.DatastoreInfo,
-	filterSuspendedDatastores bool, useSupervisorId,
-	checkCompatibleDataStores bool) (string, string, error) {
+	datastores []*vsphere.DatastoreInfo, filterSuspendedDatastores, useSupervisorId bool, extraParams interface{}) (
+	string, string, error) {
 	log := logger.GetLogger(ctx)
 	var err error
 	if spec.ScParams.StoragePolicyName != "" {
@@ -501,7 +499,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 			// TODO: Need to figure out which fault need to be returned when datastoreURL is not specified in
 			// storage class. Currently, just return csi.fault.Internal.
 			return "", csifault.CSIInternalFault, logger.LogNewErrorf(log,
-				"CSI user doesn't have permission on the datastore: %s specified in storage class",
+				"datastore %q not found in candidate list for volume provisioning.",
 				spec.ScParams.DatastoreURL)
 		}
 	}
@@ -563,7 +561,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 	}
 
 	log.Debugf("vSphere CSI driver creating volume %q with create spec %+v", spec.Name, spew.Sdump(createSpec))
-	volumeInfo, faultType, err := volumeManager.CreateVolume(ctx, createSpec)
+	volumeInfo, faultType, err := volumeManager.CreateVolume(ctx, createSpec, extraParams)
 	if err != nil {
 		log.Errorf("failed to create file volume %q with error %+v faultType %q", spec.Name, err, faultType)
 		return "", faultType, err
@@ -643,7 +641,7 @@ func DeleteVolumeUtil(ctx context.Context, volManager cnsvolume.Manager, volumeI
 // volumeId.
 func ExpandVolumeUtil(ctx context.Context, vCenterManager vsphere.VirtualCenterManager,
 	vCenterHost string, volumeManager cnsvolume.Manager, volumeID string, capacityInMb int64,
-	useAsyncQueryVolume bool) (string, error) {
+	useAsyncQueryVolume bool, extraParams interface{}) (string, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 	log.Debugf("vSphere CSI driver expanding volume %q to new size %d Mb.", volumeID, capacityInMb)
@@ -675,7 +673,7 @@ func ExpandVolumeUtil(ctx context.Context, vCenterManager vsphere.VirtualCenterM
 		expansionRequired = true
 	}
 	if expansionRequired {
-		faultType, err = volumeManager.ExpandVolume(ctx, volumeID, capacityInMb)
+		faultType, err = volumeManager.ExpandVolume(ctx, volumeID, capacityInMb, extraParams)
 		if err != nil {
 			log.Errorf("failed to expand volume %q with error %+v", volumeID, err)
 			return faultType, err

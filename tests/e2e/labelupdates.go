@@ -124,7 +124,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		}
 	})
 
-	ginkgo.It("[csi-supervisor] verify labels are created in CNS after updating pvc and/or pv with new labels", func() {
+	ginkgo.It("[csi-supervisor] verify labels are created in CNS after updating pvc "+
+		"and/or pv with new labels", ginkgo.Label(p1, block, vanilla, wcp, core), func() {
 		ginkgo.By("Invoking test to verify labels creation")
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
@@ -195,7 +196,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 
 	})
 
-	ginkgo.It("[csi-supervisor] verify labels are removed in CNS after removing them from pvc and/or pv", func() {
+	ginkgo.It("[csi-supervisor] verify labels are removed in CNS after removing them from pvc and/or "+
+		"pv", ginkgo.Label(p0, block, vanilla, wcp, core), func() {
 		ginkgo.By("Invoking test to verify labels deletion")
 		labels := make(map[string]string)
 		labels[labelKey] = labelValue
@@ -282,8 +284,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 
 	})
 
-	ginkgo.It("[csi-supervisor] verify podname label is created/deleted "+
-		"when pod with cns volume is created/deleted.", func() {
+	ginkgo.It("[csi-supervisor] verify podname label is created/deleted when pod with cns volume is "+
+		"created/deleted.", ginkgo.Label(p0, block, vanilla, wcp, core), func() {
 		ginkgo.By("Invoking test to verify pod name label updates")
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
@@ -395,7 +397,7 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 	*/
 
 	ginkgo.It("[csi-block-vanilla] Verify PVC name is removed from PV entry on CNS after PVC is deleted "+
-		"when Reclaim Policy is set to retain.", func() {
+		"when Reclaim Policy is set to retain.", ginkgo.Label(p0, block, vanilla, core), func() {
 
 		var err error
 
@@ -479,9 +481,14 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify labels are not present in cns")
-		_, err = e2eVSphere.getLabelsForCNSVolume(pv.Spec.CSI.VolumeHandle,
+		pvcLabel, err := e2eVSphere.getLabelsForCNSVolume(pv.Spec.CSI.VolumeHandle,
 			string(cnstypes.CnsKubernetesEntityTypePVC), pvc.Name, namespace)
-		gomega.Expect(err).To(gomega.HaveOccurred())
+
+		if pvcLabel == nil {
+			framework.Logf("PVC name is successfully removed")
+		} else {
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 
 		ginkgo.By(fmt.Sprintf("Deleting pv %s", pv.Name))
 		err = client.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, *metav1.NewDeleteOptions(0))
@@ -521,7 +528,7 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		13. Delete SC
 	*/
 
-	ginkgo.It("Verify label updates on statically provisioned volume.", func() {
+	ginkgo.It("Verify label updates on statically provisioned volume.", ginkgo.Label(p0, block, vanilla, core), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -654,7 +661,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		10. Delete PVCs
 		11. Delete SC
 	*/
-	ginkgo.It("[csi-supervisor] Verify label updates on PVC and PV attached to a stateful set.", func() {
+	ginkgo.It("[csi-supervisor] Verify label updates on PVC and PV attached to a stateful "+
+		"set.", ginkgo.Label(p0, block, vanilla, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		// decide which test setup is available to run

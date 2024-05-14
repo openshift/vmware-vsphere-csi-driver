@@ -17,7 +17,13 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+const (
+	// CRDSingular represents the singular name of CNSVolumeInfo CRD.
+	CRDSingular = "cnsvolumeinfo"
 )
 
 // CNSVolumeInfoSpec defines the desired state of CNSVolumeInfo
@@ -26,8 +32,20 @@ type CNSVolumeInfoSpec struct {
 	// VolumeID is the FCD ID obtained from creating volume using CNS API.
 	VolumeID string `json:"volumeID"`
 
+	// Namespace of the PersistentVolumeClaim.
+	Namespace string `json:"namespace,omitempty"`
+
 	// vCenterServer is the IP/FQDN of the vCenter host on which the CNS volume is accessible.
 	VCenterServer string `json:"vCenterServer"`
+
+	// ID of the storage policy
+	StoragePolicyID string `json:"storagePolicyID,omitempty"`
+
+	// Name of the storage class
+	StorageClassName string `json:"storageClassName,omitempty"`
+
+	// Capacity stores the current capacity of the PersistentVolume this volume represents.
+	Capacity *resource.Quantity `json:"capacity,omitempty"`
 }
 
 //+kubebuilder:object:root=true

@@ -56,6 +56,9 @@ type WCPTopologyFetchDSParams struct {
 	// Vc is the vcenter instance using which the potential
 	// datastores will be calculated.
 	Vc *cnsvsphere.VirtualCenter
+	// TopoSegToDatastoresMap stores the candidate datastores available in each
+	// topology segment given in the CreateVolume accessibility requirements.
+	TopoSegToDatastoresMap map[string][]*cnsvsphere.DatastoreInfo
 }
 
 // VanillaRetrieveTopologyInfoParams represents the params
@@ -88,6 +91,9 @@ type WCPRetrieveTopologyInfoParams struct {
 	// Vc is the vcenter instance using which the potential
 	// datastores will be calculated.
 	Vc *cnsvsphere.VirtualCenter
+	// TopoSegToDatastoresMap stores the candidate datastores available in each
+	// topology segment given in the CreateVolume accessibility requirements.
+	TopoSegToDatastoresMap map[string][]*cnsvsphere.DatastoreInfo
 }
 
 // ControllerTopologyService is an interface which exposes functionality
@@ -100,6 +106,9 @@ type ControllerTopologyService interface {
 	// GetTopologyInfoFromNodes retrieves the topology information of the nodes after the datastore has been
 	// selected for volume provisioning.
 	GetTopologyInfoFromNodes(ctx context.Context, retrieveTopologyInfoParams interface{}) ([]map[string]string, error)
+
+	// GetAZClustersMap returns the zone to clusterMorefs map from the azClustersMap.
+	GetAZClustersMap(ctx context.Context) map[string][]string
 }
 
 // NodeTopologyService is an interface which exposes functionality related to

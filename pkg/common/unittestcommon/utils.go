@@ -131,6 +131,11 @@ func (cntrlTopology *mockControllerVolumeTopology) GetSharedDatastoresInTopology
 	return nil, logger.LogNewError(log, "GetSharedDatastoresInTopology is not yet implemented.")
 }
 
+// GetAZClustersMap returns the zone to clusterMorefs map from the azClustersMap.
+func (cntrlTopology *mockControllerVolumeTopology) GetAZClustersMap(ctx context.Context) map[string][]string {
+	return nil
+}
+
 // GetTopologyInfoFromNodes retrieves the topology information of the given list of node names.
 func (cntrlTopology *mockControllerVolumeTopology) GetTopologyInfoFromNodes(ctx context.Context,
 	reqParams interface{}) ([]map[string]string, error) {
@@ -305,7 +310,12 @@ func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstanceByName(nodeName string) 
 	return nil, false, nil
 }
 
-// GetPVCNamespaceFromVolumeID retrieves the pv name from volumeID.
+// GetPVNameFromCSIVolumeID retrieves the pv name from volumeID.
 func (c *FakeK8SOrchestrator) GetPVNameFromCSIVolumeID(volumeID string) (string, bool) {
 	return "", false
+}
+
+// InitializeCSINodes creates CSINode instances for each K8s node with the appropriate topology keys.
+func (c *FakeK8SOrchestrator) InitializeCSINodes(ctx context.Context) error {
+	return nil
 }

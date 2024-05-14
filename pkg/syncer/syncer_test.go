@@ -193,7 +193,7 @@ func TestSyncerWorkflows(t *testing.T) {
 		}
 	}()
 
-	volumeManager, err = cnsvolumes.GetManager(ctx, virtualCenter, nil, false, false, false, false)
+	volumeManager, err = cnsvolumes.GetManager(ctx, virtualCenter, nil, false, false, false, false, "")
 	if err != nil {
 		t.Fatalf("failed to create an instance of volume manager. err=%v", err)
 	}
@@ -203,10 +203,7 @@ func TestSyncerWorkflows(t *testing.T) {
 	configInfo := &cnsconfig.ConfigurationInfo{}
 	configInfo.Cfg = csiConfig
 	metadataSyncer.configInfo = configInfo
-	metadataSyncer.volumeManager, err = cnsvolumes.GetManager(ctx, virtualCenter, nil, false, false, false, false)
-	if err != nil {
-		t.Fatalf("failed to create an instance of volume manager. err=%v", err)
-	}
+	metadataSyncer.volumeManager = volumeManager
 	metadataSyncer.host = virtualCenter.Config.Host
 	volumeOperationsLock = make(map[string]*sync.Mutex)
 	volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
@@ -305,7 +302,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 		},
 	}
 
-	volumeInfo, _, err := volumeManager.CreateVolume(ctx, &createSpec)
+	volumeInfo, _, err := volumeManager.CreateVolume(ctx, &createSpec, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,7 +654,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	cnsCreationMap = make(map[string]map[string]bool)
 	cnsCreationMap[csiConfig.Global.VCenterIP] = make(map[string]bool)
 
-	volumeInfo, _, err := volumeManager.CreateVolume(ctx, &createSpec)
+	volumeInfo, _, err := volumeManager.CreateVolume(ctx, &createSpec, nil)
 	if err != nil {
 		t.Errorf("failed to create volume. Error: %+v", err)
 		t.Fatal(err)

@@ -24,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator-api/api/v1alpha1"
+	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -57,6 +57,10 @@ func validateCreateBlockReqParam(paramName, value string) bool {
 		paramName == common.AttributeFsType ||
 		paramName == common.AttributeStorageTopologyType ||
 		paramName == common.AttributeStoragePool ||
+		paramName == common.AttributePvName ||
+		paramName == common.AttributePvcName ||
+		paramName == common.AttributePvcNamespace ||
+		paramName == common.AttributeStorageClassName ||
 		(paramName == common.AttributeHostLocal && strings.EqualFold(value, "true"))
 }
 
@@ -71,7 +75,11 @@ const (
 func validateCreateFileReqParam(paramName, value string) bool {
 	return paramName == common.AttributeStoragePolicyID ||
 		paramName == common.AttributeStorageTopologyType ||
-		paramName == common.AttributeFsType
+		paramName == common.AttributeFsType ||
+		paramName == common.AttributePvName ||
+		paramName == common.AttributePvcName ||
+		paramName == common.AttributePvcNamespace ||
+		paramName == common.AttributeStorageClassName
 }
 
 // ValidateCreateVolumeRequest is the helper function to validate

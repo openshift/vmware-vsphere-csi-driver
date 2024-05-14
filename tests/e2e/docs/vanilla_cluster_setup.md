@@ -28,13 +28,9 @@ The section outlines how to set the env variable for running e2e test.
     password = "<PASSWORD>"
     port = "443"
     datacenters = "<Datacenter_Name>"
-    targetvSANFileShareDatastoreURLs = "<comma separated datastore URLs>" # Optional parameter
 
 * Please update the `hostname` and `datacenters` as per your testbed configuration.
 `datacenters` should be comma separated if deployed on multi-datacenters
-* `targetvSANFileShareDatastoreURLs` is an optional parameter. It contains a comma separated
-list of datastore URLs where you want to deploy file share volumes. Retrieve this value from the
- secret named `vsphere-config-secret` in your testbed.
 * `cluster-id` field is optional for block vanilla tests but required for file vanilla static provisioning tests.
 `cluster-id` is name of the cluster as seen in VC.
 
@@ -82,6 +78,8 @@ list of datastore URLs where you want to deploy file share volumes. Retrieve thi
     # SHARED_VSPHERE_DATASTORE_NAME and SHARED_VSPHERE_DATASTORE_URL should correspond to same shared datastore
     # To run e2e test for VCP to CSI migration, need to set the following env variable
     export GINKGO_FOCUS="csi-vcp-mig"
+    # To run volume resize testcases of VCP to CSI migrated Volumes
+    export VCPTOCSI="1"
 
     # For vsan stretched cluster tests
     export TESTBEDINFO_JSON="/path/to/nimbus_testbedinfo.json"
@@ -92,6 +90,12 @@ list of datastore URLs where you want to deploy file share volumes. Retrieve thi
 
     # If CSI controller is running on a different k8s cluster, we need to pass the kubeconfig for that cluster using
     export CONTROLLER_CLUSTER_KUBECONFIG="/path/to/remote/kubeconfig"
+
+    # To run windows testcases, need to set the following env variable
+    export WORKER_TYPE="WINDOWS"
+    export WINDOWS_IMAGE="<windows_image>"
+    export WINDOWS_USER="<windows_user>"
+    export WINDOWS_PWD="<windows_pwd>"
 
 ### To run full sync test, need do extra following steps
 
