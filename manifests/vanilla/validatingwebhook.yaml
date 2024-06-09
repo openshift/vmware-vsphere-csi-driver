@@ -33,6 +33,10 @@ webhooks:
         resources:   ["storageclasses"]
       - apiGroups:   [""]
         apiVersions: ["v1", "v1beta1"]
+        operations:  ["CREATE"]
+        resources:   ["persistentvolumes"]
+      - apiGroups:   [""]
+        apiVersions: ["v1", "v1beta1"]
         operations:  ["UPDATE", "DELETE"]
         resources:   ["persistentvolumeclaims"]
         scope: "Namespaced"
@@ -134,7 +138,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: vsphere-webhook
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.1.2
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.2.0
           args:
             - "--operation-mode=WEBHOOK_SERVER"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"

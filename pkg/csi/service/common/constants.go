@@ -72,6 +72,18 @@ const (
 	// the given storage policy. For Example: HostLocal: "True".
 	AttributeHostLocal = "hostlocal"
 
+	// AttributePvName represents the name of the PV
+	AttributePvName = "csi.storage.k8s.io/pv/name"
+
+	// AttributePvcName represents the name of the PVC
+	AttributePvcName = "csi.storage.k8s.io/pvc/name"
+
+	// AttributePvcNamespace represents the namespace of the PVC
+	AttributePvcNamespace = "csi.storage.k8s.io/pvc/namespace"
+
+	// AttributeStorageClassName represents name of the Storage Class.
+	AttributeStorageClassName = "csi.storage.k8s.io/sc/name"
+
 	// HostMoidAnnotationKey represents the Node annotation key that has the value
 	// of VC's ESX host moid of this node.
 	HostMoidAnnotationKey = "vmware-system-esxi-node-moid"
@@ -225,7 +237,7 @@ const (
 	// supposed to provision a volume for this PVC.
 	AnnStorageProvisioner = "volume.kubernetes.io/storage-provisioner"
 
-	// vSphereCSIDriverName vSphere CSI driver name
+	// VSphereCSIDriverName vSphere CSI driver name
 	VSphereCSIDriverName = "csi.vsphere.vmware.com"
 
 	// AnnDynamicallyProvisioned annotation is added to a PV that has been
@@ -325,6 +337,10 @@ const (
 
 	// VolumeSnapshotKind represents the VolumeSnapshot Kind name
 	VolumeSnapshotKind = "VolumeSnapshot"
+
+	// CreateCSINodeAnnotation is the annotation applied by spherelet
+	// to convey to CSI driver to create a CSINode instance for each node.
+	CreateCSINodeAnnotation = "vmware-system/csi-create-csinode-object"
 )
 
 // Supported container orchestrators.
@@ -345,8 +361,6 @@ const (
 	OnlineVolumeExtend = "online-volume-extend"
 	// CSIMigration is feature flag for migrating in-tree vSphere volumes to CSI.
 	CSIMigration = "csi-migration"
-	// CSIAuthCheck is feature flag for auth check.
-	CSIAuthCheck = "csi-auth-check"
 	// AsyncQueryVolume is feature flag for using async query volume API.
 	AsyncQueryVolume = "async-query-volume"
 	// CSISVFeatureStateReplication is feature flag for SV feature state
@@ -392,4 +406,8 @@ const (
 	CSIInternalGeneratedClusterID = "csi-internal-generated-cluster-id"
 	// ListViewPerf uses govmomi ListView to wait for CNS tasks
 	ListViewPerf = "listview-tasks"
+	// TopologyAwareFileVolume enables provisioning of file volumes in a topology enabled environment
+	TopologyAwareFileVolume = "topology-aware-file-volume"
+	// PodVMOnStretchedSupervisor enables Pod Vm Support on stretched supervisor cluster
+	PodVMOnStretchedSupervisor = "podvm-on-stretched-supervisor"
 )

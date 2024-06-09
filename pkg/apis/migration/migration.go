@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -162,6 +163,7 @@ func GetVolumeMigrationService(ctx context.Context, volumeManager *cnsvolume.Man
 					metav1.NamespaceNone, config, true)
 				if err != nil {
 					log.Errorf("failed to create dynamic informer for volume migration CRD. Err: %v", err)
+					os.Exit(1)
 				}
 				handlers := cache.ResourceEventHandlerFuncs{
 					AddFunc: func(obj interface{}) {
@@ -194,7 +196,9 @@ func GetVolumeMigrationService(ctx context.Context, volumeManager *cnsvolume.Man
 				}
 				_, err = informer.Informer().AddEventHandler(handlers)
 				if err != nil {
-					return
+					log.Errorf("failed to add event handler on informer for cnsvspherevolumemigrations CR. "+
+						"Error: %v", err)
+					os.Exit(1)
 				}
 				stopCh := make(chan struct{})
 				informer.Informer().Run(stopCh)
@@ -223,7 +227,7 @@ func (volumeMigration *volumeMigration) GetVolumeID(ctx context.Context, volumeS
 		return info.(string), nil
 	}
 	if registerIfNotFound {
-		volumeID, err := volumeMigration.registerVolume(ctx, volumeSpec)
+		volumeID, protectedVolumeFromVMDeletion, err := volumeMigration.registerVolume(ctx, volumeSpec)
 		if err != nil {
 			log.Errorf("failed to register volume for volumeSpec: %v, with err: %v", volumeSpec, err)
 			return "", err
@@ -232,8 +236,9 @@ func (volumeMigration *volumeMigration) GetVolumeID(ctx context.Context, volumeS
 		cnsvSphereVolumeMigration := migrationv1alpha1.CnsVSphereVolumeMigration{
 			ObjectMeta: metav1.ObjectMeta{Name: volumeID},
 			Spec: migrationv1alpha1.CnsVSphereVolumeMigrationSpec{
-				VolumePath: volumeSpec.VolumePath,
-				VolumeID:   volumeID,
+				VolumePath:                volumeSpec.VolumePath,
+				VolumeID:                  volumeID,
+				ProtectVolumeFromVMDelete: protectedVolumeFromVMDeletion,
 			},
 		}
 		log.Debugf("Saving cnsvSphereVolumeMigration CR: %v", cnsvSphereVolumeMigration)
@@ -259,7 +264,6 @@ func (volumeMigration *volumeMigration) ProtectVolumeFromVMDeletion(ctx context.
 		return err
 	}
 	if !volumeMigrationResource.Spec.ProtectVolumeFromVMDelete {
-		log.Info("Set keepAfterDeleteVm control flag using Vslm APIs")
 		err = (*volumeMigration.volumeManager).ProtectVolumeFromVMDeletion(ctx, volumeID)
 		if err != nil {
 			log.Errorf("failed to protect migrated volume from vm deletion. Volume ID: %q, err: %v", volumeID, err)
@@ -359,6 +363,9 @@ func (volumeMigration *volumeMigration) GetVolumePath(ctx context.Context, volum
 		Spec: migrationv1alpha1.CnsVSphereVolumeMigrationSpec{
 			VolumePath: fileBackingInfo.FilePath,
 			VolumeID:   volumeID,
+			// GetVolumePath is only called from CreateVolume CSI Controller which is creating FCD using CNS API, so
+			// we can mark ProtectVolumeFromVMDelete to true, as we will have required control flags on the FCD.
+			ProtectVolumeFromVMDelete: true,
 		},
 	}
 	log.Debugf("Saving cnsvSphereVolumeMigration CR: %v", cnsvSphereVolumeMigration)
@@ -435,7 +442,8 @@ func (volumeMigration *volumeMigration) DeleteVolumeInfo(ctx context.Context, vo
 
 // registerVolume takes VolumeSpec and helps register Volume with CNS.
 // Returns VolumeID for successful registration, otherwise return error.
-func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volumeSpec *VolumeSpec) (string, error) {
+func (volumeMigration *volumeMigration) registerVolume(ctx context.Context,
+	volumeSpec *VolumeSpec) (string, bool, error) {
 	log := logger.GetLogger(ctx)
 	value, _ := volumeMigration.registerVolumeMutexes.LoadOrStore(volumeSpec.VolumePath, &sync.Mutex{})
 	mtx := value.(*sync.Mutex)
@@ -445,11 +453,11 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 	uuid, err := uuid.NewUUID()
 	if err != nil {
 		log.Errorf("failed to generate uuid")
-		return "", err
+		return "", false, err
 	}
 	re := regexp.MustCompile(`\[([^\[\]]*)\]`)
 	if !re.MatchString(volumeSpec.VolumePath) {
-		return "", logger.LogNewErrorf(log,
+		return "", false, logger.LogNewErrorf(log,
 			"failed to extract datastore name from in-tree volume path: %q", volumeSpec.VolumePath)
 	}
 	datastoreFullPath := re.FindAllString(volumeSpec.VolumePath, -1)[0]
@@ -461,7 +469,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 	var user string
 	var host string
 	if volumeMigration.cnsConfig == nil || len(volumeMigration.cnsConfig.VirtualCenter) == 0 {
-		return "", logger.LogNewError(log, "could not find vcenter config")
+		return "", false, logger.LogNewError(log, "could not find vcenter config")
 	}
 	for key, val := range volumeMigration.cnsConfig.VirtualCenter {
 		datacenters = val.Datacenters
@@ -473,7 +481,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 	vCenter, err := vsphere.GetVirtualCenterManager(ctx).GetVirtualCenter(ctx, host)
 	if err != nil {
 		log.Errorf("failed to get vCenter. err: %v", err)
-		return "", err
+		return "", false, err
 	}
 	datacenterPaths := make([]string, 0)
 	if datacenters != "" {
@@ -483,7 +491,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 		dcs, err := vCenter.GetDatacenters(ctx)
 		if err != nil {
 			log.Errorf("failed to get datacenters from vCenter. err: %v", err)
-			return "", err
+			return "", false, err
 		}
 		for _, dc := range dcs {
 			datacenterPaths = append(datacenterPaths, dc.InventoryPath)
@@ -496,7 +504,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 		log.Debugf("Obtaining storage policy ID for storage policy name: %q", volumeSpec.StoragePolicyName)
 		storagePolicyID, err = vCenter.GetStoragePolicyIDByName(ctx, volumeSpec.StoragePolicyName)
 		if err != nil {
-			return "", logger.LogNewErrorf(log,
+			return "", false, logger.LogNewErrorf(log,
 				"Error occurred while getting stroage policy ID from storage policy name: %q, err: %+v",
 				volumeSpec.StoragePolicyName, err)
 		}
@@ -529,7 +537,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 			vmdkPath + "?dcPath=" + url.PathEscape(datacenter) + "&dsName=" + url.PathEscape(datastoreName)
 		bUseVslmAPIs, err := common.UseVslmAPIs(ctx, vCenter.Client.ServiceContent.About)
 		if err != nil {
-			return "", logger.LogNewErrorf(log,
+			return "", false, logger.LogNewErrorf(log,
 				"Error while determining the correct APIs to use for vSphere version %q, Error= %+v",
 				vCenter.Client.ServiceContent.About.ApiVersion, err)
 		}
@@ -537,7 +545,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 			backingObjectID, err := (*volumeMigration.volumeManager).RegisterDisk(ctx,
 				backingDiskURLPath, volumeSpec.VolumePath)
 			if err != nil {
-				return "", logger.LogNewErrorf(log,
+				return "", false, logger.LogNewErrorf(log,
 					"registration failed for volumePath: %v", volumeSpec.VolumePath)
 			}
 			createSpec.BackingObjectDetails = &cnstypes.CnsBlockBackingDetails{BackingDiskId: backingObjectID}
@@ -548,7 +556,7 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 		}
 		log.Debugf("vSphere CSI driver registering volume %q with create spec %+v",
 			volumeSpec.VolumePath, spew.Sdump(createSpec))
-		volumeInfo, _, err = (*volumeMigration.volumeManager).CreateVolume(ctx, createSpec)
+		volumeInfo, _, err = (*volumeMigration.volumeManager).CreateVolume(ctx, createSpec, nil)
 		if err != nil {
 			log.Warnf("failed to register volume %q with createSpec: %v. error: %+v",
 				volumeSpec.VolumePath, createSpec, err)
@@ -560,10 +568,18 @@ func (volumeMigration *volumeMigration) registerVolume(ctx context.Context, volu
 		log.Infof("Successfully registered volume %q as container volume with ID: %q",
 			volumeSpec.VolumePath, volumeInfo.VolumeID.Id)
 	} else {
-		return "", logger.LogNewErrorf(log,
+		return "", false, logger.LogNewErrorf(log,
 			"registration failed for volumeSpec: %v", volumeSpec)
 	}
-	return volumeInfo.VolumeID.Id, nil
+	isvSphere80U3orAbove, err := vsphere.IsvSphereVersion80U3orAbove(ctx, vCenter.Client.ServiceContent.About)
+	if err != nil {
+		return "", false, logger.LogNewErrorf(log, "Error while checking the vSphere Version %v , Err= %+v",
+			vCenter.Client.ServiceContent.About, err)
+	}
+	// for vSphere 8.0u3 and above migrated volume is already protected from VM deletion
+	// Required control flag will be set directly while register vmdk path as FCD
+	volumeProtectedFromVMDeletion := isvSphere80U3orAbove
+	return volumeInfo.VolumeID.Id, volumeProtectedFromVMDeletion, nil
 }
 
 // cleanupStaleCRDInstances helps in cleaning up stale volume migration CRD

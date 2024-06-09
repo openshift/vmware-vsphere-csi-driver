@@ -3,12 +3,15 @@ package volume
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"time"
 
 	"github.com/vmware/govmomi"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/session"
 	"github.com/vmware/govmomi/view"
+	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -40,10 +43,16 @@ type ListViewImpl struct {
 	// it's separate from the context set by CSI ops
 	// to the channel created by the caller to receive the task result
 	ctx context.Context
+	// waitForUpdatesContext and waitForUpdatesCancelFunc allows us to break out of the WaitForUpdates loop
+	// use case: session expiry
+	waitForUpdatesContext    context.Context
+	waitForUpdatesCancelFunc context.CancelFunc
 	// shouldStopListening: in case of regular CSI operation, even after receiving a batch of updates,
 	// we want to continue listening for subsequent updates.
 	// in case of unit tests, we need to stop listening for the test to complete execution
 	shouldStopListening bool
+	// this mutex is used while logging out expired VC session and creating a new one
+	mu sync.RWMutex
 }
 
 // TaskDetails is used to hold state for a task
@@ -59,6 +68,9 @@ type TaskResult struct {
 	TaskInfo *types.TaskInfo
 	Err      error
 }
+
+var ErrListViewTaskAddition = errors.New("failure to add task to listview")
+var ErrSessionNotAuthenticated = errors.New("session is not authenticated")
 
 // NewListViewImpl creates a new listView object and starts a goroutine to listen to property collector task updates
 func NewListViewImpl(ctx context.Context, virtualCenter *cnsvsphere.VirtualCenter,
@@ -97,7 +109,7 @@ func (l *ListViewImpl) createListView(ctx context.Context, tasks []types.Managed
 func (l *ListViewImpl) SetVirtualCenter(ctx context.Context, virtualCenter *cnsvsphere.VirtualCenter) {
 	log := logger.GetLogger(ctx)
 	l.virtualCenter = virtualCenter
-	log.Debugf("New virtualCenter object stored for use by ListView")
+	log.Infof("updated VirtualCenter object reference in ListView")
 }
 
 func getListViewWaitFilter(listView *view.ListView) *property.WaitFilter {
@@ -119,18 +131,40 @@ func (l *ListViewImpl) AddTask(ctx context.Context, taskMoRef types.ManagedObjec
 	log := logger.GetLogger(ctx)
 	log.Infof("AddTask called for %+v", taskMoRef)
 
+	if err := l.isClientValid(false); err != nil {
+		return fmt.Errorf("%w. task: %v, err: %v", ErrListViewTaskAddition, taskMoRef, err)
+	} else {
+		log.Debugf("connection to vc successful")
+	}
+
 	l.taskMap.Upsert(taskMoRef, TaskDetails{
 		Reference:        taskMoRef,
 		MarkedForRemoval: false,
 		ResultCh:         ch,
 	})
 	log.Debugf("task %+v added to map", taskMoRef)
+	log.Infof("client is valid. trying to add task to listview object")
 
-	err := l.listView.Add(l.ctx, []types.ManagedObjectReference{taskMoRef})
+	response, err := l.listView.Add(l.ctx, []types.ManagedObjectReference{taskMoRef})
 	if err != nil {
 		l.taskMap.Delete(taskMoRef)
-		return logger.LogNewErrorf(log, "failed to add task to ListView. error: %+v", err)
+		return fmt.Errorf("%w. task: %v, err: %v", ErrListViewTaskAddition, taskMoRef, err)
 	}
+	if len(response) > 0 {
+		for _, unresolvedTaskRef := range response {
+			l.taskMap.Delete(unresolvedTaskRef)
+			fault := &soap.Fault{
+				Code: "ServerFaultCode",
+				String: fmt.Sprintf("The object %v has already been deleted "+
+					"or has not been completely created", taskMoRef),
+			}
+			fault.Detail.Fault = types.ManagedObjectNotFound{
+				Obj: taskMoRef,
+			}
+			return soap.WrapSoapFault(fault)
+		}
+	}
+
 	log.Infof("task %+v added to listView", taskMoRef)
 	return nil
 }
@@ -141,7 +175,13 @@ func (l *ListViewImpl) RemoveTask(ctx context.Context, taskMoRef types.ManagedOb
 	if l.listView == nil {
 		return logger.LogNewErrorf(log, "failed to remove task from listView: listView not initialized")
 	}
-	err := l.listView.Remove(l.ctx, []types.ManagedObjectReference{taskMoRef})
+	if err := l.isClientValid(false); err != nil {
+		return logger.LogNewErrorf(log, "failed to remove task %v from ListView. error: %+v", taskMoRef, err)
+	} else {
+		log.Debugf("connection to vc successful")
+	}
+	log.Infof("client is valid. trying to remove task from listview object")
+	_, err := l.listView.Remove(l.ctx, []types.ManagedObjectReference{taskMoRef})
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to remove task %v from ListView. error: %+v", taskMoRef, err)
 	}
@@ -151,8 +191,18 @@ func (l *ListViewImpl) RemoveTask(ctx context.Context, taskMoRef types.ManagedOb
 	return nil
 }
 
-func (l *ListViewImpl) isClientValid() error {
+// The re-connect param is set to false for calls from AddTask() and RemoveTask()
+// as we want the re-connection to happen via the call from listenToTaskUpdates() method
+// as it will also re-create the ListView object which is what we want to do.
+func (l *ListViewImpl) isClientValid(reconnect bool) error {
 	log := logger.GetLogger(l.ctx)
+	if !reconnect {
+		l.mu.RLock()
+		defer l.mu.RUnlock()
+	} else {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+	}
 	// If session hasn't expired, nothing to do.
 	sessionMgr := session.NewManager(l.govmomiClient.Client)
 	// SessionMgr.UserSession(ctx) retrieves and returns the SessionManager's
@@ -160,10 +210,18 @@ func (l *ListViewImpl) isClientValid() error {
 	// authenticated or timed out.
 	if userSession, err := sessionMgr.UserSession(l.ctx); err != nil {
 		log.Errorf("failed to obtain user session with err: %v", err)
-		return err
 	} else if userSession != nil {
 		return nil
 	}
+
+	log.Infof("current session is either nil or not authenticated")
+
+	if !reconnect {
+		l.waitForUpdatesCancelFunc()
+		return ErrSessionNotAuthenticated
+	}
+
+	log.Infof("creating a new session...")
 
 	err := cnsvsphere.ReadVCConfigs(l.ctx, l.virtualCenter)
 	if err != nil {
@@ -181,6 +239,7 @@ func (l *ListViewImpl) isClientValid() error {
 	}
 	client.Timeout = noTimeout
 	l.govmomiClient = client
+	log.Infof("successfully created new VC session")
 	return nil
 }
 
@@ -192,12 +251,13 @@ func (l *ListViewImpl) isClientValid() error {
 func (l *ListViewImpl) listenToTaskUpdates() {
 	log := logger.GetLogger(l.ctx)
 	filter := getListViewWaitFilter(l.listView)
+	l.waitForUpdatesContext, l.waitForUpdatesCancelFunc = context.WithCancel(context.Background())
 	// we need to recreate the listView and the wait filter after any error from vc
 	// for the first iteration we already have the listView and filter initialized
 	recreateView := false
 	for {
 		// calling Connect at the beginning to ensure the current session is neither nil nor NotAuthenticated
-		if err := l.isClientValid(); err != nil {
+		if err := l.isClientValid(true); err != nil {
 			log.Errorf("failed to connect to vCenter. err: %v", err)
 			time.Sleep(waitForUpdatesRetry)
 			continue
@@ -214,12 +274,13 @@ func (l *ListViewImpl) listenToTaskUpdates() {
 			}
 
 			filter = getListViewWaitFilter(l.listView)
+			l.waitForUpdatesContext, l.waitForUpdatesCancelFunc = context.WithCancel(context.Background())
 			recreateView = false
 		}
 
 		log.Info("Starting listening for task updates...")
 		pc := property.DefaultCollector(l.govmomiClient.Client)
-		err := property.WaitForUpdates(l.ctx, pc, filter, func(updates []types.ObjectUpdate) bool {
+		err := property.WaitForUpdates(l.waitForUpdatesContext, pc, filter, func(updates []types.ObjectUpdate) bool {
 			log.Debugf("Got %d property collector update(s)", len(updates))
 			for _, update := range updates {
 				for _, prop := range update.ChangeSet {
@@ -302,7 +363,7 @@ func RemoveTasksMarkedForDeletion(l *ListViewImpl) {
 	var tasksToDelete []types.ManagedObjectReference
 	for _, taskDetails := range l.taskMap.GetAll() {
 		if taskDetails.MarkedForRemoval {
-			err := l.listView.Remove(l.ctx, []types.ManagedObjectReference{taskDetails.Reference})
+			_, err := l.listView.Remove(l.ctx, []types.ManagedObjectReference{taskDetails.Reference})
 			if err != nil {
 				log.Errorf("failed to remove task from ListView. error: %+v", err)
 				continue

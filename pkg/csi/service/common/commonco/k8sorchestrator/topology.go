@@ -35,6 +35,7 @@ import (
 	"github.com/vmware/govmomi/vim25/mo"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
+	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -98,7 +99,9 @@ var (
 	domainNodeMapInstanceLock = &sync.RWMutex{}
 	// azClusterMap maintains a cache of AZ instance name to the clusterMoref in that zone.
 	azClusterMap = make(map[string]string)
-	// azClusterMapInstanceLock guards the azClusterMap instance from concurrent writes.
+	// azClustersMap maintains a cache of AZ instance name to the clusterMorefs in that zone.
+	azClustersMap = make(map[string][]string)
+	// azClusterMapInstanceLock guards the azClusterMap and azClustersMap instances from concurrent writes.
 	azClusterMapInstanceLock = &sync.RWMutex{}
 	// preferredDatastoresMap is a map of topology domain to list of
 	// datastore URLs preferred in that domain.
@@ -110,6 +113,9 @@ var (
 	// is enabled. isMultivCenterCluster is set to true only when the MultiVCenterCSITopology FSS
 	// is enabled and the K8s cluster involves multiple VCs.
 	isMultiVCSupportEnabled bool
+	// isPodVMOnStretchedSupervisorEnabled is set to true only when the podvm-on-stretched-supervisor FSS
+	// is enabled
+	isPodVMOnStretchedSupervisorEnabled bool
 	// csiNodeTopologyInformer refers to a shared K8s informer listening on CSINodeTopology instances
 	// in the cluster.
 	csiNodeTopologyInformer *cache.SharedIndexInformer
@@ -247,6 +253,8 @@ func (c *K8sOrchestrator) InitTopologyServiceInController(ctx context.Context) (
 		}
 		return controllerVolumeTopologyInstance, nil
 	} else if c.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		// Set isPodVMOnStretchedSupervisorEnabled if podvm-on-stretched-supervisor fss is enabled
+		isPodVMOnStretchedSupervisorEnabled = c.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor)
 		controllerVolumeTopologyInstanceLock.RLock()
 		if wcpControllerVolumeTopologyInstance == nil {
 			controllerVolumeTopologyInstanceLock.RUnlock()
@@ -415,7 +423,8 @@ func startAvailabilityZoneInformer(ctx context.Context, cfg *restclient.Config) 
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, logger.LogNewErrorf(log,
+			"failed to add event handler on informer for availabilityzones CR. Error: %v", err)
 	}
 
 	// Start informer.
@@ -444,9 +453,7 @@ func azCRAdded(obj interface{}) {
 		return
 	}
 	// Add to cache.
-	// TODO: For VC 8.0 release, zone to CCR is a 1:1 mapping.
-	// Update this when one vSphere zone can span across multiple CCRs.
-	addToAZClusterMap(ctx, azName, clusterComputeResourceMoIds[0])
+	addToAZClusterMap(ctx, azName, clusterComputeResourceMoIds)
 }
 
 // azCRUpdated handles deleting AZ name in the cache.
@@ -463,12 +470,17 @@ func azCRDeleted(obj interface{}) {
 }
 
 // Adds the CR instance name and cluster moref to the azClusterMap.
-func addToAZClusterMap(ctx context.Context, azName, clusterMoref string) {
+func addToAZClusterMap(ctx context.Context, azName string, clusterMorefs []string) {
 	log := logger.GetLogger(ctx)
 	azClusterMapInstanceLock.Lock()
 	defer azClusterMapInstanceLock.Unlock()
-	azClusterMap[azName] = clusterMoref
-	log.Infof("Added %q cluster to %q zone in azClusterMap", clusterMoref, azName)
+	if isPodVMOnStretchedSupervisorEnabled {
+		azClustersMap[azName] = clusterMorefs
+		log.Infof("Added clusters %v to %q zone in azClustersMap", clusterMorefs, azName)
+	} else {
+		azClusterMap[azName] = clusterMorefs[0]
+		log.Infof("Added %q cluster to %q zone in azClusterMap", clusterMorefs[0], azName)
+	}
 }
 
 // Removes the provided zone and clusterMoref from the azClusterMap.
@@ -476,8 +488,23 @@ func removeFromAZClusterMap(ctx context.Context, azName string) {
 	log := logger.GetLogger(ctx)
 	azClusterMapInstanceLock.Lock()
 	defer azClusterMapInstanceLock.Unlock()
-	delete(azClusterMap, azName)
-	log.Infof("Removed %q zone from azClusterMap", azName)
+	if isPodVMOnStretchedSupervisorEnabled {
+		delete(azClustersMap, azName)
+		log.Infof("Removed %q zone from azClustersMap", azName)
+	} else {
+		delete(azClusterMap, azName)
+		log.Infof("Removed %q zone from azClusterMap", azName)
+	}
+}
+
+// GetAZClustersMap returns the zone to clusterMorefs map from the azClustersMap.
+func (volTopology *wcpControllerVolumeTopology) GetAZClustersMap(ctx context.Context) map[string][]string {
+	return azClustersMap
+}
+
+// GetAZClustersMap returns the zone to clusterMorefs map from the azClustersMap.
+func (volTopology *controllerVolumeTopology) GetAZClustersMap(ctx context.Context) map[string][]string {
+	return nil
 }
 
 // startTopologyCRInformer creates and starts an informer for CSINodeTopology custom resource.
@@ -511,7 +538,8 @@ func startTopologyCRInformer(ctx context.Context, cfg *restclient.Config) (*cach
 		},
 	})
 	if err != nil {
-		return nil, err
+		return nil, logger.LogNewErrorf(log, "failed to add event handler on informer for %q CR. Error: %v",
+			csinodetopology.CRDPlural, err)
 	}
 
 	// Start informer.
@@ -615,7 +643,7 @@ func topoCRDeleted(obj interface{}) {
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).Object, &nodeTopoObj)
 	if err != nil {
 		log.Errorf("topoCRDeleted: failed to cast object %+v to %s type. Error: %+v",
-			csinodetopology.CRDSingular, err)
+			obj, csinodetopology.CRDSingular, err)
 		return
 	}
 	// Delete node name from domainNodeMap if the status of the CR was set to Success.
@@ -1508,10 +1536,11 @@ func (volTopology *wcpControllerVolumeTopology) GetSharedDatastoresInTopology(ct
 	log.Debugf("Using preferred topology")
 	for _, topology := range params.TopologyRequirement.GetPreferred() {
 		segments := topology.GetSegments()
+		zone := segments[v1.LabelTopologyZone]
 
 		// For each topology segments, fetch cluster morefs satisfying the condition.
 		log.Debugf("Getting list of cluster morefs for topology segments %+v", segments)
-		clusterMorefs, err := volTopology.getClustersMatchingTopologySegment(ctx, segments)
+		clusterMorefs, err := volTopology.getClustersMatchingTopologySegment(ctx, zone)
 		if err != nil {
 			return nil, logger.LogNewErrorf(log,
 				"failed to fetch clusters matching topology requirement. Error: %v", err)
@@ -1523,26 +1552,47 @@ func (volTopology *wcpControllerVolumeTopology) GetSharedDatastoresInTopology(ct
 		}
 
 		// Call GetCandidateDatastores for each cluster moref. Ignore the vsanDirectDatastores for now.
-		for _, clusterMoref := range clusterMorefs {
-			accessibleDs, _, err := cnsvsphere.GetCandidateDatastoresInCluster(ctx, params.Vc, clusterMoref)
+		if !isPodVMOnStretchedSupervisorEnabled {
+			// This code block assume we have 1 Cluster Per AZ
+			accessibleDs, _, err := cnsvsphere.GetCandidateDatastoresInCluster(ctx, params.Vc, clusterMorefs[0], false)
 			if err != nil {
 				return nil, logger.LogNewErrorf(log,
 					"failed to find candidate datastores to place volume in cluster %q. Error: %v",
-					clusterMoref, err)
+					clusterMorefs[0], err)
 			}
+			params.TopoSegToDatastoresMap[zone] = accessibleDs
 			sharedDatastores = append(sharedDatastores, accessibleDs...)
+		} else {
+			// This code block adds support for multiple vSphere Clusters Per AZ
+			// sharedDatastores will be calculated for all clusters within AZ
+			sharedDatastoresForclusterMorefs, err := getSharedDatastoresInClusters(ctx, clusterMorefs, params.Vc)
+			if err != nil {
+				return nil, logger.LogNewErrorf(log, "failed to get shared datastores "+
+					"for clusters: %v, err: %v", clusterMorefs, err)
+			}
+			params.TopoSegToDatastoresMap[zone] = sharedDatastoresForclusterMorefs
+			sharedDatastores = append(sharedDatastores, sharedDatastoresForclusterMorefs...)
 		}
 	}
+	log.Infof("Shared datastores %v for topologyRequirement: %+v", sharedDatastores,
+		params.TopologyRequirement)
 	return sharedDatastores, nil
 }
 
 // getClustersMatchingTopologySegment fetches clusters matching the topology requirement provided by checking
 // the azClusterMap cache.
-func (volTopology *wcpControllerVolumeTopology) getClustersMatchingTopologySegment(ctx context.Context,
-	segments map[string]string) ([]string, error) {
+func (volTopology *wcpControllerVolumeTopology) getClustersMatchingTopologySegment(ctx context.Context, zone string) (
+	[]string, error) {
 	log := logger.GetLogger(ctx)
 	var matchingClusterMorefs []string
-	for _, zone := range segments {
+	if isPodVMOnStretchedSupervisorEnabled {
+		clusterMorefs, exists := azClustersMap[zone]
+		if !exists || len(clusterMorefs) == 0 {
+			return nil, logger.LogNewErrorf(log, "could not find the cluster MoIDs for zone %q in "+
+				"AvailabilityZone resources", zone)
+		}
+		matchingClusterMorefs = append(matchingClusterMorefs, clusterMorefs...)
+	} else {
 		clusterMoref, exists := azClusterMap[zone]
 		if !exists || clusterMoref == "" {
 			return nil, logger.LogNewErrorf(log, "could not find the cluster MoID for zone %q in "+
@@ -1550,7 +1600,7 @@ func (volTopology *wcpControllerVolumeTopology) getClustersMatchingTopologySegme
 		}
 		matchingClusterMorefs = append(matchingClusterMorefs, clusterMoref)
 	}
-	log.Infof("Clusters matching topology requirement %+v are %+v", segments, matchingClusterMorefs)
+	log.Infof("Clusters matching topology requirement %q are %+v", zone, matchingClusterMorefs)
 	return matchingClusterMorefs, nil
 }
 
@@ -1564,8 +1614,45 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 
 	switch strings.ToLower(params.StorageTopologyType) {
 	case "zonal":
-		// If the topology requirement received has just one zone, use the same zone as node affinity terms on PV.
-		if len(params.TopologyRequirement.GetPreferred()) == 1 {
+		if params.TopologyRequirement == nil {
+			// This case is for static volume provisioning using CNSRegisterVolume API
+			if !isPodVMOnStretchedSupervisorEnabled {
+				return nil, logger.LogNewErrorf(log, "topology requirement should not be nil. invalid params: %v", params)
+			} else {
+				// If the topology requirement received is nil, then identify topology of the datastore by looking into
+				// azClustersMap
+				var selectedSegments []map[string]string
+				for az, clusters := range azClustersMap {
+					sharedDatastoresForclusters, err := getSharedDatastoresInClusters(ctx, clusters, params.Vc)
+					if err != nil {
+						return nil, logger.LogNewErrorf(log, "failed to get shared datastores "+
+							"for clusters: %v, err: %v", clusters, err)
+					}
+					for _, ds := range sharedDatastoresForclusters {
+						if ds.Info.Url == params.DatastoreURL {
+							selectedSegments = append(selectedSegments, map[string]string{v1.LabelTopologyZone: az})
+							break
+						}
+					}
+				}
+				numSelectedSegments := len(selectedSegments)
+				switch {
+				case numSelectedSegments == 0:
+					return nil, logger.LogNewErrorf(log,
+						"could not find the topology of the volume provisioned on datastore %q", params.DatastoreURL)
+				case numSelectedSegments > 1:
+					// This situation will arise when datastore belongs to multiple zones but the
+					// storageTopologyType is `zonal`. This seems like a configuration error.
+					return nil, &common.InvalidTopologyProvisioningError{ErrMsg: fmt.Sprintf(
+						"zonal volume is provisioned on %q datastore which is accessible from multiple zones: %+v. "+
+							"Kindly check the configuration of the storage policy used in the StorageClass.",
+						params.DatastoreURL, selectedSegments)}
+				default:
+					topologySegments = selectedSegments
+				}
+			}
+		} else if len(params.TopologyRequirement.GetPreferred()) == 1 {
+			// If the topology requirement received has just one zone, use the same zone as node affinity terms on PV.
 			topologySegments = append(topologySegments, params.TopologyRequirement.GetPreferred()[0].GetSegments())
 		} else {
 			// If multiple zones are provided as input in the topology requirement, find the zone
@@ -1574,16 +1661,7 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 			var selectedSegments []map[string]string
 			for _, topology := range params.TopologyRequirement.GetPreferred() {
 				for label, value := range topology.GetSegments() {
-					clusterMoref, exists := azClusterMap[value]
-					if !exists || clusterMoref == "" {
-						return nil, logger.LogNewErrorf(log, "could not find the cluster MoID for zone %q in "+
-							"AvailabilityZone resources", value)
-					}
-					datastores, err := params.Vc.GetDatastoresByCluster(ctx, clusterMoref)
-					if err != nil {
-						return nil, logger.LogNewErrorf(log,
-							"failed to fetch datastores associated with cluster %q", clusterMoref)
-					}
+					datastores := params.TopoSegToDatastoresMap[value]
 					for _, ds := range datastores {
 						if ds.Info.Url == params.DatastoreURL {
 							selectedSegments = append(selectedSegments, map[string]string{label: value})
@@ -1616,4 +1694,42 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 	}
 	log.Infof("Topology of the provisioned volume detected as %+v", topologySegments)
 	return topologySegments, nil
+}
+
+// getSharedDatastoresInClusters helps find shared datastores accessible to all given clusters
+func getSharedDatastoresInClusters(ctx context.Context, clusterMorefs []string,
+	vc *cnsvsphere.VirtualCenter) ([]*cnsvsphere.DatastoreInfo, error) {
+	log := logger.GetLogger(ctx)
+	var sharedDatastoresForclusterMorefs []*cnsvsphere.DatastoreInfo
+	for index, clusterMoref := range clusterMorefs {
+		accessibleDs, _, err := cnsvsphere.GetCandidateDatastoresInCluster(ctx, vc, clusterMoref, false)
+		if err != nil {
+			return nil, logger.LogNewErrorf(log,
+				"failed to find candidate datastores to place volume in cluster %q. Error: %v",
+				clusterMoref, err)
+		}
+		if len(accessibleDs) == 0 {
+			return nil, logger.LogNewErrorf(log,
+				"no accessibleDs candidate datastores found to place volume for cluster %v", clusterMoref)
+		}
+		if index == 0 {
+			sharedDatastoresForclusterMorefs = append(sharedDatastoresForclusterMorefs, accessibleDs...)
+		} else {
+			var sharedAccessibleDatastores []*cnsvsphere.DatastoreInfo
+			for _, sharedDatastore := range sharedDatastoresForclusterMorefs {
+				for _, accessibleDsInCluster := range accessibleDs {
+					if sharedDatastore.Info.Url == accessibleDsInCluster.Info.Url {
+						sharedAccessibleDatastores = append(sharedAccessibleDatastores, accessibleDsInCluster)
+						break
+					}
+				}
+			}
+			if len(sharedAccessibleDatastores) == 0 {
+				return nil, logger.LogNewErrorf(log,
+					"no shared candidate datastores found to place volume for clusters %v", clusterMorefs)
+			}
+			sharedDatastoresForclusterMorefs = sharedAccessibleDatastores
+		}
+	}
+	return sharedDatastoresForclusterMorefs, nil
 }

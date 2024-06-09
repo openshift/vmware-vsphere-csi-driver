@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -40,6 +41,10 @@ type CnsVolumeOperationRequestStatus struct {
 	// ErrorCount is the number of times this operation failed for this volume.
 	// Incremented by clients when new OperationDetails are added with error set.
 	ErrorCount int `json:"errorCount,omitempty"`
+	// StorageQuotaDetails stores the details required by the CSI driver and syncer to
+	// access the quota custom resources.
+	// +optional
+	StorageQuotaDetails *QuotaDetails `json:"quotaDetails,omitempty"`
 	// FirstOperationDetails stores the details of the first operation performed on the volume.
 	// For debugging purposes, clients should ensure that this information is never overwritten.
 	// More recent operation details should be stored in the LatestOperationDetails field.
@@ -47,6 +52,18 @@ type CnsVolumeOperationRequestStatus struct {
 	// LatestOperationDetails stores the details of the latest operations performed
 	// on the volume. Should have a maximum of 10 entries.
 	LatestOperationDetails []OperationDetails `json:"latestOperationDetails,omitempty"`
+}
+type QuotaDetails struct {
+	// Reserved keeps a track of the quantity that should be reserved in
+	// storage quota during a create volume/snapshot operation.
+	// +optional
+	Reserved *resource.Quantity `json:"reserved,omitempty"`
+	// StoragePolicyId is the ID associated with the storage policy.
+	StoragePolicyId string `json:"storagePolicyId,omitempty"`
+	// StorageClassName is the name of K8s storage class associated with the given storage policy.
+	StorageClassName string `json:"storageClassName,omitempty"`
+	// Namespace of the PersistentVolumeClaim.
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // OperationDetails stores the details of the operation performed on a volume.
@@ -62,7 +79,7 @@ type OperationDetails struct {
 	// OpID stores the OpID for a task that was invoked on CNS for a volume.
 	OpID string `json:"opId,omitempty"`
 	// TaskStatus describes the current status of the task invoked on CNS.
-	// Valid strings are "In Progress", "Successful" and "Failed".
+	// Valid strings are "In Progress", "Successful", "PartiallyFailed" and "Failed".
 	TaskStatus string `json:"taskStatus,omitempty"`
 	// Error represents the error returned if the task fails on CNS.
 	// Defaults to empty string.

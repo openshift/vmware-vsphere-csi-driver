@@ -318,13 +318,13 @@ func (osUtils *OsUtils) IsBlockVolumePublished(ctx context.Context, volID string
 
 	if dev == nil {
 		// check if target is mount point
-		isMountPoint, err := osUtils.Mounter.IsMountPoint(target)
+		notMountPoint, err := mount.IsNotMountPoint(osUtils.Mounter, target)
 		if err != nil {
 			log.Errorf("error while checking target path %q is mount point err: %v", target, err)
 			return false, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to verify mount point %q. Error: %v", target, err)
 		}
-		if isMountPoint {
+		if !notMountPoint {
 			log.Infof("target %q is mount point", target)
 			return true, nil
 		}

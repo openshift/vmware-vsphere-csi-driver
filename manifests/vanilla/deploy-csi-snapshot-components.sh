@@ -50,16 +50,7 @@ if ! command -v kubectl > /dev/null; then
   exit 1
 fi
 
-feature_state=$(kubectl get configmap internal-feature-states.csi.vsphere.vmware.com -n vmware-system-csi -o jsonpath='{.data.block-volume-snapshot}')
-if [ "$feature_state" = "true" ]
-then
-        echo -e "✅ Verified that block-volume-snapshot feature is enabled"
-else
-        echo -e "❌ ERROR: Please enable the block-volume-snapshot feature to proceed"
-        exit 1
-fi
-
-qualified_version="v6.2.2"
+qualified_version="v7.0.1"
 volumesnapshotclasses_crd="volumesnapshotclasses.snapshot.storage.k8s.io"
 volumesnapshotcontents_crd="volumesnapshotcontents.snapshot.storage.k8s.io"
 volumesnapshots_crd="volumesnapshots.snapshot.storage.k8s.io"
@@ -197,10 +188,13 @@ deploy_validation_webhook() {
 	DNS.3 = ${service}.${namespace}.svc
 EOF
 
-	openssl req -nodes -new -x509 -keyout "${tmpdir}"/ca.key -out "${tmpdir}"/ca.crt -subj "/CN=vSphere CSI Admission Controller Webhook CA"
+	# Default webhook server and ca certificate validity
+	validity=180
+ 
+	openssl req -nodes -new -x509 -keyout "${tmpdir}"/ca.key -days ${validity} -out "${tmpdir}"/ca.crt -subj "/CN=vSphere CSI Admission Controller Webhook CA"
 	openssl genrsa -out "${tmpdir}"/webhook-server-tls.key 2048
 	openssl req -new -key "${tmpdir}"/webhook-server-tls.key -subj "/CN=${service}.${namespace}.svc" -config "${tmpdir}"/server.conf \
-	| openssl x509 -req -CA "${tmpdir}"/ca.crt -CAkey "${tmpdir}"/ca.key -days 180 -CAcreateserial -out "${tmpdir}"/webhook-server-tls.crt -extensions v3_req -extfile "${tmpdir}"/server.conf
+	| openssl x509 -req -CA "${tmpdir}"/ca.crt -CAkey "${tmpdir}"/ca.key -days $((validity-1)) -CAcreateserial -out "${tmpdir}"/webhook-server-tls.crt -extensions v3_req -extfile "${tmpdir}"/server.conf
 	cat <<EOF >"${tmpdir}"/webhook.config
 	[WebHookConfig]
 	port = "8443"

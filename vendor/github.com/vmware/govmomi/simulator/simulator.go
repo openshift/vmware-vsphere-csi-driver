@@ -26,7 +26,6 @@ import (
 	"encoding/pem"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
@@ -98,7 +97,7 @@ type Server struct {
 // New returns an initialized simulator Service instance
 func New(instance *ServiceInstance) *Service {
 	s := &Service{
-		readAll: ioutil.ReadAll,
+		readAll: io.ReadAll,
 		sm:      Map.SessionManager(),
 		sdk:     make(map[string]*Registry),
 	}
@@ -241,11 +240,14 @@ func (s *Service) RoundTrip(ctx context.Context, request, response soap.HasFault
 
 	// Every request has a "This" field.
 	this := req.Elem().FieldByName("This")
+	// Copy request body
+	body := reflect.New(req.Type().Elem())
+	deepCopy(req.Interface(), body.Interface())
 
 	method := &Method{
 		Name: req.Elem().Type().Name(),
 		This: this.Interface().(types.ManagedObjectReference),
-		Body: req.Interface(),
+		Body: body.Interface(),
 	}
 
 	res := s.call(&Context{
@@ -772,7 +774,7 @@ func (s *Server) CertificateFile() (string, error) {
 		return s.caFile, nil
 	}
 
-	f, err := ioutil.TempFile("", "vcsim-")
+	f, err := os.CreateTemp("", "vcsim-")
 	if err != nil {
 		return "", err
 	}
