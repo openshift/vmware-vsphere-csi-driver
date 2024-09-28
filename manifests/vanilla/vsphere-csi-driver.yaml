@@ -207,9 +207,19 @@ spec:
                     values:
                       - vsphere-csi-controller
               topologyKey: "kubernetes.io/hostname"
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: node-role.kubernetes.io/control-plane
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/controlplane
+                operator: Exists
+            - matchExpressions:
+              - key: node-role.kubernetes.io/master
+                operator: Exists
       serviceAccountName: vsphere-csi-controller
-      nodeSelector:
-        node-role.kubernetes.io/control-plane: ""
       tolerations:
         - key: node-role.kubernetes.io/master
           operator: Exists
@@ -230,7 +240,7 @@ spec:
       dnsPolicy: "Default"
       containers:
         - name: csi-attacher
-          image: registry.k8s.io/sig-storage/csi-attacher:v4.5.0
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.5.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -248,7 +258,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: csi-resizer
-          image: registry.k8s.io/sig-storage/csi-resizer:v1.10.0
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.10.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -267,7 +277,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: vsphere-csi-controller
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.2.0
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.3.1
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -289,8 +299,6 @@ spec:
               value: "100"
             - name: INCLUSTER_CLIENT_BURST
               value: "100"
-            - name: GODEBUG
-              value: x509sha1=1,tlsmaxrsasize=16384
             - name: CSI_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -329,7 +337,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: vsphere-syncer
-          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.2.0
+          image: gcr.io/cloud-provider-vsphere/csi/release/syncer:v3.3.1
           args:
             - "--leader-election"
             - "--leader-election-lease-duration=30s"
@@ -353,8 +361,6 @@ spec:
               value: "100"
             - name: INCLUSTER_CLIENT_BURST
               value: "100"
-            - name: GODEBUG
-              value: x509sha1=1,tlsmaxrsasize=16384
             - name: CSI_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -368,7 +374,7 @@ spec:
               name: vsphere-config-volume
               readOnly: true
         - name: csi-provisioner
-          image: registry.k8s.io/sig-storage/csi-provisioner:v4.0.0
+          image: registry.k8s.io/sig-storage/csi-provisioner:v4.0.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -390,7 +396,7 @@ spec:
             - mountPath: /csi
               name: socket-dir
         - name: csi-snapshotter
-          image: registry.k8s.io/sig-storage/csi-snapshotter:v7.0.1
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v7.0.2
           args:
             - "--v=4"
             - "--kube-api-qps=100"
@@ -441,7 +447,7 @@ spec:
       dnsPolicy: "ClusterFirstWithHostNet"
       containers:
         - name: node-driver-registrar
-          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.10.0
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.10.1
           args:
             - "--v=5"
             - "--csi-address=$(ADDRESS)"
@@ -464,7 +470,7 @@ spec:
               - --mode=kubelet-registration-probe
             initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.2.0
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.3.1
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
@@ -609,7 +615,7 @@ spec:
               - --mode=kubelet-registration-probe
             initialDelaySeconds: 3
         - name: vsphere-csi-node
-          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.2.0
+          image: gcr.io/cloud-provider-vsphere/csi/release/driver:v3.3.1
           args:
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"

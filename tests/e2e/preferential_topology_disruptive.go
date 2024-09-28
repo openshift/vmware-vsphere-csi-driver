@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	ginkgo "github.com/onsi/ginkgo/v2"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vmware/govmomi/object"
 	"golang.org/x/crypto/ssh"
@@ -82,7 +82,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		client = f.ClientSet
 		namespace = f.Namespace.Name
 		bootstrap()
-		nodeList, err = fnodes.GetReadySchedulableNodes(f.ClientSet)
+		nodeList, err = fnodes.GetReadySchedulableNodes(ctx, f.ClientSet)
 		framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
 		if !(len(nodeList.Items) > 0) {
 			framework.Failf("Unable to find ready and schedulable Node")
@@ -114,7 +114,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// fetching cluster details
-		clusters, err = getTopologyLevel5ClusterGroupNames(masterIp, sshClientConfig, dataCenters)
+		clusters, err = getTopologyLevel5ClusterGroupNames(masterIp, sshClientConfig, dataCenters, 0)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// creating level-5 allowed topology map
@@ -140,9 +140,9 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Fetching list of datastores available in different racks
-		rack1DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0])
+		rack1DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[1])
+		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Fetching list of datastores which is specific to each rack
@@ -168,7 +168,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 			topologyLength, leafNode, leafNodeTag1)
 
 		//set preferred datatsore time interval
-		setPreferredDatastoreTimeInterval(client, ctx, csiNamespace, csiReplicas, false)
+		setPreferredDatastoreTimeInterval(client, ctx, csiNamespace, csiReplicas)
 
 		clientIndex = 0
 
@@ -178,18 +178,18 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
-		fss.DeleteAllStatefulSets(client, namespace)
+		fss.DeleteAllStatefulSets(ctx, client, namespace)
 		ginkgo.By(fmt.Sprintf("Deleting service nginx in namespace: %v", namespace))
 		err := client.CoreV1().Services(namespace).Delete(ctx, servicename, *metav1.NewDeleteOptions(0))
 		if !apierrors.IsNotFound(err) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 		framework.Logf("Perform preferred datastore tags cleanup after test completion")
-		err = deleteTagCreatedForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks, false)
+		err = deleteTagCreatedForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Recreate preferred datastore tags post cleanup")
-		err = createTagForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks, false)
+		err = createTagForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	})
@@ -255,7 +255,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		ginkgo.By("Tag preferred datastore for volume provisioning")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			preferredDatastorePath, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[i],
-				preferredDatastoreChosen, datastorestMap[i], nil, false, clientIndex)
+				preferredDatastoreChosen, datastorestMap[i], nil, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastorePath...)
 		}
@@ -292,13 +292,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		replicas := *(statefulset.Spec.Replicas)
 		defer func() {
 			framework.Logf("Deleting all statefulset in namespace: %v", namespace)
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		// Waiting for pods status to be Ready.
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
-		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -307,26 +307,26 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			allDatastoresListMap, true, false, false, nil)
+			allDatastoresListMap, true, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false, false)
+			namespace, allowedTopologies, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[i],
-				allowedTopologyRacks[i], false, clientIndex)
+				allowedTopologyRacks[i], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		ginkgo.By("Tag new preferred datatsore for volume provisioning")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			preferredDatastorePath, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[i],
-				preferredDatastoreChosen, datastorestMap[i], preferredDatastorePaths, false, clientIndex)
+				preferredDatastoreChosen, datastorestMap[i], preferredDatastorePaths, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastorePath...)
 			preferredDatastorePathsToDel = append(preferredDatastorePathsToDel, preferredDatastorePath...)
@@ -335,7 +335,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 			ginkgo.By("Preferred datastore tags cleanup")
 			for i := 0; i < len(allowedTopologyRacks); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePathsToDel[i],
-					allowedTopologyRacks[i], false, clientIndex)
+					allowedTopologyRacks[i], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
@@ -371,15 +371,15 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods := fss.GetPodList(client, statefulset)
+		ssPods := fss.GetPodList(ctx, client, statefulset)
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		ginkgo.By("Scale up statefulset replica and verify the replica count")
 		replicas = 10
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, true, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulset)
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -388,36 +388,36 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			allDatastoresListMap, true, false, false, nil)
+			allDatastoresListMap, true, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false, false)
+			namespace, allowedTopologies, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Remove preferred datastore tag in rack-2(cluster-2)")
 		err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[4],
-			allowedTopologyRacks[1], false, clientIndex)
+			allowedTopologyRacks[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Tag new preferred datatsore for volume provisioning")
 		preferredDatastoreRack2New, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, shareddatastoreListMap, nil, false, clientIndex)
+			preferredDatastoreChosen, shareddatastoreListMap, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastoreRack2New...)
 		defer func() {
 			ginkgo.By("Remove preferred datastore tag")
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastoreRack2New[0],
-				allowedTopologyRacks[1], false, clientIndex)
+				allowedTopologyRacks[1], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		// Scale down statefulSets replica count
 		replicas = 5
 		ginkgo.By("Scale down statefulset replica and verify the replica count")
-		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, true, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulset, namespace, replicas, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulset)
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -436,16 +436,16 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(client, statefulset)
+		ssPods = fss.GetPodList(ctx, client, statefulset)
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		// Scale up statefulSets replicas count
 		ginkgo.By("Scale up statefulset replica and verify the replica count")
 		replicas = 13
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, true, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulset)
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -454,13 +454,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			allDatastoresListMap, true, false, false, nil)
+			allDatastoresListMap, true, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologies, false, false)
+			namespace, allowedTopologies, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -507,14 +507,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-2(cluster-2)")
 		preferredDatastore1, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if !strings.Contains(preferredDatastore1[0], "nfs") {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-				allowedTopologyRacks[1], false, clientIndex)
+				allowedTopologyRacks[1], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastore1, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-				preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastore1, false, clientIndex)
+				preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastore1, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore1...)
 		} else {
@@ -522,14 +522,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}
 
 		preferredDatastore2, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, shareddatastoreListMap, nil, false, clientIndex)
+			preferredDatastoreChosen, shareddatastoreListMap, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore2...)
 		defer func() {
 			ginkgo.By("Remove preferred datastore tag")
 			for i := 0; i < len(preferredDatastorePaths); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[i],
-					allowedTopologyRacks[1], false, clientIndex)
+					allowedTopologyRacks[1], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
@@ -555,13 +555,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		replicas := *(statefulset.Spec.Replicas)
 		defer func() {
 			framework.Logf("Deleting all statefulset in namespace: %v", namespace)
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		// Waiting for pods status to be Ready.
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
-		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -570,13 +570,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Migrate the worker vms residing on the nfs datatsore before " +
@@ -584,34 +584,34 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		framework.Logf("Fetch worker vms residing on rack-2")
 		vMsToMigrate, err := fetchWorkerNodeVms(masterIp, sshClientConfig, dataCenters, workerInitialAlias[1],
-			false, clientIndex)
+			clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Move worker vms if residing on nfs to another preferred datastore")
 		isMigrateSuccess, err := migrateVmsFromDatastore(masterIp, sshClientConfig, preferredDatastore2[0],
-			vMsToMigrate, false, clientIndex)
+			vMsToMigrate, clientIndex)
 		gomega.Expect(isMigrateSuccess).To(gomega.BeTrue(), "Migration of vms failed")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Perform power off operation on nfs preferred datastore")
-		datastoreName := powerOffPreferredDatastore(ctx, &e2eVSphere, datastoreOp, dsNameToPerformNimbusOps[1])
+		datastoreName := powerOffPreferredDatastore(ctx, datastoreOp, dsNameToPerformNimbusOps[1])
 		defer func() {
 			datastoreOp = "on"
 			powerOnPreferredDatastore(datastoreName, datastoreOp)
 		}()
 
 		ginkgo.By("Creating PVC")
-		pvclaim1, err := createPVC(client, namespace, nil, "", sc, "")
+		pvclaim1, err := createPVC(ctx, client, namespace, nil, "", sc, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims1 []*v1.PersistentVolumeClaim
 		pvclaims1 = append(pvclaims1, pvclaim1)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs1, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims1, framework.ClaimProvisionTimeout)
+		pvs1, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims1, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs1).NotTo(gomega.BeEmpty())
 		pv1 := pvs1[0]
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim1.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim1.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv1.Spec.CSI.VolumeHandle)
@@ -620,41 +620,41 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}()
 
 		ginkgo.By("Creating pod")
-		pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
+		pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod)
+			err = fpod.DeletePodWithWait(ctx, client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod, preferredDatastorePaths,
+			rack2DatastoreListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologyForRack2, false)
+			allowedTopologyForRack2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// perform statefulset scaleup
 		replicas = 15
 		ginkgo.By("Scale up statefulset replica count from 10 to 15")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Power on the inaccessible datastore")
@@ -663,29 +663,29 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-			allowedTopologyRacks[1], false, clientIndex)
+			allowedTopologyRacks[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		newPreferredDatastore, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, clientIndex)
 		preferredDatastorePaths = append(preferredDatastorePaths, newPreferredDatastore...)
 
 		// perform statefulset scaleup
 		replicas = 20
 		ginkgo.By("Scale up statefulset replica count from 15 to 20")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -732,14 +732,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-1(cluster-1)")
 		preferredDatastore1, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack1, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack1, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if !strings.Contains(preferredDatastore1[0], "nfs") {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-				allowedTopologyRacks[0], false, clientIndex)
+				allowedTopologyRacks[0], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastore1, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-				preferredDatastoreChosen, nonShareddatastoreListMapRack1, preferredDatastore1, false, clientIndex)
+				preferredDatastoreChosen, nonShareddatastoreListMapRack1, preferredDatastore1, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore1...)
 		} else {
@@ -747,14 +747,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}
 
 		preferredDatastore2, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-			preferredDatastoreChosen, shareddatastoreListMap, nil, false, clientIndex)
+			preferredDatastoreChosen, shareddatastoreListMap, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore2...)
 		defer func() {
 			ginkgo.By("Remove preferred datastore tag")
 			for i := 0; i < len(preferredDatastorePaths); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[i],
-					allowedTopologyRacks[0], false, clientIndex)
+					allowedTopologyRacks[0], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
@@ -781,13 +781,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		replicas := *(statefulset.Spec.Replicas)
 		defer func() {
 			framework.Logf("Deleting all statefulset in namespace: %v", namespace)
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		// Waiting for pods status to be Ready.
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
-		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -796,13 +796,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack1DatastoreListMap, false, false, false, nil)
+			rack1DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack1, false, false)
+			namespace, allowedTopologyForRack1, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Migrate all the worker vms residing on the preferred datatsore before " +
@@ -810,41 +810,41 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		framework.Logf("Fetch worker vms sitting on rack-1")
 		vMsToMigrate, err := fetchWorkerNodeVms(masterIp, sshClientConfig, dataCenters, workerInitialAlias[0],
-			false, clientIndex)
+			clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Move worker vms if residing on preferred datastore to another " +
 			"preferred  datastore")
 		isMigrateSuccess, err := migrateVmsFromDatastore(masterIp, sshClientConfig, preferredDatastore2[0],
-			vMsToMigrate, false, clientIndex)
+			vMsToMigrate, clientIndex)
 		gomega.Expect(isMigrateSuccess).To(gomega.BeTrue(), "Migration of vms failed")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Put preferred datastore in maintenance mode")
-		err = preferredDatastoreInMaintenanceMode(masterIp, sshClientConfig, dataCenters, preferredDatastore1[0], false,
+		err = preferredDatastoreInMaintenanceMode(masterIp, sshClientConfig, dataCenters, preferredDatastore1[0],
 			clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		isDatastoreInMaintenanceMode = true
 		defer func() {
 			if isDatastoreInMaintenanceMode {
-				err = exitDatastoreFromMaintenanceMode(masterIp, sshClientConfig, dataCenters,
-					preferredDatastore1[0], false, clientIndex)
+				err = exitDatastoreFromMaintenanceMode(masterIp, sshClientConfig,
+					preferredDatastore1[0], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
 
 		ginkgo.By("Creating PVC")
-		pvclaim1, err := createPVC(client, namespace, nil, "", sc, "")
+		pvclaim1, err := createPVC(ctx, client, namespace, nil, "", sc, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims1 []*v1.PersistentVolumeClaim
 		pvclaims1 = append(pvclaims1, pvclaim1)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs1, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims1, framework.ClaimProvisionTimeout)
+		pvs1, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims1, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs1).NotTo(gomega.BeEmpty())
 		pv1 := pvs1[0]
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim1.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim1.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv1.Spec.CSI.VolumeHandle)
@@ -853,74 +853,74 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}()
 
 		ginkgo.By("Creating pod")
-		pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
+		pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod)
+			err = fpod.DeletePodWithWait(ctx, client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod, namespace, preferredDatastorePaths,
-			rack1DatastoreListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod, preferredDatastorePaths,
+			rack1DatastoreListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologyForRack1, false)
+			allowedTopologyForRack1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// perform statefulset scaleup
 		replicas = 15
 		ginkgo.By("Scale up statefulset replica count from 10 to 15")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack1DatastoreListMap, false, false, false, nil)
+			rack1DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack1, false, false)
+			namespace, allowedTopologyForRack1, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Exit datastore from Maintenance mode")
-		err = exitDatastoreFromMaintenanceMode(masterIp, sshClientConfig, dataCenters,
-			preferredDatastore1[0], false, clientIndex)
+		err = exitDatastoreFromMaintenanceMode(masterIp, sshClientConfig,
+			preferredDatastore1[0], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		isDatastoreInMaintenanceMode = false
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-			allowedTopologyRacks[0], false, clientIndex)
+			allowedTopologyRacks[0], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		newPreferredDatastore, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack1, preferredDatastorePaths, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack1, preferredDatastorePaths, clientIndex)
 		preferredDatastorePaths = append(preferredDatastorePaths, newPreferredDatastore...)
 
 		// perform statefulset scaleup
 		replicas = 20
 		ginkgo.By("Scale up statefulset replica count from 15 to 20")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack1DatastoreListMap, false, false, false, nil)
+			rack1DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack1, false, false)
+			namespace, allowedTopologyForRack1, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -967,14 +967,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-2(cluster-2)")
 		preferredDatastore1, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		if !strings.Contains(preferredDatastore1[0], "nfs") {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-				allowedTopologyRacks[1], false, clientIndex)
+				allowedTopologyRacks[1], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastore1, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-				preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastore1, false, clientIndex)
+				preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastore1, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore1...)
 		} else {
@@ -982,7 +982,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}
 
 		preferredDatastore2, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, shareddatastoreListMap, nil, false, clientIndex)
+			preferredDatastoreChosen, shareddatastoreListMap, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastore2...)
 
@@ -990,7 +990,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 			ginkgo.By("Remove preferred datastore tag")
 			for i := 0; i < len(preferredDatastorePaths); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[i],
-					allowedTopologyRacks[1], false, clientIndex)
+					allowedTopologyRacks[1], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 
@@ -1018,13 +1018,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		replicas := *(statefulset.Spec.Replicas)
 		defer func() {
 			framework.Logf("Deleting all statefulset in namespace: %v", namespace)
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		// Waiting for pods status to be Ready.
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
-		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -1033,13 +1033,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Migrate all the worker vms residing on the nfs datatsore before " +
@@ -1047,17 +1047,17 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		framework.Logf("Fetch worker vms sitting on rack-2")
 		vMsToMigrate, err := fetchWorkerNodeVms(masterIp, sshClientConfig, dataCenters, workerInitialAlias[1],
-			false, clientIndex)
+			clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Move worker vms if residing on nfs to another preferred sharedvmfs datastore")
 		isMigrateSuccess, err := migrateVmsFromDatastore(masterIp, sshClientConfig, preferredDatastore2[0],
-			vMsToMigrate, false, clientIndex)
+			vMsToMigrate, clientIndex)
 		gomega.Expect(isMigrateSuccess).To(gomega.BeTrue(), "Migration of vms failed")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Perform suspend operation on the preferred datastore")
-		datastoreName := powerOffPreferredDatastore(ctx, &e2eVSphere, datastoreOp, dsNameToPerformNimbusOps[1])
+		datastoreName := powerOffPreferredDatastore(ctx, datastoreOp, dsNameToPerformNimbusOps[1])
 		defer func() {
 			ginkgo.By("Power on the suspended datastore")
 			datastoreOp = "on"
@@ -1065,17 +1065,17 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}()
 
 		ginkgo.By("Creating PVC")
-		pvclaim1, err := createPVC(client, namespace, nil, "", sc, "")
+		pvclaim1, err := createPVC(ctx, client, namespace, nil, "", sc, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims1 []*v1.PersistentVolumeClaim
 		pvclaims1 = append(pvclaims1, pvclaim1)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs1, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims1, framework.ClaimProvisionTimeout)
+		pvs1, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims1, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs1).NotTo(gomega.BeEmpty())
 		pv1 := pvs1[0]
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim1.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim1.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv1.Spec.CSI.VolumeHandle)
@@ -1084,41 +1084,41 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}()
 
 		ginkgo.By("Creating pod")
-		pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
+		pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod)
+			err = fpod.DeletePodWithWait(ctx, client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod, preferredDatastorePaths,
+			rack2DatastoreListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologyForRack2, false)
+			allowedTopologyForRack2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// perform statefulset scaleup
 		replicas = 15
 		ginkgo.By("Scale up statefulset replica count from 10 to 15")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Power on the suspended datastore")
@@ -1127,29 +1127,29 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastore1[0],
-			allowedTopologyRacks[1], false, clientIndex)
+			allowedTopologyRacks[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		newPreferredDatastore, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, clientIndex)
 		preferredDatastorePaths = append(preferredDatastorePaths, newPreferredDatastore...)
 
 		// perform statefulset scaleup
 		replicas = 20
 		ginkgo.By("Scale up statefulset replica count from 15 to 20")
-		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false, false)
+		err = scaleUpStatefulSetPod(ctx, client, statefulset, namespace, replicas, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			rack2DatastoreListMap, false, false, false, nil)
+			rack2DatastoreListMap, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack2, false, false)
+			namespace, allowedTopologyForRack2, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })

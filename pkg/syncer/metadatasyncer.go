@@ -90,18 +90,22 @@ var (
 	isMultiVCenterFssEnabled bool
 	// nodeMgr stores the manager to interact with nodeVMs.
 	nodeMgr node.Manager
-	// isPodVMOnStretchSupervisorFSSEnabled is true when PodVMOnStretchedSupervisor FSS is enabled.
-	isPodVMOnStretchSupervisorFSSEnabled bool
+	// IsPodVMOnStretchSupervisorFSSEnabled is true when PodVMOnStretchedSupervisor FSS is enabled.
+	IsPodVMOnStretchSupervisorFSSEnabled bool
 
-	// For core API resource ResourceAPIGroup will be set to "". PVC is part of the core API resources
-	// and ResourceAPIgroupPVC is set to "".
+	// ResourceAPIgroupPVC is an empty string as PVC belongs to the core resource group denoted by `""`.
 	ResourceAPIgroupPVC = ""
+
+	// ResourceAPIgroupSnapshot is API group for volume snapshot
+	ResourceAPIgroupSnapshot = "snapshot.storage.k8s.io"
 )
 
 const (
-	ResourceKindPVC           = "PersistentVolumeClaim"
-	QuotaExtensionServiceName = "volume.cns.vsphere.vmware.com"
-	scParamStoragePolicyID    = "storagePolicyID"
+	ResourceKindPVC               = "PersistentVolumeClaim"
+	ResourceKindSnapshot          = "VolumeSnapshot"
+	PVCQuotaExtensionServiceName  = "volume.cns.vsphere.vmware.com"
+	SnapQuotaExtensionServiceName = "snapshot.cns.vsphere.vmware.com"
+	scParamStoragePolicyID        = "storagePolicyID"
 )
 
 // newInformer returns uninitialized metadataSyncInformer.
@@ -230,9 +234,9 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 			}
 			clusterIDforVolumeMetadata = configInfo.Cfg.Global.SupervisorID
 		}
-		isPodVMOnStretchSupervisorFSSEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		IsPodVMOnStretchSupervisorFSSEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 			common.PodVMOnStretchedSupervisor)
-		if isPodVMOnStretchSupervisorFSSEnabled {
+		if IsPodVMOnStretchSupervisorFSSEnabled {
 			// Start watching on nodes to create CSINodes, if not already present.
 			err = commonco.ContainerOrchestratorUtility.InitializeCSINodes(ctx)
 			if err != nil {
@@ -282,8 +286,8 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		volumeInfoCrDeletionMap[metadataSyncer.host] = make(map[string]bool)
 		volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
 
-		volumeManager, err := volumes.GetManager(ctx, vCenter, nil, false, false, false,
-			metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.ListViewPerf), metadataSyncer.clusterFlavor)
+		volumeManager, err := volumes.GetManager(ctx, vCenter,
+			nil, false, false, false, metadataSyncer.clusterFlavor)
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 		}
@@ -303,7 +307,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 				}
 			}()
 		}
-		if isPodVMOnStretchSupervisorFSSEnabled {
+		if IsPodVMOnStretchSupervisorFSSEnabled {
 			log.Info("Loading CnsVolumeInfo Service to persist mapping for VolumeID to storage policy info")
 			volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
 			if err != nil {
@@ -321,7 +325,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 				return logger.LogNewErrorf(log, "failed to start CnsVolumeOperationRequest informer on %q instances. Error: %v",
 					cnsvolumeoperationrequest.CRDSingular, err)
 			}
-			err = startStoragePolicyQuotaCRInformer(ctx, k8sConfig)
+			err = startStoragePolicyQuotaCRInformer(ctx, k8sConfig, metadataSyncer)
 			if err != nil {
 				return logger.LogNewErrorf(log, "failed to start informer on %q instances. Error: %v",
 					cnsoperatorv1alpha1.CnsStoragePolicyQuotaSingular, err)
@@ -329,7 +333,6 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 		}
 	} else {
 		// code block only applicable to Vanilla
-		tasksListViewEnabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.ListViewPerf)
 		// Initialize volume manager with vcenter credentials for Vanilla flavor
 		if !isMultiVCenterFssEnabled {
 			// Initialize volume manager with vcenter credentials
@@ -345,8 +348,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 			volumeInfoCrDeletionMap[metadataSyncer.host] = make(map[string]bool)
 			volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
 
-			volumeManager, err := volumes.GetManager(ctx, vCenter, nil, false, false, false, tasksListViewEnabled,
-				metadataSyncer.clusterFlavor)
+			volumeManager, err := volumes.GetManager(ctx, vCenter, nil, false, false, false, metadataSyncer.clusterFlavor)
 			if err != nil {
 				return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 			}
@@ -368,8 +370,9 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 					return logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter Host: %q, err: %v",
 						vcconfig.Host, err)
 				}
-				volumeManager, err := volumes.GetManager(ctx, vCenter, nil, false, true, multivCenterTopologyDeployment,
-					tasksListViewEnabled, metadataSyncer.clusterFlavor)
+				volumeManager, err := volumes.GetManager(ctx, vCenter,
+					nil, false, true,
+					multivCenterTopologyDeployment, metadataSyncer.clusterFlavor)
 				if err != nil {
 					return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 				}
@@ -730,7 +733,7 @@ func InitMetadataSyncer(ctx context.Context, clusterFlavor cnstypes.CnsClusterFl
 				}
 			}
 		}()
-		if isPodVMOnStretchSupervisorFSSEnabled {
+		if IsPodVMOnStretchSupervisorFSSEnabled {
 			log.Info("Syncing StoragePolicyUsage CRs with the kubernetes PVs that are in Bound state")
 			storagePolicyUsageCRSync(ctx, metadataSyncer)
 		}
@@ -1356,7 +1359,6 @@ func ReloadConfiguration(metadataSyncer *metadataSyncInformer, reconnectToVCFrom
 	log.Info("Reloading Configuration")
 	var cfg *cnsconfig.Config
 	var err error
-	tasksListViewEnabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.ListViewPerf)
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorVanilla &&
 		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIInternalGeneratedClusterID) {
 		cfg, err = getConfig(ctx)
@@ -1507,8 +1509,7 @@ func ReloadConfiguration(metadataSyncer *metadataSyncInformer, reconnectToVCFrom
 			if err != nil {
 				return logger.LogNewErrorf(log, "failed to reset volume manager. err=%v", err)
 			}
-			volumeManager, err := volumes.GetManager(ctx, vcenter, nil, false, false, false, tasksListViewEnabled,
-				metadataSyncer.clusterFlavor)
+			volumeManager, err := volumes.GetManager(ctx, vcenter, nil, false, false, false, metadataSyncer.clusterFlavor)
 			if err != nil {
 				return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 			}
@@ -2000,23 +2001,24 @@ func csiPVCUpdated(ctx context.Context, pvc *v1.PersistentVolumeClaim,
 		// pvcUpdated and pvUpdated. This helps avoid race condition between
 		// pvUpdated and pvcUpdated handlers when static PV and PVC is created
 		// almost at the same time using single YAML file.
-		err := wait.Poll(5*time.Second, time.Minute, func() (bool, error) {
-			queryFilter := cnstypes.CnsQueryFilter{
-				VolumeIds: []cnstypes.CnsVolumeId{{Id: volumeHandle}},
-			}
-			// Query with empty selection. CNS returns only the volume ID from
-			// its cache.
-			queryResult, err := cnsVolumeMgr.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
-			if err != nil {
-				log.Errorf("PVCUpdated: QueryVolume failed for volume %q with err=%+v", volumeHandle, err.Error())
-				return false, err
-			}
-			if queryResult != nil && len(queryResult.Volumes) == 1 && queryResult.Volumes[0].VolumeId.Id == volumeHandle {
-				log.Infof("PVCUpdated: volume %q found", volumeHandle)
-				volumeFound = true
-			}
-			return volumeFound, nil
-		})
+		err = wait.PollUntilContextTimeout(ctx, 5*time.Second, time.Minute, false,
+			func(ctx context.Context) (bool, error) {
+				queryFilter := cnstypes.CnsQueryFilter{
+					VolumeIds: []cnstypes.CnsVolumeId{{Id: volumeHandle}},
+				}
+				// Query with empty selection. CNS returns only the volume ID from
+				// its cache.
+				queryResult, err := cnsVolumeMgr.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
+				if err != nil {
+					log.Errorf("PVCUpdated: QueryVolume failed for volume %q with err=%+v", volumeHandle, err.Error())
+					return false, err
+				}
+				if queryResult != nil && len(queryResult.Volumes) == 1 && queryResult.Volumes[0].VolumeId.Id == volumeHandle {
+					log.Infof("PVCUpdated: volume %q found", volumeHandle)
+					volumeFound = true
+				}
+				return volumeFound, nil
+			})
 		if err != nil {
 			log.Errorf("PVCUpdated: Error occurred while polling to check if volume is marked as container volume. "+
 				"err: %+v", err)
@@ -2366,7 +2368,7 @@ func csiPVUpdated(ctx context.Context, newPv *v1.PersistentVolume, oldPv *v1.Per
 // Vanills k8s and supervisor cluster.
 func csiPVDeleted(ctx context.Context, pv *v1.PersistentVolume, metadataSyncer *metadataSyncInformer) {
 	log := logger.GetLogger(ctx)
-	if isPodVMOnStretchSupervisorFSSEnabled {
+	if IsPodVMOnStretchSupervisorFSSEnabled {
 		volumeInfo, err := volumeInfoService.GetVolumeInfoForVolumeID(ctx, pv.Spec.CSI.VolumeHandle)
 		if err != nil {
 			log.Errorf("failed to fetch CnsVolumeInfo CR. Error: %+v", err)
@@ -2574,7 +2576,7 @@ func csiPVDeleted(ctx context.Context, pv *v1.PersistentVolume, metadataSyncer *
 				}
 			}
 		} else if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
-			isPodVMOnStretchSupervisorFSSEnabled {
+			IsPodVMOnStretchSupervisorFSSEnabled {
 			// Delete CNSVolumeInfo CR for the volume ID.
 			err = volumeInfoService.DeleteVolumeInfo(ctx, volumeHandle)
 			if err != nil {
@@ -2813,10 +2815,11 @@ func createStoragePolicyUsageCR(ctx context.Context, quotaClient client.Client, 
 
 // policyQuotaCRAdded, on creation of StoragePolicyQuota object, creates StoragePolicyUsage object
 // for the Storage Policy Id and storage classes asspociated, in given same namespace as of StoragePolicyQuota object.
-func policyQuotaCRAdded(obj interface{}) {
+func policyQuotaCRAdded(obj interface{}, metadataSyncer *metadataSyncInformer) {
 	ctx, log := logger.GetNewContextWithLogger()
 	// Verify object received.
 	var policyQuotaObj storagepolicyusagev1alpha1.StoragePolicyQuota
+	var foundPvcUsageInstance, foundSnapUsageInstance bool
 	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).Object,
 		&policyQuotaObj)
 	if err != nil {
@@ -2847,8 +2850,9 @@ func policyQuotaCRAdded(obj interface{}) {
 		log.Errorf("policyQuotaCRAdded: Failed to list storageclasses. Err: %+v", err)
 		return
 	}
+	isStorageQuotaM2Enabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.StorageQuotaM2)
 	// For each storage class associated with storage policy id of StoragePolicyQuota CR,
-	// check if StoragePolicyUsage CR with resource type PVC exists.
+	// check if StoragePolicyUsage CR with resource type PVC or Snapshot exists.
 	// If not, create one with all parameters specified.
 	for _, sc := range storageClassList.Items {
 		if sc.Parameters[scParamStoragePolicyID] == storagePolicyId {
@@ -2861,20 +2865,23 @@ func policyQuotaCRAdded(obj interface{}) {
 					cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, namespace, err)
 				return
 			}
-			foundPvcUsageInstance := false
+			foundPvcUsageInstance = false
+			foundSnapUsageInstance = false
 			for _, usage := range policyUsageList.Items {
 				if usage.Spec.StoragePolicyId == storagePolicyId &&
 					usage.Spec.StorageClassName == sc.Name {
 					if usage.Spec.ResourceKind == ResourceKindPVC {
 						foundPvcUsageInstance = true
-						break
+					}
+					if usage.Spec.ResourceKind == ResourceKindSnapshot && isStorageQuotaM2Enabled {
+						foundSnapUsageInstance = true
 					}
 				}
 			}
 			if !foundPvcUsageInstance {
 				pvcQuotaUsageInstanceName := sc.Name + "-" + "pvc-usage"
 				_, err := createStoragePolicyUsageCR(ctx, storageQuotaClient, pvcQuotaUsageInstanceName, namespace,
-					storagePolicyId, sc.Name, ResourceKindPVC, ResourceAPIgroupPVC, QuotaExtensionServiceName)
+					storagePolicyId, sc.Name, ResourceKindPVC, ResourceAPIgroupPVC, PVCQuotaExtensionServiceName)
 				if err != nil {
 					log.Errorf("policyQuotaCRAdded: Failed to create %v CR for %v kind. Err: %+v",
 						cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, ResourceKindPVC, err)
@@ -2883,12 +2890,94 @@ func policyQuotaCRAdded(obj interface{}) {
 				log.Infof("policyQuotaCRAdded: Created %v for policy %v storageclass %v resourceKind %v",
 					cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, storagePolicyId, sc.Name, ResourceKindPVC)
 			}
+			if isStorageQuotaM2Enabled && !foundSnapUsageInstance {
+				snapQuotaUsageInstanceName := sc.Name + "-" + "snapshot-usage"
+				_, err := createStoragePolicyUsageCR(ctx, storageQuotaClient, snapQuotaUsageInstanceName, namespace,
+					storagePolicyId, sc.Name, ResourceKindSnapshot, ResourceAPIgroupSnapshot, SnapQuotaExtensionServiceName)
+				if err != nil {
+					log.Errorf("policyQuotaCRAdded: Failed to create %v CR for %v kind. Err: %+v",
+						cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, ResourceKindSnapshot, err)
+					return
+				}
+				log.Infof("policyQuotaCRAdded: Created %v for policy %v storageclass %v resourceKind %v",
+					cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, storagePolicyId, sc.Name, ResourceKindSnapshot)
+			}
 		}
 	}
 }
 
+// policyQuotaCRDeleted, on deletion of StoragePolicyQuota object, deletes StoragePolicyUsage object
+// for the Storage Policy Id and storage classes asspociated, in given same namespace as of StoragePolicyQuota object.
+func policyQuotaCRDeleted(obj interface{}, metadataSyncer *metadataSyncInformer) {
+	ctx, log := logger.GetNewContextWithLogger()
+	// Verify object received.
+	var policyQuotaObj storagepolicyusagev1alpha1.StoragePolicyQuota
+	err := runtime.DefaultUnstructuredConverter.FromUnstructured(obj.(*unstructured.Unstructured).Object,
+		&policyQuotaObj)
+	if err != nil {
+		log.Errorf("policyQuotaCRDeleted: failed to cast object %+v to %s. Error: %v", obj,
+			cnsoperatorv1alpha1.CnsStoragePolicyQuotaSingular, err)
+		return
+	}
+	namespace := policyQuotaObj.Namespace
+	storagePolicyId := policyQuotaObj.Spec.StoragePolicyId
+	// Get storage classes associated with storage policy id of StoragePolicyQuota CR added
+	config, err := k8s.GetKubeConfig(ctx)
+	if err != nil {
+		log.Errorf("policyQuotaCRDeleted: Failed to get KubeConfig. err: %v", err)
+		return
+	}
+	storageQuotaClient, err := k8s.NewClientForGroup(ctx, config, cnsoperatorv1alpha1.GroupName)
+	if err != nil {
+		log.Errorf("policyQuotaCRDeleted: Failed to create CnsOperator client. Err: %+v", err)
+		return
+	}
+	policyUsageList := &storagepolicyusagev1alpha1.StoragePolicyUsageList{}
+	err = storageQuotaClient.List(ctx, policyUsageList, &client.ListOptions{
+		Namespace: namespace,
+	})
+	if err != nil {
+		log.Errorf("policyQuotaCRDeleted: Failed to list %v CRs associated in namespace %v. Err: %+v",
+			cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, namespace, err)
+		return
+	}
+	isStorageQuotaM2Enabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.StorageQuotaM2)
+	// For each storagepolicyusage matching with the storage policy id, delete the usage CR.
+	for _, usage := range policyUsageList.Items {
+		if usage.Spec.StoragePolicyId == storagePolicyId &&
+			(usage.Spec.ResourceKind == ResourceKindPVC ||
+				(isStorageQuotaM2Enabled && usage.Spec.ResourceKind == ResourceKindSnapshot)) {
+			policyUsageCR := storagepolicyusagev1alpha1.StoragePolicyUsage{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      usage.Name,
+					Namespace: namespace,
+				},
+			}
+			err := storageQuotaClient.Delete(ctx, &policyUsageCR)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Infof("policyQuotaCRDeleted: StoragePolicyUsageCR instance %q/%q already deleted. "+
+						"Returning success for the delete operation", namespace, usage.Name)
+					continue
+				}
+				log.Errorf("policyQuotaCRDeleted: Failed to delete StoragePolicyUsageCR for policyID %v "+
+					"storageclass %v resourceKind %v. Err: %+v",
+					storagePolicyId, usage.Spec.StorageClassName, ResourceAPIgroupPVC, err)
+				continue
+			}
+			log.Infof("policyQuotaCRDeleted: StoragePolicyUsageCR instance %q/%q successfully deleted.",
+				namespace, usage.Name)
+			continue
+		}
+		log.Infof("policyQuotaCRDeleted: StoragePolicyUsageCR instance %q/%q does not have the matching "+
+			"storagepolicyid %v with quota object getting deleted or has invalid resourceKind %s associated."+
+			"Ignoring this usage CR object.", namespace, usage.Name, storagePolicyId, usage.Spec.ResourceKind)
+	}
+}
+
 // startStoragePolicyQuotaCRInformer creates and starts an informer for StoragePolicyQuota custom resource.
-func startStoragePolicyQuotaCRInformer(ctx context.Context, cfg *restclient.Config) error {
+func startStoragePolicyQuotaCRInformer(ctx context.Context, cfg *restclient.Config,
+	metadataSyncer *metadataSyncInformer) error {
 	log := logger.GetLogger(ctx)
 	// Create an informer for StoragePolicyQuota instances.
 	dynInformer, err := k8s.GetDynamicInformer(ctx, cnsoperatorv1alpha1.GroupName,
@@ -2900,7 +2989,10 @@ func startStoragePolicyQuotaCRInformer(ctx context.Context, cfg *restclient.Conf
 	policyQuotaInformer := dynInformer.Informer()
 	_, err = policyQuotaInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
-			policyQuotaCRAdded(obj)
+			policyQuotaCRAdded(obj, metadataSyncer)
+		},
+		DeleteFunc: func(obj interface{}) {
+			policyQuotaCRDeleted(obj, metadataSyncer)
 		},
 	})
 	if err != nil {
@@ -3000,7 +3092,7 @@ func storagePolicyUsageCRSync(ctx context.Context, metadataSyncer *metadataSyncI
 			if apierrors.IsNotFound(err) {
 				_, err := createStoragePolicyUsageCR(ctx, cnsOperatorClient, storagePolicyUsageInstanceName, pvc.Namespace,
 					scNameToPolicyIdMap[*pvc.Spec.StorageClassName], *pvc.Spec.StorageClassName, ResourceKindPVC,
-					ResourceAPIgroupPVC, QuotaExtensionServiceName)
+					ResourceAPIgroupPVC, PVCQuotaExtensionServiceName)
 				if err != nil {
 					log.Errorf("storagePolicyUsageCRSync: Failed to create %q CR for %q kind. Err: %+v",
 						cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, ResourceKindPVC, err)
@@ -3037,7 +3129,7 @@ func storagePolicyUsageCRSync(ctx context.Context, metadataSyncer *metadataSyncI
 			if err != nil {
 				if apierrors.IsNotFound(err) {
 					_, err := createStoragePolicyUsageCR(ctx, cnsOperatorClient, storagePolicyUsageInstanceName, ns,
-						scNameToPolicyIdMap[scName], scName, ResourceKindPVC, ResourceAPIgroupPVC, QuotaExtensionServiceName)
+						scNameToPolicyIdMap[scName], scName, ResourceKindPVC, ResourceAPIgroupPVC, PVCQuotaExtensionServiceName)
 					if err != nil {
 						log.Errorf("storagePolicyUsageCRSync: Failed to create %q CR for %q kind. Err: %+v",
 							cnsoperatorv1alpha1.CnsStoragePolicyUsageSingular, ResourceKindPVC, err)

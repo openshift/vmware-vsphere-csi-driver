@@ -48,12 +48,13 @@ import (
 
 	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
 	storagev1 "k8s.io/api/storage/v1"
+
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/v1alpha1"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
-	internalapis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis"
 	cnsvolumeinfov1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo/v1alpha1"
 	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology/v1alpha1"
@@ -69,11 +70,7 @@ func GetKubeConfig(ctx context.Context) (*restclient.Config, error) {
 	log := logger.GetLogger(ctx)
 	var config *restclient.Config
 	var err error
-	kubecfgPath := os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
-	kubecfgFlag := flag.Lookup("kubeconfig")
-	if kubecfgFlag != nil {
-		kubecfgPath = kubecfgFlag.Value.(flag.Getter).Get().(string)
-	}
+	kubecfgPath := getKubeConfigPath(ctx)
 	if kubecfgPath != "" {
 		log.Infof("k8s client using kubeconfig from %s", kubecfgPath)
 		config, err = clientcmd.BuildConfigFromFlags("", kubecfgPath)
@@ -91,6 +88,40 @@ func GetKubeConfig(ctx context.Context) (*restclient.Config, error) {
 	}
 	config.QPS, config.Burst = getClientThroughput(ctx, false)
 	return config, nil
+}
+
+// getKubeConfigPath returns the Kubeconfig path from the environment variable KUBECONFIG.
+// If the kubeconfig flag is supplied as an argument to the process, then it overrides the value
+// obtained from the KUBECONFIG environment variable and uses the supplied flag value.
+func getKubeConfigPath(ctx context.Context) string {
+	log := logger.GetLogger(ctx)
+	var kubecfgPath string
+	// Check if the kubeconfig flag is set
+	kubecfgFlag := flag.Lookup("kubeconfig")
+	if kubecfgFlag != nil {
+		flagValue := kubecfgFlag.Value.String()
+		if flagValue != "" {
+			kubecfgPath = flagValue
+			log.Infof("Kubeconfig path obtained from kubeconfig flag: %q", kubecfgPath)
+		} else {
+			log.Info("Kubeconfig flag is set but empty, checking environment variable value")
+		}
+	} else {
+		log.Info("Kubeconfig flag not set, checking environment variable value")
+	}
+	if kubecfgPath == "" {
+		// Get the Kubeconfig path from the environment variable
+		kubecfgPath = os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
+		log.Infof("Kubeconfig path obtained from environment variable %q: %q",
+			clientcmd.RecommendedConfigPathEnvVar, kubecfgPath)
+	}
+	// Final logging of the Kubeconfig path used
+	if kubecfgPath == "" {
+		log.Info("No Kubeconfig path found, either from environment variable or flag")
+	} else {
+		log.Infof("Final Kubeconfig path used: %q", kubecfgPath)
+	}
+	return kubecfgPath
 }
 
 // NewClient creates a newk8s client based on a service account.
@@ -246,12 +277,19 @@ func NewCnsFileAccessConfigWatcher(ctx context.Context, config *restclient.Confi
 		Kind:    cnsfileaccessconfigKind,
 	}
 
-	client, err := apiutils.RESTClientForGVK(gvk, false, config, serializer.NewCodecFactory(scheme))
+	httpClient, err := restclient.HTTPClientFor(config)
+	if err != nil {
+		log.Errorf("failed to create Http.Client with err: %+v", err)
+		return nil, err
+	}
+
+	restClient, err := apiutils.RESTClientForGVK(gvk, false, config,
+		serializer.NewCodecFactory(scheme), httpClient)
 	if err != nil {
 		log.Errorf("failed to create RESTClient with err: %+v", err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(client, cnsfileaccessconfigKind, namespace, fields.Everything()), nil
+	return cache.NewListWatchFromClient(restClient, cnsfileaccessconfigKind, namespace, fields.Everything()), nil
 }
 
 // NewVirtualMachineWatcher creates a new ListWatch for VirtualMachines given
@@ -272,12 +310,19 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 		Kind:    virtualMachineKind,
 	}
 
-	client, err := apiutils.RESTClientForGVK(gvk, false, config, serializer.NewCodecFactory(scheme))
+	httpClient, err := restclient.HTTPClientFor(config)
+	if err != nil {
+		log.Errorf("failed to create Http.Client with err: %+v", err)
+		return nil, err
+	}
+
+	restClient, err := apiutils.RESTClientForGVK(gvk, false, config,
+		serializer.NewCodecFactory(scheme), httpClient)
 	if err != nil {
 		log.Errorf("failed to create RESTClient with err: %+v", err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(client, virtualMachineKind, namespace, fields.Everything()), nil
+	return cache.NewListWatchFromClient(restClient, virtualMachineKind, namespace, fields.Everything()), nil
 }
 
 // NewCSINodeTopologyWatcher creates a new ListWatch for CSINodeTopology objects
@@ -298,12 +343,19 @@ func NewCSINodeTopologyWatcher(ctx context.Context, config *restclient.Config) (
 		Kind:    csiNodeTopologyKind,
 	}
 
-	client, err := apiutils.RESTClientForGVK(gvk, false, config, serializer.NewCodecFactory(scheme))
+	httpClient, err := restclient.HTTPClientFor(config)
+	if err != nil {
+		log.Errorf("failed to create Http.Client with err: %+v", err)
+		return nil, err
+	}
+
+	restClient, err := apiutils.RESTClientForGVK(gvk, false, config,
+		serializer.NewCodecFactory(scheme), httpClient)
 	if err != nil {
 		log.Errorf("failed to create RESTClient for %s CR with err: %+v", csiNodeTopologyKind, err)
 		return nil, err
 	}
-	return cache.NewListWatchFromClient(client, csiNodeTopologyKind, v1.NamespaceAll, fields.Everything()), nil
+	return cache.NewListWatchFromClient(restClient, csiNodeTopologyKind, v1.NamespaceAll, fields.Everything()), nil
 }
 
 // CreateKubernetesClientFromConfig creaates a newk8s client from given
@@ -485,26 +537,27 @@ func createCustomResourceDefinition(ctx context.Context, newCrd *apiextensionsv1
 func waitForCustomResourceToBeEstablished(ctx context.Context,
 	clientSet apiextensionsclientset.Interface, crdName string) error {
 	log := logger.GetLogger(ctx)
-	err := wait.Poll(pollTime, timeout, func() (bool, error) {
-		crd, err := clientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
-		if err != nil {
-			log.Errorf("Failed to get %q CRD with err: %+v", crdName, err)
-			return false, err
-		}
-		for _, cond := range crd.Status.Conditions {
-			switch cond.Type {
-			case apiextensionsv1.Established:
-				if cond.Status == apiextensionsv1.ConditionTrue {
-					return true, err
-				}
-			case apiextensionsv1.NamesAccepted:
-				if cond.Status == apiextensionsv1.ConditionFalse {
-					log.Debugf("Name conflict while waiting for %q CRD creation", cond.Reason)
+	err := wait.PollUntilContextTimeout(ctx, pollTime, timeout, true,
+		func(ctx context.Context) (bool, error) {
+			crd, err := clientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
+			if err != nil {
+				log.Errorf("Failed to get %q CRD with err: %+v", crdName, err)
+				return false, err
+			}
+			for _, cond := range crd.Status.Conditions {
+				switch cond.Type {
+				case apiextensionsv1.Established:
+					if cond.Status == apiextensionsv1.ConditionTrue {
+						return true, err
+					}
+				case apiextensionsv1.NamesAccepted:
+					if cond.Status == apiextensionsv1.ConditionFalse {
+						log.Debugf("Name conflict while waiting for %q CRD creation", cond.Reason)
+					}
 				}
 			}
-		}
-		return false, err
-	})
+			return false, err
+		})
 
 	// If there is an error, delete the object to keep it clean.
 	if err != nil {

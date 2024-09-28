@@ -22,7 +22,7 @@ import (
 	"os/exec"
 	"strings"
 
-	ginkgo "github.com/onsi/ginkgo/v2"
+	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vmware/govmomi/object"
 	"golang.org/x/crypto/ssh"
@@ -115,7 +115,7 @@ func deleteUserPermissions(masterIp string, sshClientConfig *ssh.ClientConfig,
 	}
 
 	for i := 0; i < len(dataCenter); i++ {
-		err = deleteDataStoreLevelPermission(masterIp, sshClientConfig, testUser, dataCenter[i].InventoryPath, datastores)
+		err = deleteDataStoreLevelPermission(masterIp, sshClientConfig, testUser, datastores)
 		if err != nil {
 			if strings.Contains(err.Error(), "The object or item referred to could not be found") {
 				framework.Logf("No datastore level permissions exist for a testuser")
@@ -205,7 +205,7 @@ func deleteClusterLevelPermission(masterIp string, sshClientConfig *ssh.ClientCo
 
 // deleteDataStoreLevelPermission method is used to delete datastore level permissions from a test user
 func deleteDataStoreLevelPermission(masterIp string, sshClientConfig *ssh.ClientConfig,
-	testUser string, dataCenter string, datastores []string) error {
+	testUser string, datastores []string) error {
 	for i := 0; i < len(datastores); i++ {
 		deleteDataStoreLevelPermissions := govcLoginCmd() + "govc permissions.remove -principal " +
 			testUser + " '" + datastores[i] + "'"
@@ -518,7 +518,7 @@ func setClusterLevelPermission(masterIp string, sshClientConfig *ssh.ClientConfi
 
 // setDataStoreLevelPermission is used to set datastore level permissions for test user
 func setDataStoreLevelPermission(masterIp string, sshClientConfig *ssh.ClientConfig, testUserAlias string,
-	testUser string, dataCenter string, datastores []string, propagateVal string, datastoreRole string) error {
+	testUser string, datastores []string, propagateVal string, datastoreRole string) error {
 	for i := 0; i < len(datastores); i++ {
 		setPermissionForDataStore := govcLoginCmd() + "govc permissions.set -principal " +
 			testUserAlias + " " + "-propagate=" + propagateVal + " -role " + datastoreRole + "-" + testUser + " '" +
@@ -634,7 +634,7 @@ func createTestUserAndAssignRolesPrivileges(masterIp string, sshClientConfig *ss
 			framework.Logf("Assign datastores level permissions")
 			for i := 0; i < len(dataCenters); i++ {
 				err := setDataStoreLevelPermission(masterIp, sshClientConfig, configSecretTestUserAlias, configSecretTestUser,
-					dataCenters[i].InventoryPath, datastores, propagateVal, key)
+					datastores, propagateVal, key)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred(), "couldn't execute command on host: %v , error: %s",
 					masterIp, err)
 			}
@@ -668,7 +668,7 @@ deleteTestUserAndRemoveRolesPrivileges method is used to delete test user and to
 roles and privileges to test user
 */
 func deleteTestUserAndRemoveRolesPrivileges(masterIp string, sshClientConfig *ssh.ClientConfig,
-	configSecretTestUser string, configSecretTestUserPassword string, configSecretTestUserAlias string,
+	configSecretTestUser string, configSecretTestUserAlias string,
 	propagateVal string, dataCenters []*object.Datacenter, clusters []string, hosts []string,
 	vms []string, datastores []string) {
 	framework.Logf("Delete users roles and permissions")
@@ -725,39 +725,39 @@ func getHostName(hostIp string) string {
 verifyPvcPodCreationAfterConfigSecretChange util method verifies pvc creation and pod creation
 after updating vsphere config secret with different testusers
 */
-func verifyPvcPodCreationAfterConfigSecretChange(client clientset.Interface, namespace string,
+func verifyPvcPodCreationAfterConfigSecretChange(ctx context.Context, client clientset.Interface, namespace string,
 	storageclass *storagev1.StorageClass) (*v1.Pod, *v1.PersistentVolumeClaim,
 	*v1.PersistentVolume) {
 	ginkgo.By("Creating PVC")
-	pvclaim, err := createPVC(client, namespace, nil, "", storageclass, "")
+	pvclaim, err := createPVC(ctx, client, namespace, nil, "", storageclass, "")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	var pvclaims []*v1.PersistentVolumeClaim
 	pvclaims = append(pvclaims, pvclaim)
 	ginkgo.By("Waiting for all claims to be in bound state")
-	pvs, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims, framework.ClaimProvisionTimeout)
+	pvs, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims, framework.ClaimProvisionTimeout)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(pvs).NotTo(gomega.BeEmpty())
 	pv := pvs[0]
 
 	ginkgo.By("Creating pod")
-	pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim}, false, "")
+	pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim}, false, "")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	ginkgo.By("Verify volume metadata for POD, PVC and PV")
-	err = waitAndVerifyCnsVolumeMetadata(pv.Spec.CSI.VolumeHandle, pvclaim, pv, pod)
+	err = waitAndVerifyCnsVolumeMetadata(ctx, pv.Spec.CSI.VolumeHandle, pvclaim, pv, pod)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	return pod, pvclaim, pv
 }
 
 /*performCleanUpOfPvcPod util method is used to perform cleanup of pods, pvc after testcase execution*/
-func performCleanUpOfPvcPod(client clientset.Interface, namespace string, pod *v1.Pod,
+func performCleanUpOfPvcPod(ctx context.Context, client clientset.Interface, namespace string, pod *v1.Pod,
 	pvclaim *v1.PersistentVolumeClaim, pv *v1.PersistentVolume) {
 	ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod.Name, namespace))
-	err := fpod.DeletePodWithWait(client, pod)
+	err := fpod.DeletePodWithWait(ctx, client, pod)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	err = fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+	err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim.Name, namespace)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.By("Verify PVs, volumes are deleted from CNS")
 	err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv.Spec.CSI.VolumeHandle)
@@ -771,8 +771,8 @@ and privilege access to the test user.
 func createTestUserAndAssignLimitedRolesAndPrivileges(masterIp string, sshClientConfig *ssh.ClientConfig,
 	configSecretTestUser string,
 	configSecretTestUserPassword string, configSecretTestUserAlias string, propagateVal string,
-	dataCenters []*object.Datacenter, clusters []string, hosts []string,
-	vms []string, datastores []string) {
+	clusters []string, hosts []string,
+) {
 	roleMap := userRoleMap()
 
 	framework.Logf("Create TestUser")

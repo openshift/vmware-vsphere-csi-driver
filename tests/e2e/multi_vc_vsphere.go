@@ -14,6 +14,7 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	"github.com/vmware/govmomi/pbm"
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
 
@@ -184,7 +185,7 @@ func (vs *multiVCvSphere) getVMByUUIDWithWaitForMultiVC(ctx context.Context,
 verifyVolumeIsAttachedToVMInMultiVC checks volume is attached to the VM by vmUUID.
 This function returns true if volume is attached to the VM, else returns false
 */
-func (vs *multiVCvSphere) verifyVolumeIsAttachedToVMInMultiVC(client clientset.Interface, volumeID string,
+func (vs *multiVCvSphere) verifyVolumeIsAttachedToVMInMultiVC(volumeID string,
 	vmUUID string) (bool, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -262,22 +263,23 @@ func (vs *multiVCvSphere) waitForVolumeDetachedFromNodeInMultiVC(client clientse
 		}
 		return false, err
 	}
-	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
-		var vmUUID string
-		if vanillaCluster {
-			vmUUID = getNodeUUID(ctx, client, nodeName)
-		} else {
-			vmUUID, _ = getVMUUIDFromNodeName(nodeName)
-		}
-		diskAttached, err := vs.verifyVolumeIsAttachedToVMInMultiVC(client, volumeID, vmUUID)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		if !diskAttached {
-			framework.Logf("Disk: %s successfully detached", volumeID)
-			return true, nil
-		}
-		framework.Logf("Waiting for disk: %q to be detached from the node :%q", volumeID, nodeName)
-		return false, nil
-	})
+	err := wait.PollUntilContextTimeout(ctx, poll, pollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			var vmUUID string
+			if vanillaCluster {
+				vmUUID = getNodeUUID(ctx, client, nodeName)
+			} else {
+				vmUUID, _ = getVMUUIDFromNodeName(nodeName)
+			}
+			diskAttached, err := vs.verifyVolumeIsAttachedToVMInMultiVC(volumeID, vmUUID)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if !diskAttached {
+				framework.Logf("Disk: %s successfully detached", volumeID)
+				return true, nil
+			}
+			framework.Logf("Waiting for disk: %q to be detached from the node :%q", volumeID, nodeName)
+			return false, nil
+		})
 	if err != nil {
 		return false, nil
 	}
@@ -289,19 +291,20 @@ waitForCNSVolumeToBeDeletedInMultiVC executes QueryVolume API on vCenter and ver
 volume entries are deleted from vCenter Database
 */
 func (vs *multiVCvSphere) waitForCNSVolumeToBeDeletedInMultiVC(volumeID string) error {
-	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
-		queryResult, err := vs.queryCNSVolumeWithResultInMultiVC(volumeID)
-		if err != nil {
-			return true, err
-		}
+	err := wait.PollUntilContextTimeout(context.Background(), poll, pollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			queryResult, err := vs.queryCNSVolumeWithResultInMultiVC(volumeID)
+			if err != nil {
+				return true, err
+			}
 
-		if len(queryResult.Volumes) == 0 {
-			framework.Logf("volume %q has successfully deleted", volumeID)
-			return true, nil
-		}
-		framework.Logf("waiting for Volume %q to be deleted.", volumeID)
-		return false, nil
-	})
+			if len(queryResult.Volumes) == 0 {
+				framework.Logf("volume %q has successfully deleted", volumeID)
+				return true, nil
+			}
+			framework.Logf("waiting for Volume %q to be deleted.", volumeID)
+			return false, nil
+		})
 	if err != nil {
 		return err
 	}
@@ -314,16 +317,17 @@ volume labels are updated by metadata-syncer
 */
 func (vs *multiVCvSphere) waitForLabelsToBeUpdatedInMultiVC(volumeID string, matchLabels map[string]string,
 	entityType string, entityName string, entityNamespace string) error {
-	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
-		err := vs.verifyLabelsAreUpdatedInMultiVC(volumeID, matchLabels, entityType, entityName, entityNamespace)
-		if err == nil {
-			return true, nil
-		} else {
-			return false, nil
-		}
-	})
+	err := wait.PollUntilContextTimeout(context.Background(), poll, pollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			err := vs.verifyLabelsAreUpdatedInMultiVC(volumeID, matchLabels, entityType, entityName, entityNamespace)
+			if err == nil {
+				return true, nil
+			} else {
+				return false, nil
+			}
+		})
 	if err != nil {
-		if err == wait.ErrWaitTimeout {
+		if wait.Interrupted(err) {
 			return fmt.Errorf("labels are not updated to %+v for %s %q for volume %s",
 				matchLabels, entityType, entityName, volumeID)
 		}
@@ -384,18 +388,49 @@ waitForCNSVolumeToBeCreatedInMultiVC executes QueryVolume API on vCenter and ver
 volume entries are created in a multi vCenter database
 */
 func (vs *multiVCvSphere) waitForCNSVolumeToBeCreatedInMultiVC(volumeID string) error {
-	err := wait.Poll(poll, pollTimeout, func() (bool, error) {
-		queryResult, err := vs.queryCNSVolumeWithResultInMultiVC(volumeID)
+	err := wait.PollUntilContextTimeout(context.Background(), poll, pollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			queryResult, err := vs.queryCNSVolumeWithResultInMultiVC(volumeID)
+			if err != nil {
+				return true, err
+			}
+
+			if len(queryResult.Volumes) == 1 && queryResult.Volumes[0].VolumeId.Id == volumeID {
+				framework.Logf("volume %q has successfully created", volumeID)
+				return true, nil
+			}
+			framework.Logf("waiting for Volume %q to be created.", volumeID)
+			return false, nil
+		})
+	return err
+}
+
+// GetSpbmPolicyID returns profile ID for the specified storagePolicyName
+func (vs *multiVCvSphere) GetSpbmPolicyIDInMultiVc(storagePolicyName string) string {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var policyIDStrings []string
+
+	for _, govmomiClient := range vs.multiVcClient {
+		vimClient := govmomiClient.Client
+
+		pbmClient, err := pbm.NewClient(ctx, vimClient)
 		if err != nil {
-			return true, err
+			framework.Logf("Error creating PBM client: %v", err)
+			continue
 		}
 
-		if len(queryResult.Volumes) == 1 && queryResult.Volumes[0].VolumeId.Id == volumeID {
-			framework.Logf("volume %q has successfully created", volumeID)
-			return true, nil
+		profileID, err := pbmClient.ProfileIDByName(ctx, storagePolicyName)
+		if err != nil {
+			framework.Logf("Error getting profile ID: %v", err)
+			continue
 		}
-		framework.Logf("waiting for Volume %q to be created.", volumeID)
-		return false, nil
-	})
-	return err
+
+		framework.Logf("storage policy id: %s for storage policy name is: %s", profileID, storagePolicyName)
+		policyIDStrings = append(policyIDStrings, profileID)
+	}
+
+	// Join policy ID strings with a comma separator
+	return strings.Join(policyIDStrings, ",")
 }

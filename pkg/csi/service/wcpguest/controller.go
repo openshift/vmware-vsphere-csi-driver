@@ -622,6 +622,12 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 		if isVolumePresentInSpec {
 			break
 		}
+
+		// Create a patch for the VM prior to modifying it with the new volumes.
+		vmPatch := client.MergeFromWithOptions(
+			virtualMachine.DeepCopy(),
+			client.MergeFromWithOptimisticLock{})
+
 		// Volume is not present in the virtualMachine.Spec.Volumes, so adding
 		// volume in the spec and patching virtualMachine instance.
 		vmvolumes := vmoperatortypes.VirtualMachineVolume{
@@ -633,8 +639,9 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 			},
 		}
 		virtualMachine.Spec.Volumes = append(virtualMachine.Spec.Volumes, vmvolumes)
-		err = c.vmOperatorClient.Update(ctx, virtualMachine)
-		if err == nil {
+
+		// Issue a patch with the modified VM against the patch created above.
+		if err := c.vmOperatorClient.Patch(ctx, virtualMachine, vmPatch); err == nil {
 			break
 		} else {
 			log.Errorf("failed to update virtualmachine. Err: %v", err)

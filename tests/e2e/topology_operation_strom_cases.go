@@ -68,7 +68,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		bootstrap()
-		nodeList, err = fnodes.GetReadySchedulableNodes(f.ClientSet)
+		nodeList, err = fnodes.GetReadySchedulableNodes(ctx, f.ClientSet)
 		framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
 		if !(len(nodeList.Items) > 0) {
 			framework.Failf("Unable to find ready and schedulable Node")
@@ -105,7 +105,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
-		fss.DeleteAllStatefulSets(client, namespace)
+		fss.DeleteAllStatefulSets(ctx, client, namespace)
 		ginkgo.By(fmt.Sprintf("Deleting service nginx in namespace: %v", namespace))
 		err := client.CoreV1().Services(namespace).Delete(ctx, servicename, *metav1.NewDeleteOptions(0))
 		if !apierrors.IsNotFound(err) {
@@ -195,7 +195,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		wg.Wait()
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		ginkgo.By("Waiting for StatefulSets Pods to be in Ready State")
@@ -207,7 +207,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		for i := 0; i < len(statefulSets); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
-				statefulSets[i], namespace, allowedTopologies, true, false)
+				statefulSets[i], namespace, allowedTopologies, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -230,9 +230,9 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(client, statefulSets[1])
+		ssPods = fss.GetPodList(ctx, client, statefulSets[1])
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -240,7 +240,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ginkgo.By("Scale up statefulset replica and verify the replica count")
 		statefulSetReplicaCount = 35
 		err = scaleUpStatefulSetPod(ctx, client, statefulSets[0], namespace, statefulSetReplicaCount,
-			true, false)
+			true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulSets[0])
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -249,7 +249,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		// Scale down statefulSets replica count
 		statefulSetReplicaCount = 5
 		ginkgo.By("Scale down statefulset replica and verify the replica count")
-		err = scaleDownStatefulSetPod(ctx, client, statefulSets[1], namespace, statefulSetReplicaCount, true, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulSets[1], namespace, statefulSetReplicaCount, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulSets[1])
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -268,9 +268,9 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(client, statefulSets[1])
+		ssPods = fss.GetPodList(ctx, client, statefulSets[1])
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -295,7 +295,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		// Scale down statefulSets replicas count
 		statefulSetReplicaCount = 10
 		ginkgo.By("Scale down statefulset replica and verify the replica count")
-		err = scaleDownStatefulSetPod(ctx, client, statefulSets[0], namespace, statefulSetReplicaCount, true, false)
+		err = scaleDownStatefulSetPod(ctx, client, statefulSets[0], namespace, statefulSetReplicaCount, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulSets[0])
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -305,7 +305,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		statefulSetReplicaCount = 35
 		ginkgo.By("Scale up statefulset replica and verify the replica count")
 		err = scaleUpStatefulSetPod(ctx, client, statefulSets[1], namespace, statefulSetReplicaCount,
-			true, false)
+			true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ssPodsAfterScaleDown = GetListOfPodsInSts(client, statefulSets[1])
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -316,7 +316,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		for i := 0; i < len(statefulSets); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
-				statefulSets[i], namespace, allowedTopologies, true, false)
+				statefulSets[i], namespace, allowedTopologies, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -333,15 +333,15 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(client, statefulSets[1])
+		ssPods = fss.GetPodList(ctx, client, statefulSets[1])
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		// verifyVolumeMetadataInCNS
 		ginkgo.By("Verify pod entry in CNS volume-metadata for the volumes associated with the PVC")
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulSets[1])
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulSets[1])
 		for _, pod := range ssPodsBeforeScaleDown.Items {
 			_, err := client.CoreV1().Pods(namespace).Get(ctx, pod.Name, metav1.GetOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -360,7 +360,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		statefulSetReplicaCount = 0
 		ginkgo.By("Scale down statefulset replica count")
 		for i := 0; i < len(statefulSets); i++ {
-			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true, false)
+			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulSets[i])
 			gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -371,10 +371,10 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			for _, claim := range pvcs.Items {
 				pv := getPvFromClaim(client, namespace, claim.Name)
-				err := fpv.DeletePersistentVolumeClaim(client, claim.Name, namespace)
+				err := fpv.DeletePersistentVolumeClaim(ctx, client, claim.Name, namespace)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				ginkgo.By("Verify it's PV and corresponding volumes are deleted from CNS")
-				err = fpv.WaitForPersistentVolumeDeleted(client, pv.Name, poll,
+				err = fpv.WaitForPersistentVolumeDeleted(ctx, client, pv.Name, poll,
 					pollTimeout)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				volumeHandle := pv.Spec.CSI.VolumeHandle
@@ -584,7 +584,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		for i := 0; i < len(statefulSets); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
-				statefulSets[i], namespace, allowedTopologies, true, false)
+				statefulSets[i], namespace, allowedTopologies, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -601,9 +601,9 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(client, statefulSets[1])
+		ssPods = fss.GetPodList(ctx, client, statefulSets[1])
 		for _, pod := range ssPods.Items {
-			err := fpod.WaitForPodRunningInNamespace(client, &pod)
+			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -613,7 +613,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		statefulSetReplicaCount = 5
 		ginkgo.By("Scale down statefulset replica and verify the replica count")
 		for i := 0; i < len(statefulSets); i++ {
-			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true, false)
+			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulSets[i])
 			gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -641,7 +641,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 			statefulSetReplicaCount = 20
 			ginkgo.By("Scale up statefulset replica and verify the replica count")
 			err = scaleUpStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount,
-				true, false)
+				true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulSets[i])
 			gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -653,7 +653,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		for i := 0; i < len(statefulSets); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client,
-				statefulSets[i], namespace, allowedTopologies, true, false)
+				statefulSets[i], namespace, allowedTopologies, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -661,7 +661,7 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 		statefulSetReplicaCount = 0
 		ginkgo.By("Scale down statefulset replica count")
 		for i := 0; i < len(statefulSets); i++ {
-			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true, false)
+			err = scaleDownStatefulSetPod(ctx, client, statefulSets[i], namespace, statefulSetReplicaCount, true)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ssPodsAfterScaleDown := GetListOfPodsInSts(client, statefulSets[i])
 			gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(statefulSetReplicaCount)).To(gomega.BeTrue(),
@@ -672,10 +672,10 @@ var _ = ginkgo.Describe("[csi-topology-operation-strom-level5] "+
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			for _, claim := range pvcs.Items {
 				pv := getPvFromClaim(client, namespace, claim.Name)
-				err := fpv.DeletePersistentVolumeClaim(client, claim.Name, namespace)
+				err := fpv.DeletePersistentVolumeClaim(ctx, client, claim.Name, namespace)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				ginkgo.By("Verify it's PV and corresponding volumes are deleted from CNS")
-				err = fpv.WaitForPersistentVolumeDeleted(client, pv.Name, poll,
+				err = fpv.WaitForPersistentVolumeDeleted(ctx, client, pv.Name, poll,
 					pollTimeout)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				volumeHandle := pv.Spec.CSI.VolumeHandle

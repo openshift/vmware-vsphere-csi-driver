@@ -52,9 +52,6 @@ type Config struct {
 		// VolumeMigrationCRCleanupIntervalInMin specifies the interval after which
 		// stale CnsVSphereVolumeMigration CRs will be cleaned up.
 		VolumeMigrationCRCleanupIntervalInMin int `gcfg:"volumemigration-cr-cleanup-intervalinmin"`
-		// VCClientTimeout specifies a time limit in minutes for requests made by client
-		// If not set, default will be 5 minutes
-		VCClientTimeout int `gcfg:"vc-client-timeout"`
 		// Cluster Distribution Name
 		ClusterDistribution string `gcfg:"cluster-distribution"`
 
@@ -142,6 +139,13 @@ type VirtualCenterConfig struct {
 	VCenterPort string `gcfg:"port"`
 	// True if vCenter uses self-signed cert.
 	InsecureFlag bool `gcfg:"insecure-flag"`
+	// Specifies the path to a CA certificate in PEM format. This has no effect if
+	// InsecureFlag is enabled. Optional; if not configured, the system's CA
+	// certificates will be used.
+	CAFile string `gcfg:"ca-file"`
+	// Thumbprint specifies the certificate thumbprint to use
+	// This has no effect if InsecureFlag is enabled.
+	Thumbprint string `gcfg:"thumbprint"`
 	// Datacenter in which VMs are located.
 	Datacenters string `gcfg:"datacenters"`
 	// TargetvSANFileShareClusters represents file service enabled vSAN clusters on which file volumes can be created.

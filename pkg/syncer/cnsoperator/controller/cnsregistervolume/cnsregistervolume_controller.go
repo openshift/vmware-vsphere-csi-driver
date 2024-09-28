@@ -40,12 +40,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-	storagepolicyusagev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
-	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 
 	clientConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
+
 	apis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
+	storagepolicyusagev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -55,6 +55,7 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 )
 
 const (
@@ -62,19 +63,18 @@ const (
 	staticPvNamePrefix                       = "static-pv-"
 )
 
-// backOffDuration is a map of cnsregistervolume name's to the time after which
-// a request for this instance will be requeued.
-// Initialized to 1 second for new instances and for instances whose latest
-// reconcile operation succeeded.
-// If the reconcile fails, backoff is incremented exponentially.
 var (
+	// backOffDuration is a map of cnsregistervolume name's to the time after which
+	// a request for this instance will be requeued.
+	// Initialized to 1 second for new instances and for instances whose latest
+	// reconcile operation succeeded.
+	// If the reconcile fails, backoff is incremented exponentially.
 	backOffDuration         map[string]time.Duration
 	backOffDurationMapMutex = sync.Mutex{}
-)
 
-var topologyMgr commoncotypes.ControllerTopologyService
-var isPodVMOnStretchedSupervisorEnabled bool
-var clusterComputeResourceMoIds []string
+	topologyMgr                 commoncotypes.ControllerTopologyService
+	clusterComputeResourceMoIds []string
+)
 
 // Add creates a new CnsRegisterVolume Controller and adds it to the Manager,
 // ConfigurationInfo and VirtualCenterTypes. The Manager will set fields on
@@ -95,9 +95,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
 				return err
 			}
-			isPodVMOnStretchedSupervisorEnabled =
-				commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor)
-			if isPodVMOnStretchedSupervisorEnabled {
+			if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
 				topologyMgr, err = commonco.ContainerOrchestratorUtility.InitTopologyServiceInController(ctx)
 				if err != nil {
 					log.Errorf("failed to init topology manager. err: %v", err)
@@ -160,7 +158,8 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	backOffDuration = make(map[string]time.Duration)
 
 	// Watch for changes to primary resource CnsRegisterVolume.
-	err = c.Watch(&source.Kind{Type: &cnsregistervolumev1alpha1.CnsRegisterVolume{}}, &handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(mgr.GetCache(), &cnsregistervolumev1alpha1.CnsRegisterVolume{}),
+		&handler.EnqueueRequestForObject{})
 	if err != nil {
 		log.Errorf("Failed to watch for changes to CnsRegisterVolume resource with error: %+v", err)
 		return err
@@ -299,7 +298,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	if isPodVMOnStretchedSupervisorEnabled && len(clusterComputeResourceMoIds) > 1 {
+	if syncer.IsPodVMOnStretchSupervisorFSSEnabled && len(clusterComputeResourceMoIds) > 1 {
 		azClustersMap := topologyMgr.GetAZClustersMap(ctx)
 		isAccessible := isDatastoreAccessibleToAZClusters(ctx, vc, azClustersMap, volume.DatastoreUrl)
 		if !isAccessible {
@@ -339,7 +338,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 
-	if isPodVMOnStretchedSupervisorEnabled && len(clusterComputeResourceMoIds) > 1 {
+	if syncer.IsPodVMOnStretchSupervisorFSSEnabled && len(clusterComputeResourceMoIds) > 1 {
 		// Calculate accessible topology for the provisioned volume.
 		datastoreAccessibleTopology, err := topologyMgr.GetTopologyInfoFromNodes(ctx,
 			commoncotypes.WCPRetrieveTopologyInfoParams{
@@ -382,7 +381,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 
 	// Get K8S storageclass name mapping the storagepolicy id with Immediate volume binding mode
 	storageClassName, err := getK8sStorageClassNameWithImmediateBindingModeForPolicy(ctx, k8sclient, r.client,
-		volume.StoragePolicyId, request.Namespace, isPodVMOnStretchedSupervisorEnabled)
+		volume.StoragePolicyId, request.Namespace, syncer.IsPodVMOnStretchSupervisorFSSEnabled)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to find K8S Storageclass mapping storagepolicyId: %s and assigned to namespace: %s",
 			volume.StoragePolicyId, request.Namespace)
@@ -496,7 +495,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
 	if isBound {
 		log.Infof("PVC: %s is bound", instance.Spec.PvcName)
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.PodVMOnStretchedSupervisor) {
+		if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
 			// Create CNSVolumeInfo CR for static pv
 			capacityInBytes := capacityInMb * common.MbInBytes
 			capacity := resource.NewQuantity(capacityInBytes, resource.BinarySI)

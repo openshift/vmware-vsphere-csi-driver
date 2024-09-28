@@ -95,7 +95,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 			gomega.Expect(client.StorageV1().StorageClasses().Delete(ctx, sc.Name,
 				*metav1.NewDeleteOptions(0))).NotTo(gomega.HaveOccurred())
 		}
-		nodeList, err := fnodes.GetReadySchedulableNodes(f.ClientSet)
+		nodeList, err := fnodes.GetReadySchedulableNodes(ctx, f.ClientSet)
 		framework.ExpectNoError(err, "Unable to find ready and schedulable Node")
 		if !(len(nodeList.Items) > 0) {
 			framework.Failf("Unable to find ready and schedulable Node")
@@ -138,7 +138,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// fetching cluster details
-		clusters, err = getTopologyLevel5ClusterGroupNames(masterIp, sshClientConfig, dataCenters)
+		clusters, err = getTopologyLevel5ClusterGroupNames(masterIp, sshClientConfig, dataCenters, 0)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap,
@@ -150,11 +150,11 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// fetching list of datastores available in different racks
-		rack1DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0])
+		rack1DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[1])
+		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		rack3DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[2])
+		rack3DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[2], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// fetching list of datastores which is specific to each rack
@@ -188,7 +188,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		csiReplicas = *csiDeployment.Spec.Replicas
 
 		//set preferred datatsore time interval
-		setPreferredDatastoreTimeInterval(client, ctx, csiNamespace, csiReplicas, false)
+		setPreferredDatastoreTimeInterval(client, ctx, csiNamespace, csiReplicas)
 
 		clientIndex = 0
 	})
@@ -197,18 +197,18 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By(fmt.Sprintf("Deleting all statefulsets in namespace: %v", namespace))
-		fss.DeleteAllStatefulSets(client, namespace)
+		fss.DeleteAllStatefulSets(ctx, client, namespace)
 		ginkgo.By(fmt.Sprintf("Deleting service nginx in namespace: %v", namespace))
 		err := client.CoreV1().Services(namespace).Delete(ctx, servicename, *metav1.NewDeleteOptions(0))
 		if !apierrors.IsNotFound(err) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 		framework.Logf("Perform preferred datastore tags cleanup after test completion")
-		err = deleteTagCreatedForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks, false)
+		err = deleteTagCreatedForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Recreate preferred datastore tags post cleanup")
-		err = createTagForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks, false)
+		err = createTagForPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -247,12 +247,12 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		// choose preferred datastore
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-1(cluster-1))")
 		preferredDatastorePaths, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack1, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack1, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By("Remove preferred datastore tag")
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[0],
-				allowedTopologyRacks[0], false, clientIndex)
+				allowedTopologyRacks[0], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
@@ -261,7 +261,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		time.Sleep(preferredDatastoreTimeOutInterval)
 
 		ginkgo.By("Create StorageClass and PVC")
-		storageclass, pvclaim, err = createPVCAndStorageClass(client, namespace, nil,
+		storageclass, pvclaim, err = createPVCAndStorageClass(ctx, client, namespace, nil,
 			nil, diskSize, allowedTopologyForRack1, "", false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
@@ -271,13 +271,13 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		}()
 
 		// Wait for PVC to be in Bound phase
-		persistentvolumes, err := fpv.WaitForPVClaimBoundPhase(client, []*v1.PersistentVolumeClaim{pvclaim},
+		persistentvolumes, err := fpv.WaitForPVClaimBoundPhase(ctx, client, []*v1.PersistentVolumeClaim{pvclaim},
 			framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandle := persistentvolumes[0].Spec.CSI.VolumeHandle
 		gomega.Expect(volHandle).NotTo(gomega.BeEmpty())
 		defer func() {
-			err := fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+			err := fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -292,37 +292,37 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		ginkgo.By("Create volume snapshot class, volume snapshot")
 		volumeSnapshot, volumeSnapshotClass, snapshotId := createSnapshotClassAndVolSnapshot(ctx, snapc, namespace,
-			pvclaim, volHandle, false, false)
+			pvclaim, volHandle, false)
 		defer func() {
 			ginkgo.By("Perform cleanup of snapshot created")
 			performCleanUpForSnapshotCreated(ctx, snapc, namespace, volHandle, volumeSnapshot, snapshotId,
-				volumeSnapshotClass, pandoraSyncWaitTime, false)
+				volumeSnapshotClass, pandoraSyncWaitTime)
 		}()
 
 		ginkgo.By("Create PVC from snapshot")
 		pvcSpec := getPersistentVolumeClaimSpecWithDatasource(namespace, diskSize, storageclass, nil,
 			v1.ReadWriteOnce, volumeSnapshot.Name, snapshotapigroup)
-		pvclaim2, err := fpv.CreatePVC(client, namespace, pvcSpec)
+		pvclaim2, err := fpv.CreatePVC(ctx, client, namespace, pvcSpec)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		persistentvolumes2, err := fpv.WaitForPVClaimBoundPhase(client,
+		persistentvolumes2, err := fpv.WaitForPVClaimBoundPhase(ctx, client,
 			[]*v1.PersistentVolumeClaim{pvclaim2}, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandle2 := persistentvolumes2[0].Spec.CSI.VolumeHandle
 		gomega.Expect(volHandle2).NotTo(gomega.BeEmpty())
 		defer func() {
-			err := fpv.DeletePersistentVolumeClaim(client, pvclaim2.Name, namespace)
+			err := fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim2.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle2)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		ginkgo.By("Creating pod")
-		pod, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim2}, false, "")
+		pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim2}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod)
+			err = fpod.DeletePodWithWait(ctx, client, pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -336,13 +336,13 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod, namespace, preferredDatastorePaths,
-			nonShareddatastoreListMapRack1, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod, preferredDatastorePaths,
+			nonShareddatastoreListMapRack1, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologyForRack1, false)
+			allowedTopologyForRack1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -377,7 +377,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		// choose preferred datastore
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-2(cluster-2))")
 		preferredDatastorePaths, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Waiting for %v for preferred datastore to get refreshed in the environment",
@@ -385,7 +385,7 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		time.Sleep(preferredDatastoreTimeOutInterval)
 
 		ginkgo.By("Create StorageClass and PVC")
-		storageclass, pvclaim, err = createPVCAndStorageClass(client, namespace, nil,
+		storageclass, pvclaim, err = createPVCAndStorageClass(ctx, client, namespace, nil,
 			nil, diskSize, allowedTopologyForRack2, "", false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
@@ -395,13 +395,13 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		}()
 
 		// Wait for PVC to be in Bound phase
-		persistentvolumes, err := fpv.WaitForPVClaimBoundPhase(client, []*v1.PersistentVolumeClaim{pvclaim},
+		persistentvolumes, err := fpv.WaitForPVClaimBoundPhase(ctx, client, []*v1.PersistentVolumeClaim{pvclaim},
 			framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandle := persistentvolumes[0].Spec.CSI.VolumeHandle
 		gomega.Expect(volHandle).NotTo(gomega.BeEmpty())
 		defer func() {
-			err := fpv.DeletePersistentVolumeClaim(client, pvclaim.Name, namespace)
+			err := fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -417,26 +417,26 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		ginkgo.By("Create volume snapshot class, volume snapshot")
 		volumeSnapshot, volumeSnapshotClass, snapshotId := createSnapshotClassAndVolSnapshot(ctx, snapc, namespace,
-			pvclaim, volHandle, false, false)
+			pvclaim, volHandle, false)
 		defer func() {
 			ginkgo.By("Perform cleanup of snapshot created")
 			performCleanUpForSnapshotCreated(ctx, snapc, namespace, volHandle, volumeSnapshot, snapshotId,
-				volumeSnapshotClass, pandoraSyncWaitTime, false)
+				volumeSnapshotClass, pandoraSyncWaitTime)
 		}()
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[0],
-			allowedTopologyRacks[1], false, clientIndex)
+			allowedTopologyRacks[1], clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Tag new preferred datatsore for volume provisioning")
 		preferredDatastorePaths, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[1],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack2, preferredDatastorePaths, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By("Remove preferred datastore tag")
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[0],
-				allowedTopologyRacks[1], false, clientIndex)
+				allowedTopologyRacks[1], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
@@ -447,18 +447,18 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		ginkgo.By("Create PVC from snapshot")
 		pvcSpec := getPersistentVolumeClaimSpecWithDatasource(namespace, diskSize, storageclass, nil,
 			v1.ReadWriteOnce, volumeSnapshot.Name, snapshotapigroup)
-		pvclaim2, err := fpv.CreatePVC(client, namespace, pvcSpec)
+		pvclaim2, err := fpv.CreatePVC(ctx, client, namespace, pvcSpec)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Expect claim to fail provisioning volume within the topology")
-		err = fpv.WaitForPersistentVolumeClaimPhase(v1.ClaimBound,
+		err = fpv.WaitForPersistentVolumeClaimPhase(ctx, v1.ClaimBound,
 			client, pvclaim2.Namespace, pvclaim2.Name, framework.Poll, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).To(gomega.HaveOccurred())
 		expectedErrMsg := "failed to get the compatible shared datastore for create volume from snapshot"
 		err = waitForEvent(ctx, client, namespace, expectedErrMsg, pvclaim2.Name)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Expected error : %q", expectedErrMsg))
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim2.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim2.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
@@ -538,13 +538,13 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		ginkgo.By("Tag different preferred datastore for volume provisioning in different racks")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			preferredDatastorePath, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[i],
-				preferredDatastoreChosen, datastorestMap[i], nil, false, clientIndex)
+				preferredDatastoreChosen, datastorestMap[i], nil, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePaths = append(preferredDatastorePaths, preferredDatastorePath...)
 		}
 
 		sharedPreferredDatastorePaths, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[0],
-			preferredDatastoreChosen, shareddatastoreListMap, nil, false, clientIndex)
+			preferredDatastoreChosen, shareddatastoreListMap, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		preferredDatastorePaths = append(preferredDatastorePaths, sharedPreferredDatastorePaths...)
 		for i := 1; i < len(allowedTopologyRacks); i++ {
@@ -555,10 +555,9 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		defer func() {
 			for i := 0; i < len(allowedTopologyRacks); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, sharedPreferredDatastorePaths[0],
-					allowedTopologyRacks[i], false, clientIndex)
+					allowedTopologyRacks[i], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
-
 		}()
 
 		// fetch datastore map which is tagged as preferred datastore in different racks
@@ -587,18 +586,18 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		}()
 
 		ginkgo.By("Creating PVC-1")
-		pvclaim1, err := createPVC(client, namespace, nil, "", storageclass, "")
+		pvclaim1, err := createPVC(ctx, client, namespace, nil, "", storageclass, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims1 []*v1.PersistentVolumeClaim
 		pvclaims1 = append(pvclaims1, pvclaim1)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs1, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims1, framework.ClaimProvisionTimeout)
+		pvs1, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims1, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs1).NotTo(gomega.BeEmpty())
 		pv1 := pvs1[0]
 		volHandle1 := pv1.Spec.CSI.VolumeHandle
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim1.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim1.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle1)
@@ -614,12 +613,12 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		gomega.Expect(queryResult.Volumes[0].VolumeId.Id).To(gomega.Equal(volHandle1))
 
 		ginkgo.By("Creating Pod-1")
-		pod1, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
+		pod1, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim1}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		podList = append(podList, pod1)
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod1.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod1)
+			err = fpod.DeletePodWithWait(ctx, client, pod1)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -632,21 +631,21 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		}()
 
 		ginkgo.By("Creating PVC-2")
-		pvclaim2, err := createPVC(client, namespace, nil, "", storageclass, "")
+		pvclaim2, err := createPVC(ctx, client, namespace, nil, "", storageclass, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims2 []*v1.PersistentVolumeClaim
 		pvclaims2 = append(pvclaims2, pvclaim2)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs2, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims2, framework.ClaimProvisionTimeout)
+		pvs2, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims2, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs2).NotTo(gomega.BeEmpty())
 		pv2 := pvs2[0]
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim2.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim2.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
-			err = fpv.WaitForPersistentVolumeDeleted(client, pv2.Name, poll, pollTimeout)
+			err = fpv.WaitForPersistentVolumeDeleted(ctx, client, pv2.Name, poll, pollTimeout)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(pv2.Spec.CSI.VolumeHandle)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred(),
@@ -662,12 +661,12 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		gomega.Expect(queryResult.Volumes[0].VolumeId.Id).To(gomega.Equal(pv2.Spec.CSI.VolumeHandle))
 
 		ginkgo.By("Creating Pod-2")
-		pod2, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim2}, false, "")
+		pod2, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim2}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		podList = append(podList, pod2)
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod2.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod2)
+			err = fpod.DeletePodWithWait(ctx, client, pod2)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -682,55 +681,55 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		for i := 0; i < len(podList); i++ {
-			verifyVolumeProvisioningForStandalonePods(ctx, client, podList[i], namespace,
-				preferredDatastorePaths, allDatastoresListMap, false, nil)
+			verifyVolumeProvisioningForStandalonePods(client, podList[i],
+				preferredDatastorePaths, allDatastoresListMap, nil)
 		}
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		for i := 0; i < len(podList); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-				namespace, allowedTopologies, false)
+				namespace, allowedTopologies)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
 		ginkgo.By("Create volume snapshot class, volume snapshot")
 		volumeSnapshot1, volumeSnapshotClass1, snapshotId1 := createSnapshotClassAndVolSnapshot(ctx, snapc, namespace,
-			pvclaim1, volHandle1, false, false)
+			pvclaim1, volHandle1, false)
 		defer func() {
 			ginkgo.By("Perform cleanup of snapshot created")
 			performCleanUpForSnapshotCreated(ctx, snapc, namespace, volHandle1, volumeSnapshot1, snapshotId1,
-				volumeSnapshotClass1, pandoraSyncWaitTime, false)
+				volumeSnapshotClass1, pandoraSyncWaitTime)
 		}()
 
 		ginkgo.By("Create PVC-3 from snapshot")
 		pvcSpec := getPersistentVolumeClaimSpecWithDatasource(namespace, diskSize, storageclass, nil,
 			v1.ReadWriteOnce, volumeSnapshot1.Name, snapshotapigroup)
-		pvclaim3, err := fpv.CreatePVC(client, namespace, pvcSpec)
+		pvclaim3, err := fpv.CreatePVC(ctx, client, namespace, pvcSpec)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		persistentvolumes3, err := fpv.WaitForPVClaimBoundPhase(client,
+		persistentvolumes3, err := fpv.WaitForPVClaimBoundPhase(ctx, client,
 			[]*v1.PersistentVolumeClaim{pvclaim3}, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandle3 := persistentvolumes3[0].Spec.CSI.VolumeHandle
 		gomega.Expect(volHandle3).NotTo(gomega.BeEmpty())
 		defer func() {
-			err := fpv.DeletePersistentVolumeClaim(client, pvclaim3.Name, namespace)
+			err := fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim3.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle3)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify snapshot entry is deleted from CNS")
-			err = verifySnapshotIsDeletedInCNS(volHandle3, snapshotId1, false)
+			err = verifySnapshotIsDeletedInCNS(volHandle3, snapshotId1)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		ginkgo.By("Creating Pod-3")
-		pod3, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim3}, false, "")
+		pod3, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim3}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod3.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod3)
+			err = fpod.DeletePodWithWait(ctx, client, pod3)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -744,19 +743,19 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod3, namespace, preferredDatastorePaths,
-			allDatastoresListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod3, preferredDatastorePaths,
+			allDatastoresListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod3, namespace,
-			allowedTopologies, false)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Remove preferred datastore tag chosen for volume provisioning")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[i],
-				allowedTopologyRacks[i], false, clientIndex)
+				allowedTopologyRacks[i], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -764,14 +763,14 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		ginkgo.By("Assign new preferred datastore tags for volume provisioning in different racks")
 		for i := 0; i < len(allowedTopologyRacks); i++ {
 			preferredDatastorePath, err := tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[i],
-				preferredDatastoreChosen, datastorestMap[i], preferredDatastorePaths, false, clientIndex)
+				preferredDatastoreChosen, datastorestMap[i], preferredDatastorePaths, clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			preferredDatastorePathsNew = append(preferredDatastorePathsNew, preferredDatastorePath...)
 		}
 		defer func() {
 			for i := 0; i < len(allowedTopologyRacks); i++ {
 				err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePathsNew[i],
-					allowedTopologyRacks[i], false, clientIndex)
+					allowedTopologyRacks[i], clientIndex)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		}()
@@ -794,18 +793,18 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		time.Sleep(preferredDatastoreTimeOutInterval)
 
 		ginkgo.By("Creating PVC-4 after changing datastore preference")
-		pvclaim4, err := createPVC(client, namespace, nil, "", storageclass, "")
+		pvclaim4, err := createPVC(ctx, client, namespace, nil, "", storageclass, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		var pvclaims4 []*v1.PersistentVolumeClaim
 		pvclaims4 = append(pvclaims4, pvclaim4)
 		ginkgo.By("Waiting for all claims to be in bound state")
-		pvs4, err := fpv.WaitForPVClaimBoundPhase(client, pvclaims4, framework.ClaimProvisionTimeout)
+		pvs4, err := fpv.WaitForPVClaimBoundPhase(ctx, client, pvclaims4, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(pvs4).NotTo(gomega.BeEmpty())
 		pv4 := pvs4[0]
 		volHandle4 := pv4.Spec.CSI.VolumeHandle
 		defer func() {
-			err = fpv.DeletePersistentVolumeClaim(client, pvclaim4.Name, namespace)
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim4.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			ginkgo.By("Verify PVs, volumes are deleted from CNS")
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle4)
@@ -821,11 +820,11 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		gomega.Expect(queryResult.Volumes[0].VolumeId.Id).To(gomega.Equal(volHandle4))
 
 		ginkgo.By("Creating Pod-4")
-		pod4, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim4}, false, "")
+		pod4, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim4}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod4.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod4)
+			err = fpod.DeletePodWithWait(ctx, client, pod4)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -839,46 +838,46 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod4, namespace, preferredDatastorePathsNew,
-			allDatastoresListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod4, preferredDatastorePathsNew,
+			allDatastoresListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod4, namespace,
-			allowedTopologies, false)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		volumeSnapshot2, volumeSnapshotClass2, snapshotId2 := createSnapshotClassAndVolSnapshot(ctx, snapc, namespace,
-			pvclaim4, volHandle4, false, false)
+			pvclaim4, volHandle4, false)
 		defer func() {
 			performCleanUpForSnapshotCreated(ctx, snapc, namespace, pv4.Spec.CSI.VolumeHandle, volumeSnapshot2,
-				snapshotId2, volumeSnapshotClass2, pandoraSyncWaitTime, false)
+				snapshotId2, volumeSnapshotClass2, pandoraSyncWaitTime)
 		}()
 
 		ginkgo.By("Create PVC-5 from snapshot")
 		pvcSpec = getPersistentVolumeClaimSpecWithDatasource(namespace, diskSize, storageclass, nil,
 			v1.ReadWriteOnce, volumeSnapshot2.Name, snapshotapigroup)
-		pvclaim5, err := fpv.CreatePVC(client, namespace, pvcSpec)
+		pvclaim5, err := fpv.CreatePVC(ctx, client, namespace, pvcSpec)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-		persistentvolumes5, err := fpv.WaitForPVClaimBoundPhase(client,
+		persistentvolumes5, err := fpv.WaitForPVClaimBoundPhase(ctx, client,
 			[]*v1.PersistentVolumeClaim{pvclaim5}, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandle5 := persistentvolumes5[0].Spec.CSI.VolumeHandle
 		gomega.Expect(volHandle5).NotTo(gomega.BeEmpty())
 		defer func() {
-			err := fpv.DeletePersistentVolumeClaim(client, pvclaim5.Name, namespace)
+			err := fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim5.Name, namespace)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			err = e2eVSphere.waitForCNSVolumeToBeDeleted(volHandle5)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
 		ginkgo.By("Creating Pod")
-		pod5, err := createPod(client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim5}, false, "")
+		pod5, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim5}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			ginkgo.By(fmt.Sprintf("Deleting the pod %s in namespace %s", pod5.Name, namespace))
-			err = fpod.DeletePodWithWait(client, pod5)
+			err = fpod.DeletePodWithWait(ctx, client, pod5)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verify volume is detached from the node")
@@ -892,13 +891,13 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		// verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
-		verifyVolumeProvisioningForStandalonePods(ctx, client, pod5, namespace, preferredDatastorePathsNew,
-			allDatastoresListMap, false, nil)
+		verifyVolumeProvisioningForStandalonePods(client, pod5, preferredDatastorePathsNew,
+			allDatastoresListMap, nil)
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod5, namespace,
-			allowedTopologies, false)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -937,11 +936,11 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		ginkgo.By("Tag preferred datastore for volume provisioning in rack-3(cluster-3)")
 		preferredDatastorePaths, err = tagPreferredDatastore(masterIp, sshClientConfig, allowedTopologyRacks[2],
-			preferredDatastoreChosen, nonShareddatastoreListMapRack3, nil, false, clientIndex)
+			preferredDatastoreChosen, nonShareddatastoreListMapRack3, nil, clientIndex)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			err = detachTagCreatedOnPreferredDatastore(masterIp, sshClientConfig, preferredDatastorePaths[0],
-				allowedTopologyRacks[2], false, clientIndex)
+				allowedTopologyRacks[2], clientIndex)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 
@@ -971,28 +970,28 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		replicas := *(statefulset.Spec.Replicas)
 
 		// Waiting for pods status to be Ready
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
-		gomega.Expect(fss.CheckMount(client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 		defer func() {
 			framework.Logf("Deleting all statefulset in namespace: %v", namespace)
-			fss.DeleteAllStatefulSets(client, namespace)
+			fss.DeleteAllStatefulSets(ctx, client, namespace)
 		}()
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			nonShareddatastoreListMapRack3, false, false, false, nil)
+			nonShareddatastoreListMapRack3, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack3, false, false)
+			namespace, allowedTopologyForRack3, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Fetching pod 3, pvc3 and pv3 details")
@@ -1013,24 +1012,24 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		ginkgo.By("Create volume snapshot class, volume snapshot")
 		volumeSnapshot, volumeSnapshotClass, snapshotId := createSnapshotClassAndVolSnapshot(ctx, snapc, namespace,
-			pvclaim3, volHandle3, true, false)
+			pvclaim3, volHandle3, true)
 		defer func() {
 			ginkgo.By("Perform cleanup of snapshot created")
 			performCleanUpForSnapshotCreated(ctx, snapc, namespace, volHandle3, volumeSnapshot, snapshotId,
-				volumeSnapshotClass, pandoraSyncWaitTime, false)
+				volumeSnapshotClass, pandoraSyncWaitTime)
 		}()
 
 		ginkgo.By(fmt.Sprintf("Scaling down statefulsets to number of Replica: %v", replicas-1))
-		_, scaledownErr := fss.Scale(client, statefulset, replicas-1)
+		_, scaledownErr := fss.Scale(ctx, client, statefulset, replicas-1)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas-1)
-		ssPodsAfterScaleDown := fss.GetPodList(client, statefulset)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas-1)
+		ssPodsAfterScaleDown := fss.GetPodList(ctx, client, statefulset)
 		gomega.Expect(ssPodsAfterScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas-1)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 
-		err = fpv.DeletePersistentVolumeClaim(client, pvclaim3.Name, namespace)
+		err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim3.Name, namespace)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow CNS to sync with pandora", pandoraSyncWaitTime))
@@ -1040,11 +1039,11 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 		pvcSpec := getPersistentVolumeClaimSpecWithDatasource(namespace, "1Gi", storageclass, nil,
 			v1.ReadWriteOnce, volumeSnapshot.Name, snapshotapigroup)
 		pvcSpec.Name = pvclaim3.Name
-		pvclaim4, err := fpv.CreatePVC(client, namespace, pvcSpec)
+		pvclaim4, err := fpv.CreatePVC(ctx, client, namespace, pvcSpec)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Expecting the volume to bound")
-		newPV, err := fpv.WaitForPVClaimBoundPhase(client, []*v1.PersistentVolumeClaim{pvclaim4},
+		newPV, err := fpv.WaitForPVClaimBoundPhase(ctx, client, []*v1.PersistentVolumeClaim{pvclaim4},
 			framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		volHandleOfNewPV := newPV[0].Spec.CSI.VolumeHandle
@@ -1052,22 +1051,22 @@ var _ = ginkgo.Describe("[Preferential-Topology-Snapshot] Preferential Topology 
 
 		replicas = 3
 		ginkgo.By(fmt.Sprintf("Scaling up statefulsets to number of Replica: %v", replicas))
-		_, scaleupErr := fss.Scale(client, statefulset, replicas)
+		_, scaleupErr := fss.Scale(ctx, client, statefulset, replicas)
 		gomega.Expect(scaleupErr).NotTo(gomega.HaveOccurred())
 
-		fss.WaitForStatusReplicas(client, statefulset, replicas)
-		fss.WaitForStatusReadyReplicas(client, statefulset, replicas)
+		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
+		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 
 		//verifying volume provisioning
 		ginkgo.By("Verify volume is provisioned on the preferred datatsore")
 		err = verifyVolumeProvisioningForStatefulSet(ctx, client, statefulset, namespace, preferredDatastorePaths,
-			nonShareddatastoreListMapRack3, false, false, false, nil)
+			nonShareddatastoreListMapRack3, false, false, nil)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
-			namespace, allowedTopologyForRack3, false, false)
+			namespace, allowedTopologyForRack3, false)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })

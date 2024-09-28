@@ -80,10 +80,6 @@ func (rc *reconciler) syncStates(kubeletPodDir string) {
 			blockVolumeMapper: reconstructedVolume.blockVolumeMapper,
 			mounter:           reconstructedVolume.mounter,
 		}
-		if cachedInfo, ok := volumesNeedUpdate[reconstructedVolume.volumeName]; ok {
-			gvl = cachedInfo
-		}
-		gvl.addPodVolume(reconstructedVolume)
 		if volumeInDSW {
 			// Some pod needs the volume. And it exists on disk. Some previous
 			// kubelet must have created the directory, therefore it must have
@@ -91,6 +87,10 @@ func (rc *reconciler) syncStates(kubeletPodDir string) {
 			// this new kubelet so reconcile() calls SetUp and re-mounts the
 			// volume if it's necessary.
 			volumeNeedReport = append(volumeNeedReport, reconstructedVolume.volumeName)
+			if cachedInfo, ok := rc.skippedDuringReconstruction[reconstructedVolume.volumeName]; ok {
+				gvl = cachedInfo
+			}
+			gvl.addPodVolume(reconstructedVolume)
 			rc.skippedDuringReconstruction[reconstructedVolume.volumeName] = gvl
 			klog.V(4).InfoS("Volume exists in desired state, marking as InUse", "podName", volume.podName, "volumeSpecName", volume.volumeSpecName)
 			continue
@@ -100,6 +100,10 @@ func (rc *reconciler) syncStates(kubeletPodDir string) {
 			klog.InfoS("Volume is in pending operation, skip cleaning up mounts")
 		}
 		klog.V(2).InfoS("Reconciler sync states: could not find pod information in desired state, update it in actual state", "reconstructedVolume", reconstructedVolume)
+		if cachedInfo, ok := volumesNeedUpdate[reconstructedVolume.volumeName]; ok {
+			gvl = cachedInfo
+		}
+		gvl.addPodVolume(reconstructedVolume)
 		volumesNeedUpdate[reconstructedVolume.volumeName] = gvl
 	}
 
@@ -140,7 +144,7 @@ func (rc *reconciler) updateStates(volumesNeedUpdate map[v1.UniqueVolumeName]*gl
 	for _, gvl := range volumesNeedUpdate {
 		err := rc.actualStateOfWorld.MarkVolumeAsAttached(
 			//TODO: the devicePath might not be correct for some volume plugins: see issue #54108
-			gvl.volumeName, gvl.volumeSpec, rc.nodeName, gvl.devicePath)
+			klog.TODO(), gvl.volumeName, gvl.volumeSpec, rc.nodeName, gvl.devicePath)
 		if err != nil {
 			klog.ErrorS(err, "Could not add volume information to actual state of world", "volumeName", gvl.volumeName)
 			continue

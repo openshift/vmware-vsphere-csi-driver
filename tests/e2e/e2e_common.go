@@ -164,7 +164,7 @@ const (
 	pvcHealthTimestampAnnotation              = "volumehealth.storage.kubernetes.io/health-timestamp"
 	provisionerContainerName                  = "csi-provisioner"
 	quotaName                                 = "cns-test-quota"
-	regionKey                                 = "failure-domain.beta.kubernetes.io/region"
+	regionKey                                 = "topology.csi.vmware.com/k8s-region"
 	resizePollInterval                        = 2 * time.Second
 	restartOperation                          = "restart"
 	rqLimit                                   = "200Gi"
@@ -175,7 +175,7 @@ const (
 	resizerContainerName                      = "csi-resizer"
 	scParamDatastoreURL                       = "DatastoreURL"
 	scParamFsType                             = "csi.storage.k8s.io/fstype"
-	scParamStoragePolicyID                    = "StoragePolicyId"
+	scParamStoragePolicyID                    = "storagePolicyID"
 	scParamStoragePolicyName                  = "StoragePolicyName"
 	shortProvisionerTimeout                   = "10"
 	snapshotapigroup                          = "snapshot.storage.k8s.io"
@@ -224,7 +224,7 @@ const (
 	cloudadminTKG                             = "test-cluster-e2e-script-1"
 	vmOperatorAPI                             = "/apis/vmoperator.vmware.com/v1alpha1/"
 	devopsUser                                = "testuser"
-	zoneKey                                   = "failure-domain.beta.kubernetes.io/zone"
+	zoneKey                                   = "topology.csi.vmware.com/k8s-zone"
 	tkgAPI                                    = "/apis/run.tanzu.vmware.com/v1alpha3/namespaces" +
 		"/test-gc-e2e-demo-ns/tanzukubernetesclusters/"
 	topologykey                                = "topology.csi.vmware.com"
@@ -299,6 +299,7 @@ const (
 	level5              = "level5"
 	negative            = "negative"
 	listVolume          = "listVolume"
+	multiSvc            = "multiSvc"
 )
 
 // The following variables are required to know cluster type to run common e2e
@@ -311,6 +312,8 @@ var (
 	wcpVsanDirectCluster bool
 	vcptocsi             bool
 	windowsEnv           bool
+	multipleSvc          bool
+	multivc              bool
 )
 
 // For busybox pod image
@@ -409,6 +412,28 @@ var (
 		" { Add-Content /mnt/volume1/Pod1.html 'Hello message from Pod1'; sleep 1 }"
 )
 
+// multiSvc env variables
+var (
+	vcSessionWaitTime                   = 5 * time.Minute
+	envStoragePolicyNameForSharedDsSvc1 = "STORAGE_POLICY_FOR_SHARED_DATASTORES_SVC1"
+	envStoragePolicyNameForSharedDsSvc2 = "STORAGE_POLICY_FOR_SHARED_DATASTORES_SVC2"
+	envSupervisorClusterNamespace1      = "SVC_NAMESPACE1"
+	envNfsDatastoreName                 = "NFS_DATASTORE_NAME"
+	envNfsDatastoreIP                   = "NFS_DATASTORE_IP"
+	pwdRotationTimeout                  = 10 * time.Minute
+	roleCnsDatastore                    = "CNS-Datastore"
+	roleCnsSearchAndSpbm                = "CNS-SEARCH-AND-SPBM"
+	roleCnsHostConfigStorageAndCnsVm    = "CNS-HOST-CONFIG-STORAGE-AND-CNS-VM"
+)
+
+// For rwx
+var (
+	envVsanDsStoragePolicyCluster1 = "VSAN_DATASTORE_CLUSTER1_STORAGE_POLICY"
+	envVsanDsStoragePolicyCluster3 = "VSAN_DATASTORE_CLUSTER3_STORAGE_POLICY"
+	envNonVsanDsUrl                = "NON_VSAN_DATASTOREURL"
+	envVsanDsUrlCluster3           = "VSAN_DATASTOREURL_CLUSTER3"
+)
+
 // GetAndExpectStringEnvVar parses a string from env variable.
 func GetAndExpectStringEnvVar(varName string) string {
 	varValue := os.Getenv(varName)
@@ -458,5 +483,17 @@ func setClusterFlavor(clusterFlavor cnstypes.CnsClusterFlavor) {
 	workerNode := os.Getenv("WORKER_TYPE")
 	if strings.TrimSpace(string(workerNode)) == "WINDOWS" {
 		windowsEnv = true
+	}
+
+	// Check if it's multiple supervisor cluster setup
+	svcType := os.Getenv("SUPERVISOR_TYPE")
+	if strings.TrimSpace(string(svcType)) == "MULTI_SVC" {
+		multipleSvc = true
+	}
+
+	//Check if it is multivc env
+	topologyType := os.Getenv("TOPOLOGY_TYPE")
+	if strings.TrimSpace(string(topologyType)) == "MULTI_VC" {
+		multivc = true
 	}
 }

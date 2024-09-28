@@ -33,6 +33,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/units"
+	"github.com/vmware/govmomi/vim25/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -162,10 +163,9 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		}
 	}
 
-	tasksListViewEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
-		common.ListViewPerf)
-	volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore, idempotencyHandlingEnabled, false, false,
-		tasksListViewEnabled, cnstypes.CnsClusterFlavorWorkload)
+	volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore,
+		idempotencyHandlingEnabled, false,
+		false, cnstypes.CnsClusterFlavorWorkload)
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 	}
@@ -190,9 +190,7 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		return err
 	}
 	go cnsvolume.ClearTaskInfoObjects()
-	if tasksListViewEnabled {
-		go cnsvolume.ClearInvalidTasksFromListView(false)
-	}
+	go cnsvolume.ClearInvalidTasksFromListView(false)
 	cfgPath := cnsconfig.GetConfigPath(ctx)
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -390,10 +388,9 @@ func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error 
 		}
 		c.manager.VcenterConfig = newVCConfig
 
-		tasksListViewEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
-			common.ListViewPerf)
-		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore, idempotencyHandlingEnabled, false,
-			false, tasksListViewEnabled, cnstypes.CnsClusterFlavorWorkload)
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter, operationStore,
+			idempotencyHandlingEnabled, false,
+			false, cnstypes.CnsClusterFlavorWorkload)
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 		}
@@ -1278,46 +1275,50 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 						return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 							"failed to connect to Virtual Center: %s", vc.Config.Host)
 					}
-					podVM, err := getVMByInstanceUUIDInDatacenter(ctx, vc, dcMorefValue, v)
-					if err != nil {
-						if err == cnsvsphere.ErrVMNotFound {
-							log.Infof("virtual machine not found for vmUUID %q. "+
-								"Thus, assuming the volume is detached.", v)
-							break
-						}
-						return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-							"failed to get the PodVM Moref from the PodVM UUID: %s in datacenter: %s with err: %+v",
-							v, dcMorefValue, err)
-					}
 					isStillAttached := false
 					timeout := 4 * time.Minute
 					pollTime := time.Duration(5) * time.Second
-					err = wait.Poll(pollTime, timeout, func() (bool, error) {
-						podVM, err := getVMByInstanceUUIDInDatacenter(ctx, vc, dcMorefValue, v)
-						if err != nil {
-							if err == cnsvsphere.ErrVMNotFound {
-								log.Infof("virtual machine not found for vmUUID %q. "+
-									"Thus, assuming the volume is detached.", v)
-								return true, err
+					var podVM *cnsvsphere.VirtualMachine
+					err = wait.PollUntilContextTimeout(ctx, pollTime, timeout, true,
+						func(ctx context.Context) (bool, error) {
+							podVM, err = getVMByInstanceUUIDInDatacenter(ctx, vc, dcMorefValue, v)
+							if err != nil {
+								if err == cnsvsphere.ErrVMNotFound {
+									log.Infof("virtual machine not found for vmUUID %q. "+
+										"Thus, assuming the volume is detached.", v)
+									return true, err
+								}
+								if err == cnsvsphere.ErrInvalidVC {
+									log.Errorf("failed to get the PodVM Moref from the PodVM UUID: %s in datacenter: "+
+										"%s with err: %+v", v, dcMorefValue, err)
+									return false, err
+								}
+								log.Errorf("failed to get the PodVM Moref from the PodVM UUID: %s in datacenter: "+
+									"%s with err: %+v. Will Retry after 5 seconds", v, dcMorefValue, err)
+								return false, nil
 							}
-						}
-						diskUUID, err := cnsvolume.IsDiskAttached(ctx, podVM, req.VolumeId, true)
-						if err != nil {
-							log.Infof("retrying the IsDiskAttached check again for volumeId %q. Err: %+v", req.VolumeId, err)
-							return false, nil
-						}
-						if diskUUID != "" {
-							log.Infof("diskUUID: %q is still attached to podVM %q with moId %q. Retrying in 5 seconds.",
-								diskUUID, podVM.Reference().String(), podVM.Reference().Value)
-							isStillAttached = true
-							return false, nil
-						}
-						return true, nil
-					})
+							diskUUID, err := cnsvolume.IsDiskAttached(ctx, podVM, req.VolumeId, true)
+							if err != nil {
+								log.Infof("retrying the IsDiskAttached check again for volumeId %q. Err: %+v", req.VolumeId, err)
+								return false, nil
+							}
+							if diskUUID != "" {
+								log.Infof("diskUUID: %q is still attached to podVM %q with moId %q. Retrying in 5 seconds.",
+									diskUUID, podVM.Reference().String(), podVM.Reference().Value)
+								isStillAttached = true
+								return false, nil
+							}
+							return true, nil
+						})
 					if err != nil {
 						if err == cnsvsphere.ErrVMNotFound {
 							// If VirtualMachine is not found, return success assuming volume is already detached
 							break
+						}
+						if err == cnsvsphere.ErrInvalidVC {
+							return nil, csifault.CSIInternalFault, fmt.Errorf(
+								"failed to get the PodVM Moref from the PodVM UUID: %s in datacenter: "+
+									"%s with err: %+v", v, dcMorefValue, err)
 						}
 						if isStillAttached {
 							// Since the disk is still attached, we need to check if the volumeId in contention is attached
@@ -1333,8 +1334,29 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 							}
 							nodeNames := nodesForVolume[req.VolumeId]
 							if len(nodeNames) == 1 && nodeNames[0] == req.NodeId {
-								log.Errorf("volume %q is still attached to node %q and podVM %q with moId %q", req.VolumeId,
-									req.NodeId, podVM.Reference().String(), podVM.Reference().Value)
+								log.Errorf("volume %q is still attached to node %q and podVM %q", req.VolumeId,
+									req.NodeId, podVM.Reference().String())
+								podvmpowerstate, powerstateErr := podVM.PowerState(ctx)
+								if powerstateErr != nil {
+									log.Errorf("failed to check the power state of pod vm: %q, error: %v",
+										podVM.Reference(), powerstateErr)
+									return nil, csifault.CSIInternalFault, fmt.Errorf("volume %q is still attached to "+
+										"node %q and podVM %q Error while checking power state of Pod VM. Error: %v",
+										req.VolumeId, req.NodeId, podVM.Reference().String(), powerstateErr)
+								}
+								log.Infof("power state of pod vm: %q is %q", podVM.Reference(), podvmpowerstate)
+								if podvmpowerstate == types.VirtualMachinePowerStatePoweredOff {
+									log.Debugf("attempting to detach volume %q from "+
+										"powered off Pod VM %q", req.VolumeId, podVM.Reference().String())
+									detachFault, detachErr := c.manager.VolumeManager.DetachVolume(ctx, podVM, req.VolumeId)
+									if detachErr == nil {
+										log.Infof("successfully detached volume %q from Pod VM %q", req.VolumeId, podVM.Reference().String())
+										return &csi.ControllerUnpublishVolumeResponse{}, "", nil
+									} else {
+										log.Errorf("failed to detach volume %q from Pod VM %q", req.VolumeId, podVM.Reference().String())
+										return nil, detachFault, detachErr
+									}
+								}
 								return nil, csifault.CSIDiskNotDetachedFault, err
 							}
 							log.Infof("Found another VolumeAttachment for volumeId %q. Assuming that the pod using the "+
