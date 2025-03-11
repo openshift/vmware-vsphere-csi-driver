@@ -1,6 +1,8 @@
 module sigs.k8s.io/vsphere-csi-driver/v3
 
-go 1.21
+go 1.23.0
+
+toolchain go1.23.7
 
 require (
 	github.com/agiledragon/gomonkey/v2 v2.3.1
@@ -22,8 +24,8 @@ require (
 	github.com/vmware-tanzu/vm-operator/api v1.8.2
 	github.com/vmware/govmomi v0.36.1
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.31.0
-	golang.org/x/sync v0.10.0
+	golang.org/x/crypto v0.35.0
+	golang.org/x/sync v0.11.0
 	google.golang.org/grpc v1.60.0
 	google.golang.org/protobuf v1.33.0
 	gopkg.in/gcfg.v1 v1.2.3
@@ -157,9 +159,9 @@ require (
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/net v0.33.0 // indirect
 	golang.org/x/oauth2 v0.13.0 // indirect
-	golang.org/x/sys v0.28.0 // indirect
-	golang.org/x/term v0.27.0 // indirect
-	golang.org/x/text v0.21.0 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/term v0.29.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
 	golang.org/x/tools v0.21.1-0.20240508182429-e35e4ccd0d2d // indirect
 	gomodules.xyz/jsonpatch/v2 v2.3.0 // indirect
