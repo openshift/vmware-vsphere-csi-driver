@@ -16,7 +16,7 @@ limitations under the License.
 
 // Package nodeinfomanager includes internal functions used to add/delete labels to
 // kubernetes nodes for corresponding CSI drivers
-package nodeinfomanager // import "k8s.io/kubernetes/pkg/volume/csi/nodeinfomanager"
+package nodeinfomanager
 
 import (
 	"context"
@@ -84,6 +84,9 @@ type Interface interface {
 	// to other methods in this interface.
 	InstallCSIDriver(driverName string, driverNodeID string, maxVolumeLimit int64, topology map[string]string) error
 
+	// UpdateCSIDriver updates CSIDrivers field in the CSINode object.
+	UpdateCSIDriver(driverName string, driverNodeID string, maxAttachLimit int64, topology map[string]string) error
+
 	// Remove in the cluster node information from the CSI driver with the given name.
 	// Concurrent calls to UninstallCSIDriver() is allowed, but they should not be intertwined with calls
 	// to other methods in this interface.
@@ -112,6 +115,7 @@ func (nim *nodeInfoManager) InstallCSIDriver(driverName string, driverNodeID str
 	}
 
 	nodeUpdateFuncs := []nodeUpdateFunc{
+		removeMaxAttachLimit(driverName), // remove in 1.35 due to the version skew policy, we have to keep it for 3 releases
 		updateNodeIDInNode(driverName, driverNodeID),
 		updateTopologyLabels(topology),
 	}
@@ -129,6 +133,15 @@ func (nim *nodeInfoManager) InstallCSIDriver(driverName string, driverNodeID str
 	return nil
 }
 
+// UpdateCSIDriver updates CSIDrivers field in the CSINode object.
+func (nim *nodeInfoManager) UpdateCSIDriver(driverName string, driverNodeID string, maxAttachLimit int64, topology map[string]string) error {
+	err := nim.updateCSINode(driverName, driverNodeID, maxAttachLimit, topology)
+	if err != nil {
+		return fmt.Errorf("error updating CSINode object with CSI driver node info: %w", err)
+	}
+	return nil
+}
+
 // UninstallCSIDriver removes the node ID annotation from the Node object and CSIDrivers field from the
 // CSINode object. If the CSINodeInfo object contains no CSIDrivers, it will be deleted.
 // If multiple calls to UninstallCSIDriver() are made in parallel, some calls might receive Node or
@@ -140,7 +153,7 @@ func (nim *nodeInfoManager) UninstallCSIDriver(driverName string) error {
 	}
 
 	err = nim.updateNode(
-		removeMaxAttachLimit(driverName),
+		removeMaxAttachLimit(driverName), // remove it when this function is removed from nodeUpdateFuncs
 		removeNodeIDFromNode(driverName),
 	)
 	if err != nil {
@@ -378,6 +391,9 @@ func (nim *nodeInfoManager) tryUpdateCSINode(
 	maxAttachLimit int64,
 	topology map[string]string) error {
 
+	nim.lock.Lock()
+	defer nim.lock.Unlock()
+
 	nodeInfo, err := csiKubeClient.StorageV1().CSINodes().Get(context.TODO(), string(nim.nodeName), metav1.GetOptions{})
 	if nodeInfo == nil || errors.IsNotFound(err) {
 		nodeInfo, err = nim.CreateCSINode()
@@ -411,6 +427,9 @@ func (nim *nodeInfoManager) InitializeCSINodeWithAnnotation() error {
 }
 
 func (nim *nodeInfoManager) tryInitializeCSINodeWithAnnotation(csiKubeClient clientset.Interface) error {
+	nim.lock.Lock()
+	defer nim.lock.Unlock()
+
 	nodeInfo, err := csiKubeClient.StorageV1().CSINodes().Get(context.TODO(), string(nim.nodeName), metav1.GetOptions{})
 	if nodeInfo == nil || errors.IsNotFound(err) {
 		// CreateCSINode will set the annotation
@@ -474,16 +493,16 @@ func setMigrationAnnotation(migratedPlugins map[string](func() bool), nodeInfo *
 		nodeInfoAnnotations = map[string]string{}
 	}
 
-	var oldAnnotationSet sets.String
+	var oldAnnotationSet sets.Set[string]
 	mpa := nodeInfoAnnotations[v1.MigratedPluginsAnnotationKey]
 	tok := strings.Split(mpa, ",")
 	if len(mpa) == 0 {
-		oldAnnotationSet = sets.NewString()
+		oldAnnotationSet = sets.New[string]()
 	} else {
-		oldAnnotationSet = sets.NewString(tok...)
+		oldAnnotationSet = sets.New[string](tok...)
 	}
 
-	newAnnotationSet := sets.NewString()
+	newAnnotationSet := sets.New[string]()
 	for pluginName, migratedFunc := range migratedPlugins {
 		if migratedFunc() {
 			newAnnotationSet.Insert(pluginName)
@@ -494,7 +513,7 @@ func setMigrationAnnotation(migratedPlugins map[string](func() bool), nodeInfo *
 		return false
 	}
 
-	nas := strings.Join(newAnnotationSet.List(), ",")
+	nas := strings.Join(sets.List[string](newAnnotationSet), ",")
 	if len(nas) != 0 {
 		nodeInfoAnnotations[v1.MigratedPluginsAnnotationKey] = nas
 	} else {
@@ -526,10 +545,7 @@ func (nim *nodeInfoManager) installDriverToCSINode(
 		return fmt.Errorf("error getting CSI client")
 	}
 
-	topologyKeys := make(sets.String)
-	for k := range topology {
-		topologyKeys.Insert(k)
-	}
+	topologyKeys := sets.KeySet[string, string](topology)
 
 	specModified := true
 	// Clone driver list, omitting the driver that matches the given driverName
@@ -537,7 +553,7 @@ func (nim *nodeInfoManager) installDriverToCSINode(
 	for _, driverInfoSpec := range nodeInfo.Spec.Drivers {
 		if driverInfoSpec.Name == driverName {
 			if driverInfoSpec.NodeID == driverNodeID &&
-				sets.NewString(driverInfoSpec.TopologyKeys...).Equal(topologyKeys) &&
+				sets.New[string](driverInfoSpec.TopologyKeys...).Equal(topologyKeys) &&
 				keepAllocatableCount(driverInfoSpec, maxAttachLimit) {
 				specModified = false
 			}
@@ -557,7 +573,7 @@ func (nim *nodeInfoManager) installDriverToCSINode(
 	driverSpec := storagev1.CSINodeDriver{
 		Name:         driverName,
 		NodeID:       driverNodeID,
-		TopologyKeys: topologyKeys.List(),
+		TopologyKeys: sets.List[string](topologyKeys),
 	}
 
 	if maxAttachLimit > 0 {
@@ -603,6 +619,9 @@ func (nim *nodeInfoManager) uninstallDriverFromCSINode(
 func (nim *nodeInfoManager) tryUninstallDriverFromCSINode(
 	csiKubeClient clientset.Interface,
 	csiDriverName string) error {
+
+	nim.lock.Lock()
+	defer nim.lock.Unlock()
 
 	nodeInfoClient := csiKubeClient.StorageV1().CSINodes()
 	nodeInfo, err := nodeInfoClient.Get(context.TODO(), string(nim.nodeName), metav1.GetOptions{})

@@ -1,4 +1,5 @@
-// Copyright (c) 2020 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -20,6 +21,7 @@ type ClassReference struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vmclassbinding
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // VirtualMachineClassBinding is a binding object responsible for
 // defining a VirtualMachineClass and a Namespace associated with it.
@@ -41,5 +43,5 @@ type VirtualMachineClassBindingList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachineClassBinding{}, &VirtualMachineClassBindingList{})
+	objectTypes = append(objectTypes, &VirtualMachineClassBinding{}, &VirtualMachineClassBindingList{})
 }

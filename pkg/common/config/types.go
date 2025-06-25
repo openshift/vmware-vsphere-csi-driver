@@ -16,7 +16,9 @@ limitations under the License.
 
 package config
 
-import vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
+import (
+	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
+)
 
 // Config is used to read and store information from the cloud configuration file
 type Config struct {
@@ -153,6 +155,8 @@ type VirtualCenterConfig struct {
 	// MigrationDataStore specifies datastore which is set as default datastore in legacy cloud-config
 	// and hence should be used as default datastore.
 	MigrationDataStoreURL string `gcfg:"migration-datastore-url"`
+	// FileVolumeActivated indicates whether file service has been enabled on any vSAN cluster or not
+	FileVolumeActivated bool
 }
 
 // GCConfig contains information used by guest cluster to access a supervisor

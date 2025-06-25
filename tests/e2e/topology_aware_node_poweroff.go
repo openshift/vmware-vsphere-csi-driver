@@ -59,6 +59,25 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		if !(len(nodeList.Items) > 0) {
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
+
+		// delete nginx-sc storage class incase any stale entry left
+		sc, err := client.StorageV1().StorageClasses().Get(ctx, defaultNginxStorageClassName, metav1.GetOptions{})
+		if err == nil && sc != nil {
+			gomega.Expect(client.StorageV1().StorageClasses().Delete(ctx, sc.Name,
+				*metav1.NewDeleteOptions(0))).NotTo(gomega.HaveOccurred())
+		}
+
+		framework.Logf("Delete service %s incase stale entry left", servicename)
+		serviceList, err := client.CoreV1().Services(namespace).List(ctx, metav1.ListOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		if len(serviceList.Items) != 0 {
+			for _, service := range serviceList.Items {
+				if service.Name == servicename {
+					err = client.CoreV1().Services(namespace).Delete(ctx, servicename, *metav1.NewDeleteOptions(0))
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
+			}
+		}
 	})
 
 	// 1. Create a Storage Class with spec containing valid region and zone in
@@ -96,13 +115,15 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		}()
 
 		ginkgo.By("Creating statefulset with single replica")
-		statefulset, service := createStatefulSetWithOneReplica(client, manifestPath, namespace)
+		statefulset, service, err := createStatefulSetWithOneReplica(client, manifestPath, namespace)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			deleteService(namespace, client, service)
 		}()
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, 1)
 
-		podList := fss.GetPodList(ctx, client, statefulset)
+		podList, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(podList.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(podList.Items) == 1).To(gomega.BeTrue(), "Number of Pods in the statefulset should be 1")
@@ -160,7 +181,8 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(isDiskDetached).To(gomega.BeTrue(), "Volume is not detached from the node")
 
-		podList = fss.GetPodList(ctx, client, statefulset)
+		podList, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		pod = podList.Items[0]
 		failoverNode := pod.Spec.NodeName
 
@@ -236,13 +258,15 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		}()
 
 		ginkgo.By("Creating statefulset with single replica")
-		statefulset, service := createStatefulSetWithOneReplica(client, manifestPath, namespace)
+		statefulset, service, err := createStatefulSetWithOneReplica(client, manifestPath, namespace)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			deleteService(namespace, client, service)
 		}()
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, 1)
 
-		podList := fss.GetPodList(ctx, client, statefulset)
+		podList, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(podList.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(podList.Items) == 1).To(gomega.BeTrue(), "Number of Pods in the statefulset should be 1")
@@ -294,7 +318,8 @@ var _ = ginkgo.Describe("[csi-topology-vanilla] Topology-Aware-Provisioning-With
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(isDiskDetached).To(gomega.BeTrue(), "Volume is not detached from the node")
 
-		podList = fss.GetPodList(ctx, client, statefulset)
+		podList, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		pod = podList.Items[0]
 		nodeNameAfterPodReschedule := pod.Spec.NodeName
 		ginkgo.By("Verify if the pod was not scheduled on other node")

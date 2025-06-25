@@ -119,6 +119,8 @@ var (
 	// csiNodeTopologyInformer refers to a shared K8s informer listening on CSINodeTopology instances
 	// in the cluster.
 	csiNodeTopologyInformer *cache.SharedIndexInformer
+	// zoneInformer is an informer watching the namespaced zone instances in supervisor cluster.
+	zoneInformer cache.SharedIndexInformer
 )
 
 // nodeVolumeTopology implements the commoncotypes.NodeTopologyService interface. It stores
@@ -767,7 +769,7 @@ func (volTopology *nodeVolumeTopology) GetNodeTopologyLabels(ctx context.Context
 	if volTopology.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
 		err = createCSINodeTopologyInstance(ctx, volTopology, nodeInfo)
 		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal, err.Error())
+			return nil, logger.LogNewErrorCodef(log, codes.Internal, "error %+v", err.Error())
 		}
 	} else {
 		csiNodeTopology := &csinodetopologyv1alpha1.CSINodeTopology{}
@@ -779,12 +781,12 @@ func (volTopology *nodeVolumeTopology) GetNodeTopologyLabels(ctx context.Context
 		if err != nil {
 			if !apierrors.IsNotFound(err) {
 				msg := fmt.Sprintf("failed to get CsiNodeTopology for the node: %q. Error: %+v", nodeInfo.NodeName, err)
-				return nil, logger.LogNewErrorCodef(log, codes.Internal, msg)
+				return nil, logger.LogNewErrorCode(log, codes.Internal, msg)
 			}
 			csiNodeTopologyFound = false
 			err = createCSINodeTopologyInstance(ctx, volTopology, nodeInfo)
 			if err != nil {
-				return nil, logger.LogNewErrorCodef(log, codes.Internal, err.Error())
+				return nil, logger.LogNewErrorCodef(log, codes.Internal, "error %+v", err.Error())
 			}
 		}
 		// There is an already existing topology.
@@ -798,7 +800,7 @@ func (volTopology *nodeVolumeTopology) GetNodeTopologyLabels(ctx context.Context
 				msg := fmt.Sprintf("Fail to patch CsiNodeTopology for the node: %q "+
 					"with nodeUUID: %s. Error: %+v",
 					nodeInfo.NodeName, nodeInfo.NodeID, err)
-				return nil, logger.LogNewErrorCodef(log, codes.Internal, msg)
+				return nil, logger.LogNewErrorCode(log, codes.Internal, msg)
 			}
 			log.Infof("Successfully patched CSINodeTopology instance: %q with Uuid: %q",
 				nodeInfo.NodeName, nodeInfo.NodeID)
@@ -807,7 +809,7 @@ func (volTopology *nodeVolumeTopology) GetNodeTopologyLabels(ctx context.Context
 
 	// Create a watcher for CSINodeTopology CRs.
 	timeoutSeconds := int64((time.Duration(getCSINodeTopologyWatchTimeoutInMin(ctx)) * time.Minute).Seconds())
-	watchCSINodeTopology, err := volTopology.csiNodeTopologyWatcher.Watch(metav1.ListOptions{
+	watchCSINodeTopology, err := volTopology.csiNodeTopologyWatcher.WatchWithContext(ctx, metav1.ListOptions{
 		FieldSelector:  fields.OneTermEqualSelector("metadata.name", nodeInfo.NodeName).String(),
 		TimeoutSeconds: &timeoutSeconds,
 		Watch:          true,
@@ -1629,7 +1631,8 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 		if params.TopologyRequirement == nil {
 			// This case is for static volume provisioning using CNSRegisterVolume API
 			if !isPodVMOnStretchedSupervisorEnabled {
-				return nil, logger.LogNewErrorf(log, "topology requirement should not be nil. invalid params: %v", params)
+				return nil, logger.LogNewErrorf(log, "topology requirement should not be nil. invalid "+
+					"params: %v", params)
 			} else {
 				// If the topology requirement received is nil, then identify topology of the datastore by looking into
 				// azClustersMap
@@ -1668,8 +1671,7 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 			topologySegments = append(topologySegments, params.TopologyRequirement.GetPreferred()[0].GetSegments())
 		} else {
 			// If multiple zones are provided as input in the topology requirement, find the zone
-			// to which the selected datastore is associated with. If this search results in multiple zones,
-			// randomly choose one as node affinity.
+			// to which the selected datastore is associated with.
 			var selectedSegments []map[string]string
 			for _, topology := range params.TopologyRequirement.GetPreferred() {
 				for label, value := range topology.GetSegments() {
@@ -1699,6 +1701,39 @@ func (volTopology *wcpControllerVolumeTopology) GetTopologyInfoFromNodes(ctx con
 				topologySegments = selectedSegments
 			}
 		}
+	// In VC 9.0, if StorageTopologyType is not set, all the zones the selected datastore
+	// is accessible from will be added as node affinity terms on the PV even if the zones
+	// are not associated with the namespace of the PVC.
+	// This code block runs for static as well as dynamic volume provisioning case.
+	case "":
+		// TopoSegToDatastoresMap will be nil in case of static volume provisioning.
+		if params.TopoSegToDatastoresMap == nil {
+			params.TopoSegToDatastoresMap = make(map[string][]*cnsvsphere.DatastoreInfo)
+		}
+		var selectedSegments []map[string]string
+		for zone, clusters := range azClustersMap {
+			if _, exists := params.TopoSegToDatastoresMap[zone]; !exists {
+				sharedDatastoresForClusters, err := getSharedDatastoresInClusters(ctx, clusters, params.Vc)
+				if err != nil {
+					return nil, logger.LogNewErrorf(log, "failed to get shared datastores for clusters: %v, "+
+						"err: %v", clusters, err)
+				}
+				params.TopoSegToDatastoresMap[zone] = sharedDatastoresForClusters
+			}
+		}
+		for zone, datastores := range params.TopoSegToDatastoresMap {
+			for _, ds := range datastores {
+				if ds.Info.Url == params.DatastoreURL {
+					selectedSegments = append(selectedSegments, map[string]string{v1.LabelTopologyZone: zone})
+					break
+				}
+			}
+		}
+		if len(selectedSegments) == 0 {
+			return nil, logger.LogNewErrorf(log,
+				"could not find the topology of the volume provisioned on datastore %q", params.DatastoreURL)
+		}
+		topologySegments = selectedSegments
 	default:
 		// This is considered a configuration error.
 		return nil, &common.InvalidTopologyProvisioningError{ErrMsg: fmt.Sprintf("unrecognised "+
@@ -1744,4 +1779,49 @@ func getSharedDatastoresInClusters(ctx context.Context, clusterMorefs []string,
 		}
 	}
 	return sharedDatastoresForclusterMorefs, nil
+}
+
+// StartZonesInformer listens on changes to Zone instances.
+func (c *K8sOrchestrator) StartZonesInformer(ctx context.Context,
+	restClientConfig *restclient.Config, namespace string) error {
+	log := logger.GetLogger(ctx)
+
+	// Create an informer for Zone instances.
+	dynInformer, err := k8s.GetDynamicInformer(ctx, "topology.tanzu.vmware.com",
+		"v1alpha1", "zones", namespace, restClientConfig, false)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to create dynamic informer for Zones CR. Error: %+v", err)
+	}
+	zoneInformer = dynInformer.Informer()
+
+	// Start informer.
+	go func() {
+		log.Info("Informer to watch on Zones CR starting..")
+		zoneInformer.Run(make(chan struct{}))
+	}()
+	return nil
+}
+
+// GetZonesForNamespace fetches the zones associated with a namespace.
+func (c *K8sOrchestrator) GetZonesForNamespace(targetNS string) map[string]struct{} {
+	var zonesMap map[string]struct{}
+
+	// Get zones instances from the informer store.
+	zones := zoneInformer.GetStore()
+	for _, zoneObj := range zones.List() {
+		// Only consider zones in targetNS.
+		if zoneObj.(*unstructured.Unstructured).GetNamespace() != targetNS {
+			continue
+		}
+		// Only add zones without a deletion timestamp.
+		if zoneObj.(*unstructured.Unstructured).GetDeletionTimestamp() == nil {
+			if zonesMap == nil {
+				zonesMap = map[string]struct{}{zoneObj.(*unstructured.Unstructured).GetName(): {}}
+			} else {
+				zonesMap[zoneObj.(*unstructured.Unstructured).GetName()] = struct{}{}
+
+			}
+		}
+	}
+	return zonesMap
 }

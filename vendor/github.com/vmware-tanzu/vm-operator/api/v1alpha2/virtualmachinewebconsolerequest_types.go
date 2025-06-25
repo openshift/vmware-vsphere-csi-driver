@@ -1,4 +1,5 @@
-// Copyright (c) 2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha2
@@ -13,11 +14,15 @@ type VirtualMachineWebConsoleRequestSpec struct {
 	// Name is the name of a VM in the same Namespace as this web console
 	// request.
 	Name string `json:"name"`
+	// PublicKey is used to encrypt the status.response. This is expected to be a RSA OAEP public key in X.509 PEM format.
+	PublicKey string `json:"publicKey"`
 }
 
 // VirtualMachineWebConsoleRequestStatus describes the observed state of the
 // request.
 type VirtualMachineWebConsoleRequestStatus struct {
+	// Response will be the authenticated ticket corresponding to this web console request.
+	Response string `json:"response,omitempty"`
 	// ExpiryTime is the time at which access via this request will expire.
 	ExpiryTime metav1.Time `json:"expiryTime,omitempty"`
 
@@ -50,7 +55,6 @@ type VirtualMachineWebConsoleRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 
 // VirtualMachineWebConsoleRequest allows the creation of a one-time, web
@@ -74,7 +78,7 @@ type VirtualMachineWebConsoleRequestList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(
+	objectTypes = append(objectTypes,
 		&VirtualMachineWebConsoleRequest{},
 		&VirtualMachineWebConsoleRequestList{},
 	)

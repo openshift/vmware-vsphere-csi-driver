@@ -33,6 +33,7 @@ func NewCnsClient(ctx context.Context, c *vim25.Client) (*cns.Client, error) {
 		return nil, err
 	}
 	cnsClient.RoundTripper = &MetricRoundTripper{"cns", cnsClient.RoundTripper}
+
 	return cnsClient, nil
 }
 

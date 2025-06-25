@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -45,6 +45,7 @@ import (
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
@@ -96,7 +97,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		log.Infof("The %s FSS is enabled in %s", common.TKGsHA, cnstypes.CnsClusterFlavorGuest)
 		restClientConfigForSupervisor :=
 			k8s.GetRestClientConfigForSupervisor(ctx, configInfo.Cfg.GC.Endpoint, configInfo.Cfg.GC.Port)
-		vmOperatorClient, err = k8s.NewClientForGroup(ctx, restClientConfigForSupervisor, vmoperatortypes.GroupName)
+		vmOperatorClient, err = k8s.NewClientForGroup(ctx, restClientConfigForSupervisor, vmoperatorv1alpha4.GroupName)
 		if err != nil {
 			log.Errorf("failed to create vmOperatorClient. Error: %+v", err)
 			return err
@@ -162,17 +163,17 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 	// Predicates are used to determine under which conditions the reconcile
 	// callback will be made for an instance.
-	pred := predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
+	pred := predicate.TypedFuncs[*csinodetopologyv1alpha1.CSINodeTopology]{
+		CreateFunc: func(e event.TypedCreateEvent[*csinodetopologyv1alpha1.CSINodeTopology]) bool {
 			return true
 		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
+		UpdateFunc: func(e event.TypedUpdateEvent[*csinodetopologyv1alpha1.CSINodeTopology]) bool {
 			// The CO calls NodeGetInfo API just once during the node registration,
 			// therefore we do not support updates to the spec after the CR has
 			// been reconciled.
 			return true
 		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
+		DeleteFunc: func(e event.TypedDeleteEvent[*csinodetopologyv1alpha1.CSINodeTopology]) bool {
 			// Instances are deleted by the garbage collector automatically after
 			// the corresponding NodeVM is deleted. No reconcile operations are
 			// required.
@@ -182,8 +183,9 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
 	// Watch for changes to primary resource CSINodeTopology.
-	err = c.Watch(source.Kind(mgr.GetCache(), &csinodetopologyv1alpha1.CSINodeTopology{}),
-		&handler.EnqueueRequestForObject{}, pred)
+	err = c.Watch(source.Kind(mgr.GetCache(),
+		&csinodetopologyv1alpha1.CSINodeTopology{},
+		&handler.TypedEnqueueRequestForObject[*csinodetopologyv1alpha1.CSINodeTopology]{}, pred))
 	if err != nil {
 		log.Errorf("Failed to watch for changes to CSINodeTopology resource with error: %+v", err)
 		return err
@@ -421,25 +423,23 @@ func (r *ReconcileCSINodeTopology) reconcileForGuest(ctx context.Context, reques
 func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv1alpha1.CSINodeTopology,
 	vmOperatorClient client.Client, supervisorNamespace string) ([]csinodetopologyv1alpha1.TopologyLabel, error) {
 	log := logger.GetLogger(ctx)
-
-	virtualMachine := &vmoperatortypes.VirtualMachine{}
 	vmKey := types.NamespacedName{
 		Namespace: supervisorNamespace,
 		Name:      instance.Name, // use the nodeName as the VM key
 	}
-
-	var err error
-	if err = vmOperatorClient.Get(ctx, vmKey, virtualMachine); err != nil {
+	log.Info("fetching virtual machines with all versions")
+	virtualMachine, err := utils.GetVirtualMachineAllApiVersions(
+		ctx, vmKey, vmOperatorClient)
+	if err != nil {
 		return nil, logger.LogNewErrorf(log,
 			"failed to get VirtualMachines for the node: %q. Error: %+v", instance.Name, err)
 	}
-
 	var topologyLabels []csinodetopologyv1alpha1.TopologyLabel
 	if virtualMachine.Status.Zone != "" {
 		topologyLabels = make([]csinodetopologyv1alpha1.TopologyLabel, 0)
 		topologyLabels = append(topologyLabels,
 			csinodetopologyv1alpha1.TopologyLabel{
-				Key:   corev1.LabelZoneFailureDomainStable,
+				Key:   corev1.LabelTopologyZone,
 				Value: virtualMachine.Status.Zone,
 			},
 		)

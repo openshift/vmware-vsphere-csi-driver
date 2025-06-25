@@ -1,4 +1,5 @@
-// Copyright (c) 2022 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -134,7 +135,7 @@ type VirtualMachinePublishRequestSource struct {
 // VirtualMachinePublishRequestTargetItem is the item part of a
 // publication request's target.
 type VirtualMachinePublishRequestTargetItem struct {
-	// Name is the name of the published object.
+	// Name is the display name of the published object.
 	//
 	// If the spec.target.location.apiVersion equals
 	// imageregistry.vmware.com/v1alpha1 and the spec.target.location.kind
@@ -342,8 +343,9 @@ func (vmpr *VirtualMachinePublishRequest) SetConditions(conditions Conditions) {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vmpub
-// +kubebuilder:storageversion
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
+// +kubebuilder:deprecatedversion
 
 // VirtualMachinePublishRequest defines the information necessary to publish a
 // VirtualMachine as a VirtualMachineImage to an image registry.
@@ -356,6 +358,7 @@ type VirtualMachinePublishRequest struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // VirtualMachinePublishRequestList contains a list of
 // VirtualMachinePublishRequest resources.
@@ -366,5 +369,5 @@ type VirtualMachinePublishRequestList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachinePublishRequest{}, &VirtualMachinePublishRequestList{})
+	objectTypes = append(objectTypes, &VirtualMachinePublishRequest{}, &VirtualMachinePublishRequestList{})
 }

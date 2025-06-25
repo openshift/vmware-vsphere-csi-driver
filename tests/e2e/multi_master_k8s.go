@@ -138,7 +138,8 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 		7. Delete all PVCs from the tests namespace.
 		8. Delete the storage class.
 	*/
-	ginkgo.It("Power off the node where vsphere-csi-controller pod is running", func() {
+	ginkgo.It("Power off the node where vsphere-csi-controller pod is running", ginkgo.Label(p0, block, vanilla,
+		vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		nodeList, podList := getControllerRuntimeDetails(client, controllerNamespace)
@@ -156,7 +157,7 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 			// create resource quota
 			createResourceQuota(client, namespace, rqLimit, storagePolicyName)
 			sc, pvc, err = createPVCAndStorageClass(ctx, client, namespace, nil,
-				scParameters, "", nil, "", false, "", storagePolicyName)
+				scParameters, "", nil, "", true, "", storagePolicyName)
 		}
 
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -239,8 +240,8 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 		9. Delete the storage class.
 	*/
 
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] "+
-		"Stop kubelet on the node where vsphere-csi-controller pod is running", func() {
+	ginkgo.It("[csi-block-vanilla] [csi-supervisor] Stop kubelet on the node where vsphere-csi-controller "+
+		"pod is running", ginkgo.Label(p0, block, vanilla, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		nodeList, podList := getControllerRuntimeDetails(client, controllerNamespace)
@@ -292,7 +293,9 @@ var _ = ginkgo.Describe("[csi-multi-master-block-e2e]", func() {
 			nodeNameOfvSphereCSIControllerPod, nodeNameIPMap[nodeNameOfvSphereCSIControllerPod]))
 
 		sshCmd := "systemctl stop kubelet.service"
-		host := nodeNameIPMap[nodeNameOfvSphereCSIControllerPod] + ":22"
+		ip, portNum, err := getPortNumAndIP(nodeNameOfvSphereCSIControllerPod)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		host := nodeNameIPMap[ip] + ":" + portNum
 		ginkgo.By(fmt.Sprintf("Invoking command %+v on host %+v", sshCmd, host))
 		result, err := fssh.SSH(ctx, sshCmd, host, framework.TestContext.Provider)
 		ginkgo.By(fmt.Sprintf("%s returned result %s", sshCmd, result.Stdout))
@@ -336,7 +339,7 @@ func getControllerRuntimeDetails(client clientset.Interface, nameSpace string) (
 	var podNameList []string
 	for _, pod := range pods.Items {
 		if strings.HasPrefix(pod.Name, vSphereCSIControllerPodNamePrefix) {
-			framework.Logf(fmt.Sprintf("Found vSphereCSIController pod %s PodStatus %s", pod.Name, pod.Status.Phase))
+			framework.Logf("Found vSphereCSIController pod %s PodStatus %s", pod.Name, pod.Status.Phase)
 			nodeNameList = append(nodeNameList, pod.Spec.NodeName)
 			podNameList = append(podNameList, pod.Name)
 		}

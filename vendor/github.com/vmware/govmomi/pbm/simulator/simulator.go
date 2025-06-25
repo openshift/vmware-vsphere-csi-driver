@@ -1,11 +1,11 @@
 /*
-Copyright (c) 2018 VMware, Inc. All Rights Reserved.
+Copyright (c) 2018-2024 VMware, Inc. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
 You may obtain a copy of the License at
 
-    http://www.apache.org/licenses/LICENSE-2.0
+http://www.apache.org/licenses/LICENSE-2.0
 
 Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@ limitations under the License.
 package simulator
 
 import (
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -55,15 +56,18 @@ func New() *simulator.Registry {
 	r := simulator.NewRegistry()
 	r.Namespace = pbm.Namespace
 	r.Path = pbm.Path
+	r.Cookie = simulator.SOAPCookie
 
 	r.Put(&ServiceInstance{
 		ManagedObjectReference: pbm.ServiceInstance,
 		Content:                content,
 	})
 
-	r.Put(&ProfileManager{
+	profileManager := &ProfileManager{
 		ManagedObjectReference: content.ProfileManager,
-	})
+	}
+	profileManager.init(r)
+	r.Put(profileManager)
 
 	r.Put(&PlacementSolver{
 		ManagedObjectReference: content.PlacementSolver,
@@ -88,14 +92,34 @@ func (s *ServiceInstance) PbmRetrieveServiceContent(_ *types.PbmRetrieveServiceC
 
 type ProfileManager struct {
 	vim.ManagedObjectReference
+
+	profiles       []types.BasePbmProfile
+	profileDetails map[string]types.PbmProfileDetails
+}
+
+func (m *ProfileManager) init(_ *simulator.Registry) {
+	m.profiles = slices.Clone(vcenter67DefaultProfiles)
+
+	// Ensure the default encryption profile has the encryption IOFILTER as this
+	// is required when detecting whether a policy supports encryption.
+	m.profileDetails = map[string]types.PbmProfileDetails{
+		defaultEncryptionProfile.ProfileId.UniqueId: {
+			Profile: defaultEncryptionProfile,
+			IofInfos: []types.PbmIofilterInfo{
+				{
+					FilterType: string(types.PbmIofilterInfoFilterTypeENCRYPTION),
+				},
+			},
+		},
+	}
 }
 
 func (m *ProfileManager) PbmQueryProfile(req *types.PbmQueryProfile) soap.HasFault {
 	body := new(methods.PbmQueryProfileBody)
 	body.Res = new(types.PbmQueryProfileResponse)
 
-	for i := range profiles {
-		b, ok := profiles[i].(types.BasePbmCapabilityProfile)
+	for i := range m.profiles {
+		b, ok := m.profiles[i].(types.BasePbmCapabilityProfile)
 		if !ok {
 			continue
 		}
@@ -143,7 +167,7 @@ func (m *ProfileManager) PbmRetrieveContent(req *types.PbmRetrieveContent) soap.
 	var res []types.BasePbmProfile
 
 	match := func(id string) bool {
-		for _, p := range profiles {
+		for _, p := range m.profiles {
 			if id == p.GetPbmProfile().ProfileId.UniqueId {
 				res = append(res, p)
 				return true
@@ -191,7 +215,7 @@ func (m *ProfileManager) PbmCreate(ctx *simulator.Context, req *types.PbmCreate)
 		LineOfService:            "",
 	}
 
-	profiles = append(profiles, profile)
+	m.profiles = append(m.profiles, profile)
 	body.Res.Returnval.UniqueId = profile.PbmProfile.ProfileId.UniqueId
 
 	return body
@@ -201,11 +225,11 @@ func (m *ProfileManager) PbmDelete(req *types.PbmDelete) soap.HasFault {
 	body := new(methods.PbmDeleteBody)
 
 	for _, id := range req.ProfileId {
-		for i, p := range profiles {
+		for i, p := range m.profiles {
 			pid := p.GetPbmProfile().ProfileId
 
 			if id == pid {
-				profiles = append(profiles[:i], profiles[i+1:]...)
+				m.profiles = append(m.profiles[:i], m.profiles[i+1:]...)
 				break
 			}
 		}
@@ -216,6 +240,33 @@ func (m *ProfileManager) PbmDelete(req *types.PbmDelete) soap.HasFault {
 	return body
 }
 
+func (m *ProfileManager) PbmQueryIOFiltersFromProfileId(req *types.PbmQueryIOFiltersFromProfileId) soap.HasFault {
+	body := methods.PbmQueryIOFiltersFromProfileIdBody{
+		Res: &types.PbmQueryIOFiltersFromProfileIdResponse{},
+	}
+
+	for i := range req.ProfileIds {
+		profileID := req.ProfileIds[i]
+		if profileDetails, ok := m.profileDetails[profileID.UniqueId]; ok {
+			body.Res.Returnval = append(
+				body.Res.Returnval,
+				types.PbmProfileToIofilterMap{
+					Key:       profileID,
+					Iofilters: profileDetails.IofInfos,
+				})
+		} else {
+			body.Fault_ = simulator.Fault("Invalid profile ID", &vim.RuntimeFault{})
+			break
+		}
+	}
+
+	if body.Fault_ != nil {
+		body.Res = nil
+	}
+
+	return &body
+}
+
 type PlacementSolver struct {
 	vim.ManagedObjectReference
 }
@@ -223,6 +274,29 @@ type PlacementSolver struct {
 func (m *PlacementSolver) PbmCheckRequirements(req *types.PbmCheckRequirements) soap.HasFault {
 	body := new(methods.PbmCheckRequirementsBody)
 	body.Res = new(types.PbmCheckRequirementsResponse)
+
+	for _, ds := range simulator.Map.All("Datastore") {
+		// TODO: filter
+		ref := ds.Reference()
+		body.Res.Returnval = append(body.Res.Returnval, types.PbmPlacementCompatibilityResult{
+			Hub: types.PbmPlacementHub{
+				HubType: ref.Type,
+				HubId:   ref.Value,
+			},
+			MatchingResources: nil,
+			HowMany:           0,
+			Utilization:       nil,
+			Warning:           nil,
+			Error:             nil,
+		})
+	}
+
+	return body
+}
+
+func (m *PlacementSolver) PbmCheckCompatibility(req *types.PbmCheckCompatibility) soap.HasFault {
+	body := new(methods.PbmCheckCompatibilityBody)
+	body.Res = new(types.PbmCheckCompatibilityResponse)
 
 	for _, ds := range simulator.Map.All("Datastore") {
 		// TODO: filter

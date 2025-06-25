@@ -1,4 +1,5 @@
-// Copyright (c) 2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 // +kubebuilder:object:generate=true
@@ -6,35 +7,52 @@
 package cloudinit
 
 import (
-	corev1 "k8s.io/api/core/v1"
+	"encoding/json"
 
-	"github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
+	vmopv1a2common "github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
 )
 
 // CloudConfig is the VM Operator API subset of a Cloud-Init CloudConfig and
-// contains several of the CloudConfig's frequently user modules.
+// contains several of the CloudConfig's frequently used modules.
 type CloudConfig struct {
 	// Timezone describes the timezone represented in /usr/share/zoneinfo.
 	//
 	// +optional
 	Timezone string `json:"timezone,omitempty"`
 
-	// User enables overriding the "default_user" configuration from
-	// "/etc/cloud/cloud.cfg".
+	// DefaultUserEnabled may be set to true to ensure even if the Users field
+	// is not empty, the default user is still created on systems that have one
+	// defined. By default, Cloud-Init ignores the default user if the
+	// CloudConfig provides one or more non-default users via the Users field.
 	//
 	// +optional
-	User User `json:"user,omitempty"`
+	DefaultUserEnabled bool `json:"defaultUserEnabled,omitempty"`
 
 	// Users allows adding/configuring one or more users on the guest.
-	//
-	// Please note if the first element in this list has a Name field set to
-	// "default", then that element will be serialized as "- default" when
-	// marshaling this list as part of generating a YAML CloudConfig.
 	//
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Users []User `json:"users,omitempty"`
+
+	// RunCmd allows running one or more commands on the guest.
+	// The entries in this list can adhere to two, different formats:
+	//
+	// Format 1 -- a string that contains the command and its arguments, ex.
+	//
+	//     runcmd:
+	//     - "ls -al"
+	//
+	// Format 2 -- a list of the command and its arguments, ex.
+	//
+	//     runcmd:
+	//     - - echo
+	//       - "Hello, world."
+	//
+	// +optional
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	RunCmd json.RawMessage `json:"runcmd,omitempty"`
 
 	// WriteFiles
 	//
@@ -42,6 +60,15 @@ type CloudConfig struct {
 	// +listType=map
 	// +listMapKey=path
 	WriteFiles []WriteFile `json:"write_files,omitempty"`
+
+	// SSHPwdAuth sets whether or not to accept password authentication. ``true`` will enable password
+	// auth. ``false`` will disable. Default: leave the value unchanged. In order for this
+	// config to be applied, SSH may need to be restarted. On systemd systems, this restart will
+	// only happen if the SSH service has already been started. On non-systemd systems, a
+	// restart will be attempted regardless of the service state.
+	//
+	// +optional
+	SSHPwdAuth *bool `json:"ssh_pwauth,omitempty"`
 }
 
 // User is a CloudConfig user data structure.
@@ -74,7 +101,7 @@ type User struct {
 	// if the specified user already exists.
 	//
 	// +optional
-	HashedPasswd *corev1.SecretKeySelector `json:"hashed_passwd,omitempty"`
+	HashedPasswd *vmopv1a2common.SecretKeySelector `json:"hashed_passwd,omitempty"`
 
 	// Homedir is the optional home directory for the user.
 	//
@@ -130,7 +157,7 @@ type User struct {
 	// please use HashedPasswd instead.
 	//
 	// +optional
-	Passwd *corev1.SecretKeySelector `json:"passwd"`
+	Passwd *vmopv1a2common.SecretKeySelector `json:"passwd,omitempty"`
 
 	// PrimaryGroup is the primary group for the user.
 	//
@@ -243,8 +270,26 @@ type WriteFile struct {
 	// When omitted an empty file will be created or existing file will be
 	// modified.
 	//
+	// The value for this field can adhere to two, different formats:
+	//
+	// Format 1 -- a string that contains the command and its arguments, ex.
+	//
+	//     content: Hello, world.
+	//
+	// Please note that format 1 supports all of the manners of specifying a
+	// YAML string.
+	//
+	// Format 2 -- a secret reference with the name of the key that contains
+	//             the content for the file, ex.
+	//
+	//     content:
+	//       name: my-bootstrap-secret
+	//       key: my-file-content
+	//
 	// +optional
-	Content common.ValueOrSecretKeySelector `json:"content,omitempty"`
+	// +kubebuilder:validation:Schemaless
+	// +kubebuilder:pruning:PreserveUnknownFields
+	Content json.RawMessage `json:"content,omitempty"`
 
 	// Defer indicates to defer writing the file until Cloud-Init's "final"
 	// stage, after users are created and packages are installed.

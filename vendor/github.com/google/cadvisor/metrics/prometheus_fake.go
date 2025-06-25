@@ -326,12 +326,29 @@ func (p testSubcontainersInfoProvider) GetRequestedContainersInfo(string, v2.Req
 							RunqueueTime: 479424566378,
 							RunPeriods:   984285,
 						},
-						LoadAverage: 2,
+						LoadAverage:  2,
+						LoadDAverage: 2,
+						PSI: info.PSIStats{
+							Full: info.PSIData{
+								Avg10:  0.3,
+								Avg60:  0.2,
+								Avg300: 0.1,
+								Total:  100,
+							},
+							Some: info.PSIData{
+								Avg10:  0.6,
+								Avg60:  0.4,
+								Avg300: 0.2,
+								Total:  200,
+							},
+						},
 					},
 					Memory: info.MemoryStats{
-						Usage:      8,
-						MaxUsage:   8,
-						WorkingSet: 9,
+						Usage:             8,
+						MaxUsage:          8,
+						WorkingSet:        9,
+						TotalActiveFile:   7,
+						TotalInactiveFile: 6,
 						ContainerData: info.MemoryStatsMemoryData{
 							Pgfault:    10,
 							Pgmajfault: 11,
@@ -350,10 +367,25 @@ func (p testSubcontainersInfoProvider) GetRequestedContainersInfo(string, v2.Req
 								Unevictable: map[uint8]uint64{0: 8900, 1: 20000},
 							},
 						},
-						Cache:      14,
-						RSS:        15,
-						MappedFile: 16,
-						Swap:       8192,
+						Cache:       14,
+						RSS:         15,
+						MappedFile:  16,
+						KernelUsage: 17,
+						Swap:        8192,
+						PSI: info.PSIStats{
+							Full: info.PSIData{
+								Avg10:  0.3,
+								Avg60:  0.2,
+								Avg300: 0.1,
+								Total:  1000,
+							},
+							Some: info.PSIData{
+								Avg10:  0.6,
+								Avg60:  0.4,
+								Avg300: 0.2,
+								Total:  2000,
+							},
+						},
 					},
 					Hugetlb: map[string]info.HugetlbStats{
 						"2Mi": {
@@ -546,6 +578,20 @@ func (p testSubcontainersInfoProvider) GetRequestedContainersInfo(string, v2.Req
 								"Write":   6,
 							},
 						}},
+						PSI: info.PSIStats{
+							Full: info.PSIData{
+								Avg10:  0.3,
+								Avg60:  0.2,
+								Avg300: 0.1,
+								Total:  1100,
+							},
+							Some: info.PSIData{
+								Avg10:  0.6,
+								Avg60:  0.4,
+								Avg300: 0.2,
+								Total:  2200,
+							},
+						},
 					},
 					Filesystem: []info.FsStats{
 						{

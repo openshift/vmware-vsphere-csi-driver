@@ -19,6 +19,7 @@ package memorymanager
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
+	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	corev1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
 	kubeletconfig "k8s.io/kubernetes/pkg/kubelet/apis/config"
 	"k8s.io/kubernetes/pkg/kubelet/cm/containermap"
@@ -83,7 +85,7 @@ type Manager interface {
 	GetPodTopologyHints(*v1.Pod) map[string][]topologymanager.TopologyHint
 
 	// GetMemoryNUMANodes provides NUMA nodes that are used to allocate the container memory
-	GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.Int
+	GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.Set[int]
 
 	// GetAllocatableMemory returns the amount of allocatable memory for each NUMA node
 	GetAllocatableMemory() []state.Block
@@ -125,9 +127,6 @@ type manager struct {
 
 	// allocatableMemory holds the allocatable memory for each NUMA node
 	allocatableMemory []state.Block
-
-	// pendingAdmissionPod contain the pod during the admission phase
-	pendingAdmissionPod *v1.Pod
 }
 
 var _ Manager = &manager{}
@@ -142,6 +141,10 @@ func NewManager(policyName string, machineInfo *cadvisorapi.MachineInfo, nodeAll
 		policy = NewPolicyNone()
 
 	case policyTypeStatic:
+		if runtime.GOOS == "windows" {
+			return nil, fmt.Errorf("policy %q is not available on Windows", policyTypeStatic)
+		}
+
 		systemReserved, err := getSystemReservedMemory(machineInfo, nodeAllocatableReservation, reservedMemory)
 		if err != nil {
 			return nil, err
@@ -152,8 +155,22 @@ func NewManager(policyName string, machineInfo *cadvisorapi.MachineInfo, nodeAll
 			return nil, err
 		}
 
+	case policyTypeBestEffort:
+		if runtime.GOOS == "windows" {
+			systemReserved, err := getSystemReservedMemory(machineInfo, nodeAllocatableReservation, reservedMemory)
+			if err != nil {
+				return nil, err
+			}
+			policy, err = NewPolicyBestEffort(machineInfo, systemReserved, affinity)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			return nil, fmt.Errorf("policy %q is not available for platform %q", policyTypeBestEffort, runtime.GOOS)
+		}
+
 	default:
-		return nil, fmt.Errorf("unknown policy: \"%s\"", policyName)
+		return nil, fmt.Errorf("unknown policy: %q", policyName)
 	}
 
 	manager := &manager{
@@ -188,6 +205,7 @@ func (m *manager) Start(activePods ActivePodsFunc, sourcesReady config.SourcesRe
 
 	m.allocatableMemory = m.policy.GetAllocatableMemory(m.state)
 
+	klog.V(4).InfoS("memorymanager started", "policy", m.policy.Name())
 	return nil
 }
 
@@ -208,14 +226,21 @@ func (m *manager) AddContainer(pod *v1.Pod, container *v1.Container, containerID
 			break
 		}
 
+		// Since a restartable init container remains running for the full
+		// duration of the pod's lifecycle, we should not remove it from the
+		// memory manager state.
+		if podutil.IsRestartableInitContainer(&initContainer) {
+			continue
+		}
+
 		m.policyRemoveContainerByRef(string(pod.UID), initContainer.Name)
 	}
 }
 
 // GetMemoryNUMANodes provides NUMA nodes that used to allocate the container memory
-func (m *manager) GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.Int {
+func (m *manager) GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.Set[int] {
 	// Get NUMA node affinity of blocks assigned to the container during Allocate()
-	numaNodes := sets.NewInt()
+	numaNodes := sets.New[int]()
 	for _, block := range m.state.GetMemoryBlocks(string(pod.UID), container.Name) {
 		for _, nodeID := range block.NUMAAffinity {
 			// avoid nodes duplication when hugepages and memory blocks pinned to the same NUMA node
@@ -224,7 +249,7 @@ func (m *manager) GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.
 	}
 
 	if numaNodes.Len() == 0 {
-		klog.V(5).InfoS("No allocation is available", "pod", klog.KObj(pod), "containerName", container.Name)
+		klog.V(5).InfoS("NUMA nodes not available for allocation", "pod", klog.KObj(pod), "containerName", container.Name)
 		return nil
 	}
 
@@ -234,10 +259,6 @@ func (m *manager) GetMemoryNUMANodes(pod *v1.Pod, container *v1.Container) sets.
 
 // Allocate is called to pre-allocate memory resources during Pod admission.
 func (m *manager) Allocate(pod *v1.Pod, container *v1.Container) error {
-	// The pod is during the admission phase. We need to save the pod to avoid it
-	// being cleaned before the admission ended
-	m.setPodPendingAdmission(pod)
-
 	// Garbage collect any stranded resources before allocation
 	m.removeStaleState()
 
@@ -246,7 +267,7 @@ func (m *manager) Allocate(pod *v1.Pod, container *v1.Container) error {
 
 	// Call down into the policy to assign this container memory if required.
 	if err := m.policy.Allocate(m.state, pod, container); err != nil {
-		klog.ErrorS(err, "Allocate error")
+		klog.ErrorS(err, "Allocate error", "pod", klog.KObj(pod), "containerName", container.Name)
 		return err
 	}
 	return nil
@@ -260,7 +281,7 @@ func (m *manager) RemoveContainer(containerID string) error {
 	// if error appears it means container entry already does not exist under the container map
 	podUID, containerName, err := m.containerMap.GetContainerRef(containerID)
 	if err != nil {
-		klog.InfoS("Failed to get container from container map", "containerID", containerID, "err", err)
+		klog.ErrorS(err, "Failed to get container from container map", "containerID", containerID)
 		return nil
 	}
 
@@ -276,10 +297,6 @@ func (m *manager) State() state.Reader {
 
 // GetPodTopologyHints returns the topology hints for the topology manager
 func (m *manager) GetPodTopologyHints(pod *v1.Pod) map[string][]topologymanager.TopologyHint {
-	// The pod is during the admission phase. We need to save the pod to avoid it
-	// being cleaned before the admission ended
-	m.setPodPendingAdmission(pod)
-
 	// Garbage collect any stranded resources before providing TopologyHints
 	m.removeStaleState()
 	// Delegate to active policy
@@ -288,10 +305,6 @@ func (m *manager) GetPodTopologyHints(pod *v1.Pod) map[string][]topologymanager.
 
 // GetTopologyHints returns the topology hints for the topology manager
 func (m *manager) GetTopologyHints(pod *v1.Pod, container *v1.Container) map[string][]topologymanager.TopologyHint {
-	// The pod is during the admission phase. We need to save the pod to avoid it
-	// being cleaned before the admission ended
-	m.setPodPendingAdmission(pod)
-
 	// Garbage collect any stranded resources before providing TopologyHints
 	m.removeStaleState()
 	// Delegate to active policy
@@ -314,15 +327,12 @@ func (m *manager) removeStaleState() {
 	m.Lock()
 	defer m.Unlock()
 
-	// Get the list of admitted and active pods.
-	activeAndAdmittedPods := m.activePods()
-	if m.pendingAdmissionPod != nil {
-		activeAndAdmittedPods = append(activeAndAdmittedPods, m.pendingAdmissionPod)
-	}
+	// Get the list of active pods.
+	activePods := m.activePods()
 
 	// Build a list of (podUID, containerName) pairs for all containers in all active Pods.
 	activeContainers := make(map[string]map[string]struct{})
-	for _, pod := range activeAndAdmittedPods {
+	for _, pod := range activePods {
 		activeContainers[string(pod.UID)] = make(map[string]struct{})
 		for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 			activeContainers[string(pod.UID)][container.Name] = struct{}{}
@@ -335,7 +345,7 @@ func (m *manager) removeStaleState() {
 	for podUID := range assignments {
 		for containerName := range assignments[podUID] {
 			if _, ok := activeContainers[podUID][containerName]; !ok {
-				klog.InfoS("RemoveStaleState removing state", "podUID", podUID, "containerName", containerName)
+				klog.V(2).InfoS("RemoveStaleState removing state", "podUID", podUID, "containerName", containerName)
 				m.policyRemoveContainerByRef(podUID, containerName)
 			}
 		}
@@ -343,7 +353,7 @@ func (m *manager) removeStaleState() {
 
 	m.containerMap.Visit(func(podUID, containerName, containerID string) {
 		if _, ok := activeContainers[podUID][containerName]; !ok {
-			klog.InfoS("RemoveStaleState removing state", "podUID", podUID, "containerName", containerName)
+			klog.V(2).InfoS("RemoveStaleState removing state", "podUID", podUID, "containerName", containerName)
 			m.policyRemoveContainerByRef(podUID, containerName)
 		}
 	})
@@ -455,11 +465,4 @@ func (m *manager) GetAllocatableMemory() []state.Block {
 // GetMemory returns the memory allocated by a container from NUMA nodes
 func (m *manager) GetMemory(podUID, containerName string) []state.Block {
 	return m.state.GetMemoryBlocks(podUID, containerName)
-}
-
-func (m *manager) setPodPendingAdmission(pod *v1.Pod) {
-	m.Lock()
-	defer m.Unlock()
-
-	m.pendingAdmissionPod = pod
 }

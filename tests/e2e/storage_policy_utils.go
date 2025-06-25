@@ -37,6 +37,7 @@ import (
 // createVmfsStoragePolicy create a vmfs policy with given allocation type and category/tag map
 func createVmfsStoragePolicy(ctx context.Context, pbmClient *pbm.Client, allocationType string,
 	categoryTagMap map[string]string) (*pbmtypes.PbmProfileId, string) {
+	connect(ctx, &e2eVSphere)
 	s1 := rand.NewSource(time.Now().UnixNano())
 	r1 := rand.New(s1)
 	profileName := fmt.Sprintf("vmfs-policy-%v-%v", time.Now().UnixNano(), strconv.Itoa(r1.Intn(1000)))
@@ -229,7 +230,7 @@ func updateVmfsPolicyAlloctype(
 	if err != nil {
 		return err
 	}
-	framework.Logf("policy content after update", spew.Sdump(policyContent))
+	framework.Logf("policy content after update: %s", spew.Sdump(policyContent))
 	return nil
 }
 

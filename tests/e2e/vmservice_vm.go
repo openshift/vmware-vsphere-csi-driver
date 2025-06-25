@@ -28,9 +28,12 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/object"
 
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
@@ -62,7 +65,8 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		cnsopC                     ctlrclient.Client
 		isVsanHealthServiceStopped bool
 		isSPSserviceStopped        bool
-		vcAddress                  string
+		isQuotaValidationSupported bool
+		defaultDatastore           *object.Datastore
 	)
 
 	ginkgo.BeforeEach(func() {
@@ -84,7 +88,7 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		bootstrap()
 		isVsanHealthServiceStopped = false
 		isSPSserviceStopped = false
-		vcAddress = e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
+
 		vcRestSessionId = createVcSession4RestApis(ctx)
 
 		storageClassName = strings.ReplaceAll(storagePolicyName, "_", "-") // since this is a wcp setup
@@ -94,16 +98,23 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		framework.Logf("dsmoId: %v", dsRef.Value)
 
 		storageProfileId = e2eVSphere.GetSpbmPolicyID(storagePolicyName)
-		contentLibId := createAndOrGetContentlibId4Url(vcRestSessionId, GetAndExpectStringEnvVar(envContentLibraryUrl),
-			dsRef.Value, GetAndExpectStringEnvVar(envContentLibraryUrlSslThumbprint))
+		contentLibId, err := createAndOrGetContentlibId4Url(vcRestSessionId, GetAndExpectStringEnvVar(envContentLibraryUrl),
+			dsRef.Value)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		framework.Logf("Create a WCP namespace for the test")
 		vmClass = os.Getenv(envVMClass)
 		if vmClass == "" {
 			vmClass = vmClassBestEffortSmall
 		}
+
+		framework.Logf("Create a WCP namespace for the test")
 		namespace = createTestWcpNs(
 			vcRestSessionId, storageProfileId, vmClass, contentLibId, getSvcId(vcRestSessionId))
+
+		ginkgo.By("Verifying storage policies usage for each storage class")
+		restConfig = getRestConfigClient()
+		ListStoragePolicyUsages(ctx, client, restConfig, namespace, []string{storageClassName})
 
 		vmopScheme := runtime.NewScheme()
 		gomega.Expect(vmopv1.AddToScheme(vmopScheme)).Should(gomega.Succeed())
@@ -118,8 +129,35 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		vmImageName := GetAndExpectStringEnvVar(envVmsvcVmImageName)
 		framework.Logf("Waiting for virtual machine image list to be available in namespace '%s' for image '%s'",
 			namespace, vmImageName)
-		vmi = waitNGetVmiForImageName(ctx, vmopC, namespace, vmImageName)
+		vmi = waitNGetVmiForImageName(ctx, vmopC, vmImageName)
 		gomega.Expect(vmi).NotTo(gomega.BeEmpty())
+
+		if supervisorCluster || stretchedSVC {
+			//if isQuotaValidationSupported is true then quotaValidation is considered in tests
+			vcVersion = getVCversion(ctx, vcAddress)
+			isQuotaValidationSupported = isVersionGreaterOrEqual(vcVersion, quotaSupportedVCVersion)
+		}
+
+		var datacenters []string
+		datastoreURL = GetAndExpectStringEnvVar(envSharedDatastoreURL)
+
+		finder := find.NewFinder(e2eVSphere.Client.Client, false)
+		cfg, err := getConfig()
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		dcList := strings.Split(cfg.Global.Datacenters, ",")
+		for _, dc := range dcList {
+			dcName := strings.TrimSpace(dc)
+			if dcName != "" {
+				datacenters = append(datacenters, dcName)
+			}
+		}
+		for _, dc := range datacenters {
+			defaultDatacenter, err := finder.Datacenter(ctx, dc)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			finder.SetDatacenter(defaultDatacenter)
+			defaultDatastore, err = getDatastoreByURL(ctx, datastoreURL, defaultDatacenter)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
 	})
 
 	ginkgo.AfterEach(func() {
@@ -169,37 +207,40 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 
 		var pandoraSyncWaitTime int
 		var err error
+		curtime := time.Now().Unix()
+		curtimestring := strconv.FormatInt(curtime, 10)
+		pvcName := "cns-pvc-" + curtimestring
+		framework.Logf("pvc name :%s", pvcName)
+
 		if os.Getenv(envPandoraSyncWaitTime) != "" {
 			pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		} else {
 			pandoraSyncWaitTime = defaultPandoraSyncWaitTime
 		}
-		datastoreURL = GetAndExpectStringEnvVar(envSharedDatastoreURL)
-		datastore := getDsMoRefFromURL(ctx, datastoreURL)
-		ginkgo.By("Creating FCD Disk")
-		fcdID, err := e2eVSphere.createFCD(ctx, fcdName, diskSizeInMb, datastore.Reference())
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
+		ginkgo.By("Creating FCD Disk")
+		fcdID, err := e2eVSphere.createFCDwithValidProfileID(ctx,
+			"staticfcd"+curtimestring, storageProfileId, diskSizeInMb, defaultDatastore.Reference())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow newly created FCD:%s to sync with pandora",
 			pandoraSyncWaitTime, fcdID))
 		time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
 
-		ginkgo.By(fmt.Sprintf("Creating the PV with the fcdID %s", fcdID))
-		staticPVLabels := make(map[string]string)
-		staticPVLabels["fcd-id"] = fcdID
-		staticPv := getPersistentVolumeSpec(fcdID, v1.PersistentVolumeReclaimDelete, nil, ext4FSType)
-		staticPv, err = client.CoreV1().PersistentVolumes().Create(ctx, staticPv, metav1.CreateOptions{})
+		ginkgo.By("Create CNS register volume with above created FCD ")
+		cnsRegisterVolume := getCNSRegisterVolumeSpec(ctx, namespace, fcdID, "", pvcName, v1.ReadWriteOnce)
+		err = createCNSRegisterVolume(ctx, restConfig, cnsRegisterVolume)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		framework.ExpectNoError(waitForCNSRegisterVolumeToGetCreated(ctx, restConfig,
+			namespace, cnsRegisterVolume, poll, supervisorClusterOperationsTimeout))
+		cnsRegisterVolumeName := cnsRegisterVolume.GetName()
+		framework.Logf("CNS register volume name : %s", cnsRegisterVolumeName)
 
-		err = e2eVSphere.waitForCNSVolumeToBeCreated(staticPv.Spec.CSI.VolumeHandle)
+		ginkgo.By(" verify created PV, PVC and check the bidirectional reference")
+		staticPvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		ginkgo.By("Creating a static PVC")
-		staticPvc := getPersistentVolumeClaimSpec(namespace, staticPVLabels, staticPv.Name)
-		staticPvc, err = client.CoreV1().PersistentVolumeClaims(namespace).Create(
-			ctx, staticPvc, metav1.CreateOptions{})
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		staticPv := getPvFromClaim(client, namespace, pvcName)
+		verifyBidirectionalReferenceOfPVandPVC(ctx, client, staticPvc, staticPv, fcdID)
 
 		ginkgo.By("Create a storageclass")
 		storageclass, err := client.StorageV1().StorageClasses().Get(ctx, storageClassName, metav1.GetOptions{})
@@ -430,13 +471,13 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		defer func() {
 			c := []string{"rm", "-f", vmFileData}
 			op, err = exec.Command(c[0], c[1:]...).Output()
-			framework.Logf("Command: %c, output: %v", c, op)
+			framework.Logf("Command: %v, output: %v", c, op)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
 		framework.Logf("Comparing file fetched from the VM with test data file")
 		c := []string{"md5sum", testdataFile, vmFileData}
 		op, err = exec.Command(c[0], c[1:]...).Output()
-		framework.Logf("Command: %c, output: %v", c, op)
+		framework.Logf("Command: %v, output: %v", c, op)
 		lines := strings.Split(string(op[:]), "\n")
 		gomega.Expect(strings.Fields(lines[0])[0]).To(gomega.Equal(strings.Fields(lines[1])[0]))
 	})
@@ -636,10 +677,12 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		vm2.Spec.Volumes = vm2.Spec.Volumes[:1]
 		err = vmopC.Update(ctx, vm2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		vm2, err = getVmsvcVM(ctx, vmopC, vm2.Namespace, vm2.Name) // refresh vm info
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Power on vm2")
+		framework.Logf("sleeping for a min...")
+		time.Sleep(time.Minute)
+		vm2, err = getVmsvcVM(ctx, vmopC, vm2.Namespace, vm2.Name) // refresh vm info
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		vm2 = setVmPowerState(ctx, vmopC, vm2, vmopv1.VirtualMachinePoweredOn)
 		vm2, err = wait4Vm2ReachPowerStateInSpec(ctx, vmopC, vm2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -664,7 +707,7 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		topologyHaMap := GetAndExpectStringEnvVar(topologyHaMap)
-		allowedTopos := createAllowedTopolgies(topologyHaMap, tkgshaTopologyLevels)
+		allowedTopos := createAllowedTopolgies(topologyHaMap)
 		allowedTopologyHAMap := createAllowedTopologiesMap(allowedTopos)
 		pvcAnnotations := make(map[string]string)
 		topoList := []string{}
@@ -778,7 +821,7 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		topologyHaMap := GetAndExpectStringEnvVar(topologyHaMap)
-		allowedTopos := createAllowedTopolgies(topologyHaMap, tkgshaTopologyLevels)
+		allowedTopos := createAllowedTopolgies(topologyHaMap)
 		allowedTopologyHAMap := createAllowedTopologiesMap(allowedTopos)
 		pvcAnnotations := make(map[string]string)
 		topoList := []string{}
@@ -1333,6 +1376,133 @@ var _ bool = ginkgo.Describe("[vmsvc] vm service with csi vol tests", func() {
 		vm, err = getVmsvcVM(ctx, vmopC, vm.Namespace, vm.Name) // refresh vm info
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		_ = formatNVerifyPvcIsAccessible(vm.Status.Volumes[0].DiskUuid, 1, vmIp)
+	})
+
+	/*
+	   Basic test
+	   Steps:
+	   1   Assign a spbm policy to test namespace with sufficient quota
+	   2   Create a PVC say pvc1
+	   3   Create a VMservice VM say vm1, pvc1
+	   4   verify pvc1 CNS metadata.
+	   5   Once the vm1 is up verify that the volume is accessible inside vm1
+	   6   Delete vm1
+	   7   delete pvc1
+	   8   Remove spbm policy attached to test namespace
+
+	   statically provisioned CSI volumes
+	   Steps:
+	   1   Assign a spbm policy to test namespace with sufficient quota
+	   2   Create two FCDs
+	   3   Create a static PV/PVC using cns register volume API
+	   4   Create a VMservice VM and with the pvcs created in step 3
+	   5   Verify CNS metadata for pvcs.
+	   6   Write some IO to the CSI volumes and read it back from them and verify the data integrity
+	   7   Delete VM service VM
+	   8   delete pvcs
+	   9   Remove spbm policy attached to test namespace
+	*/
+	ginkgo.It("static-vm and verify vm creation and validate storagequota", func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var err error
+		var totalQuotaUsedBefore, storagePolicyQuotaBefore, storagePolicyUsageBefore *resource.Quantity
+
+		curtime := time.Now().Unix()
+		curtimeinstring := strconv.FormatInt(curtime, 10)
+		pvcName := "cns-pvc-" + curtimeinstring
+		framework.Logf("pvc name :%s", pvcName)
+
+		ginkgo.By("Get storage Policy")
+		ginkgo.By(fmt.Sprintf("storagePolicyName: %s", storagePolicyName))
+		profileID := e2eVSphere.GetSpbmPolicyID(storagePolicyName)
+		framework.Logf("Profile ID :%s", profileID)
+		scParameters := make(map[string]string)
+		scParameters["storagePolicyID"] = profileID
+
+		setStoragePolicyQuota(ctx, restConfig, storageClassName, namespace, rqLimit)
+
+		if isQuotaValidationSupported {
+			totalQuotaUsedBefore, _, storagePolicyQuotaBefore, _, storagePolicyUsageBefore, _ =
+				getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
+					storageClassName, namespace, pvcUsage, volExtensionName)
+		}
+
+		ginkgo.By("Creating FCD Disk")
+		fcdID, err := e2eVSphere.createFCDwithValidProfileID(ctx,
+			"staticfcd"+curtimeinstring, profileID, diskSizeInMb, defaultDatastore.Reference())
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		framework.Logf("FCD ID: %s", fcdID)
+
+		ginkgo.By("Create CNS register volume with above created FCD")
+		cnsRegisterVolume := getCNSRegisterVolumeSpec(ctx, namespace, fcdID, "", pvcName, v1.ReadWriteOnce)
+		err = createCNSRegisterVolume(ctx, restConfig, cnsRegisterVolume)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		framework.Logf("waiting for some time for FCD to register in CNS and for cnsRegisterVolume to get create")
+		framework.ExpectNoError(waitForCNSRegisterVolumeToGetCreated(ctx,
+			restConfig, namespace, cnsRegisterVolume, poll, pollTimeout))
+		cnsRegisterVolumeName := cnsRegisterVolume.GetName()
+		framework.Logf("CNS register volume name : %s", cnsRegisterVolumeName)
+
+		ginkgo.By("verify created PV, PVC and check the bidirectional reference")
+		pvc, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		pv := getPvFromClaim(client, namespace, pvcName)
+		verifyBidirectionalReferenceOfPVandPVC(ctx, client, pvc, pv, fcdID)
+
+		if isQuotaValidationSupported {
+			validateQuotaUsageAfterResourceCreation(ctx, restConfig,
+				storageClassName, namespace, pvcUsage, volExtensionName,
+				diskSizeInMb, totalQuotaUsedBefore, storagePolicyQuotaBefore,
+				storagePolicyUsageBefore)
+		}
+
+		ginkgo.By("Creating VM bootstrap data")
+		secretName := createBootstrapSecretForVmsvcVms(ctx, client, namespace)
+		defer func() {
+			ginkgo.By("Deleting VM bootstrap data")
+			err := client.CoreV1().Secrets(namespace).Delete(ctx, secretName, *metav1.NewDeleteOptions(0))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+		ginkgo.By("Creating VM")
+		vm := createVmServiceVmWithPvcs(
+			ctx, vmopC, namespace, vmClass, []*v1.PersistentVolumeClaim{pvc}, vmi, storageClassName, secretName)
+		defer func() {
+			ginkgo.By("Deleting VM")
+			err = vmopC.Delete(ctx, &vmopv1.VirtualMachine{ObjectMeta: metav1.ObjectMeta{
+				Name:      vm.Name,
+				Namespace: namespace,
+			}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+
+		ginkgo.By("Creating loadbalancing service for ssh with the VM")
+		vmlbsvc := createService4Vm(ctx, vmopC, namespace, vm.Name)
+		defer func() {
+			ginkgo.By("Deleting loadbalancing service for ssh with the VM")
+			err = vmopC.Delete(ctx, &vmopv1.VirtualMachineService{ObjectMeta: metav1.ObjectMeta{
+				Name:      vmlbsvc.Name,
+				Namespace: namespace,
+			}})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+
+		ginkgo.By("Wait for VM to come up and get an IP")
+		vmIp, err := waitNgetVmsvcVmIp(ctx, vmopC, namespace, vm.Name)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Wait and verify PVCs are attached to the VM")
+		gomega.Expect(waitNverifyPvcsAreAttachedToVmsvcVm(ctx, vmopC, cnsopC, vm,
+			[]*v1.PersistentVolumeClaim{pvc})).NotTo(gomega.HaveOccurred())
+
+		ginkgo.By("Verify PVCs are accessible to the VM")
+		ginkgo.By("Write some IO to the CSI volumes and read it back from them and verify the data integrity")
+		vm, err = getVmsvcVM(ctx, vmopC, vm.Namespace, vm.Name) // refresh vm info
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		for i, vol := range vm.Status.Volumes {
+			volFolder := formatNVerifyPvcIsAccessible(vol.DiskUuid, i+1, vmIp)
+			verifyDataIntegrityOnVmDisk(vmIp, volFolder)
+		}
 	})
 
 })

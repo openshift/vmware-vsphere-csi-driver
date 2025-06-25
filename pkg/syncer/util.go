@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
 	"google.golang.org/grpc/codes"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
@@ -22,10 +22,9 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
-	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
-
-	storagepolicyusagev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
+	storagepolicyusagev1alpha2 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha2"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -33,6 +32,7 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
+	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
 const (
@@ -46,6 +46,11 @@ const (
 	staticVolumeProvisioningSuccessReason = "static volume provisioning succeeded"
 	// message for successful PV creation for static volumes
 	staticVolumeProvisioningSuccessMessage = "Successfully created container volume"
+
+	// allowedRetriesToPatchStoragePolicyUsage indicates number of retries allowed for patching StoragePolicyUsage CR
+	allowedRetriesToPatchStoragePolicyUsage = 5
+	// volumdIDLimitPerQuery is set to 1000
+	volumdIDLimitPerQuery = 1000
 )
 
 // getPVsInBoundAvailableOrReleased return PVs in Bound, Available or Released
@@ -94,29 +99,6 @@ func getBoundPVs(ctx context.Context, metadataSyncer *metadataSyncInformer) ([]*
 		}
 	}
 	return boundPVs, nil
-}
-
-// getPVCsInPendingState is a helper function for fetching PVCs not in Bound state.
-func getPVCsInPendingState(ctx context.Context, metadataSyncer *metadataSyncInformer) ([]*v1.PersistentVolumeClaim,
-	error) {
-	log := logger.GetLogger(ctx)
-	var pendingPVCs []*v1.PersistentVolumeClaim
-	// Get all PVCs from kubernetes.
-	allPVCs, err := metadataSyncer.pvcLister.List(labels.Everything())
-	if err != nil {
-		return nil, err
-	}
-	for _, pvc := range allPVCs {
-		if pvc.ObjectMeta.Annotations[common.AnnStorageProvisioner] == csitypes.Name {
-			log.Debugf("getPVCsInPendingState: pvc %s in namespace %s is in state %v",
-				pvc.Name, pvc.Namespace, pvc.Status.Phase)
-			if pvc.Status.Phase == v1.ClaimPending {
-				pendingPVCs = append(pendingPVCs, pvc)
-			}
-		}
-	}
-	log.Infof("getPVCsInPendingState: pendingPVCs %v", pendingPVCs)
-	return pendingPVCs, nil
 }
 
 // fullSyncGetInlineMigratedVolumesInfo is a helper function for retrieving
@@ -205,37 +187,37 @@ func IsValidVolume(ctx context.Context, volume v1.Volume, pod *v1.Pod,
 func fullSyncGetQueryResults(ctx context.Context, volumeIds []cnstypes.CnsVolumeId, clusterID string,
 	volumeManager volumes.Manager, metadataSyncer *metadataSyncInformer) ([]*cnstypes.CnsQueryResult, error) {
 	log := logger.GetLogger(ctx)
-	log.Debugf("FullSync: fullSyncGetQueryResults is called with volumeIds %v for clusterID %s", volumeIds, clusterID)
-	queryFilter := cnstypes.CnsQueryFilter{
-		VolumeIds: volumeIds,
-		Cursor: &cnstypes.CnsCursor{
-			Offset: 0,
-			Limit:  queryVolumeLimit,
-		},
+	log.Debugf("FullSync: fullSyncGetQueryResults is called with volumeIds %v for clusterID %s",
+		volumeIds, clusterID)
+	useQueryVolumeAsync := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.AsyncQueryVolume)
+	var volumeIdsBatchesToFilter [][]cnstypes.CnsVolumeId
+	for i := 0; i < len(volumeIds); i += volumdIDLimitPerQuery {
+		end := i + volumdIDLimitPerQuery
+		if end > len(volumeIds) {
+			end = len(volumeIds)
+		}
+		volumeIdsBatchesToFilter = append(volumeIdsBatchesToFilter, volumeIds[i:end])
 	}
-	if clusterID != "" {
-		queryFilter.ContainerClusterIds = []string{clusterID}
-	}
+
 	var allQueryResults []*cnstypes.CnsQueryResult
-	for {
-		log.Debugf("Query volumes with offset: %v and limit: %v", queryFilter.Cursor.Offset, queryFilter.Cursor.Limit)
+	for _, volumeIdsBatch := range volumeIdsBatchesToFilter {
+		queryFilter := cnstypes.CnsQueryFilter{
+			VolumeIds: volumeIdsBatch,
+		}
+		if clusterID != "" {
+			queryFilter.ContainerClusterIds = []string{clusterID}
+		}
 		queryResult, err := utils.QueryVolumeUtil(ctx, volumeManager, queryFilter, nil,
-			metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.AsyncQueryVolume))
+			useQueryVolumeAsync)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"queryVolumeUtil failed with err=%+v", err.Error())
 		}
 		if queryResult == nil {
 			log.Info("Observed empty queryResult")
-			break
+			continue
 		}
 		allQueryResults = append(allQueryResults, queryResult)
-		log.Infof("%v more volumes to be queried", queryResult.Cursor.TotalRecords-queryResult.Cursor.Offset)
-		if queryResult.Cursor.Offset == queryResult.Cursor.TotalRecords {
-			log.Info("Metadata retrieved for all requested volumes")
-			break
-		}
-		queryFilter.Cursor = &queryResult.Cursor
 	}
 	return allQueryResults, nil
 }
@@ -891,31 +873,36 @@ func getPatchData(oldObj, newObj interface{}) ([]byte, error) {
 	return patchBytes, nil
 }
 
-// PatchStoragePolicyUsage patches the StoragePolicyUsage CR based
+// PatchStoragePolicyUsage patches the StoragePolicyUsage CR based on old and new objects
 func PatchStoragePolicyUsage(ctx context.Context, cnsOperatorClient client.Client,
-	oldObj *storagepolicyusagev1alpha1.StoragePolicyUsage,
-	newObj *storagepolicyusagev1alpha1.StoragePolicyUsage) error {
+	oldObj *storagepolicyusagev1alpha2.StoragePolicyUsage,
+	newObj *storagepolicyusagev1alpha2.StoragePolicyUsage) error {
 	log := logger.GetLogger(ctx)
 	patch, err := getPatchData(oldObj, newObj)
 	if err != nil {
 		log.Errorf("error fetching PatchData StoragePolicyUsage CR. err: %v", err)
 		return err
 	}
-	patch, err = addResourceVersion(patch, oldObj.ResourceVersion)
-	if err != nil {
-		log.Errorf("applying ResourceVersion to patch data failed: %v", err)
-		return err
-	}
 	rawPatch := client.RawPatch(apitypes.MergePatchType, patch)
-	err = cnsOperatorClient.Patch(ctx, oldObj, rawPatch)
-	log.Debugf("Patching the StoragePolicyUsageCR %q on namespace: %q with the quota usage data: %+v",
-		oldObj.Name, oldObj.Namespace, newObj.Status.ResourceTypeLevelQuotaUsage)
-	if err != nil {
-		log.Errorf("failed to patch StoragePolicyUsage instance: %q on namespace: %q. Error: %+v",
-			oldObj.Name, oldObj.Namespace, err)
-		return err
+	// Try to patch StoragePolicyUsage CR for allowedRetries times
+	allowedRetries := allowedRetriesToPatchStoragePolicyUsage
+	attempt := 0
+	for {
+		attempt++
+		err = cnsOperatorClient.Status().Patch(ctx, oldObj, rawPatch)
+		if err != nil && attempt >= allowedRetries {
+			log.Errorf("failed to patch StoragePolicyUsage instance %q on namespace %q, Error: %+v",
+				oldObj.Name, oldObj.Namespace, err)
+			return err
+		} else if err == nil {
+			log.Debugf("Successfully patched StoragePolicyUsage instance %q on namespace %q",
+				oldObj.Name, oldObj.Namespace)
+			return nil
+		}
+		log.Warnf("attempt %d, failed to patch StoragePolicyUsage instance %q on namespace %q with error %+v, "+
+			"will retry...", attempt, oldObj.Name, oldObj.Namespace, err)
+		time.Sleep(100 * time.Millisecond)
 	}
-	return nil
 }
 
 // addResourceVersion sets the resource version for the patch obj
@@ -936,4 +923,42 @@ func addResourceVersion(patchBytes []byte, resourceVersion string) ([]byte, erro
 		return nil, fmt.Errorf("error marshalling json patch: %v", err)
 	}
 	return versionBytes, nil
+}
+
+// hasClusterDistributionSet checks volume information obtained from CNS queryvolume API and check
+// expected cluster distribution is set for specific clusterID in ContainerClusterArray associated with volume
+// for Volumes Created from TKG Cluster, QueryVolume returns two entries for containerClusterArray
+// one for clusterFlavor: "WORKLOAD" and clusterDistribution "SupervisorCluster" and
+// another for clusterFlavor: "GUEST_CLUSTER" clusterDistribution: "TKGService"
+func hasClusterDistributionSet(ctx context.Context, volume cnstypes.CnsVolume,
+	clusterIDforVolumeMetadata string, expectedClusterDistribution string) bool {
+	log := logger.GetLogger(ctx)
+	for _, containerCluster := range volume.Metadata.ContainerClusterArray {
+		if clusterIDforVolumeMetadata == containerCluster.ClusterId &&
+			containerCluster.ClusterDistribution == expectedClusterDistribution {
+			log.Debugf("Volume %s has cluster distribution set to %s",
+				volume.Name, containerCluster.ClusterDistribution)
+			return true
+		}
+	}
+	return false
+}
+
+// generateVolumeAccessibleTopologyFromPVCAnnotation returns accessible topologies generated using
+// PVC annotation "csi.vsphere.volume-accessible-topology".
+func generateVolumeAccessibleTopologyFromPVCAnnotation(claim *v1.PersistentVolumeClaim) (
+	[]map[string]string, error) {
+	volumeAccessibleTopology := claim.Annotations[common.AnnVolumeAccessibleTopology]
+	if volumeAccessibleTopology == "" {
+		return nil, fmt.Errorf("annotation %q is not set for the claim: %q, namespace: %q",
+			common.AnnVolumeAccessibleTopology, claim.Name, claim.Namespace)
+	}
+	volumeAccessibleTopologyArray := make([]map[string]string, 0)
+	err := json.Unmarshal([]byte(volumeAccessibleTopology), &volumeAccessibleTopologyArray)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse annotation: %q value %v from the claim: %q, namespace: %q. "+
+			"err: %v", common.AnnVolumeAccessibleTopology, volumeAccessibleTopology,
+			claim.Name, claim.Namespace, err)
+	}
+	return volumeAccessibleTopologyArray, nil
 }

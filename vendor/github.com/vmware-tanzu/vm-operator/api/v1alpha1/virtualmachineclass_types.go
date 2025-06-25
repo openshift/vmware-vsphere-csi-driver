@@ -1,4 +1,5 @@
-// Copyright (c) 2019-2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -124,6 +125,20 @@ type VirtualMachineClassSpec struct {
 	// +kubebuilder:validation:Type=object
 	// +kubebuilder:pruning:PreserveUnknownFields
 	ConfigSpec json.RawMessage `json:"configSpec,omitempty"`
+
+	// +optional
+
+	// ReservedProfileID describes the reservation profile associated with
+	// the namespace-scoped VirtualMachineClass object.
+	ReservedProfileID string `json:"reservedProfileID,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+
+	// ReservedSlots describes the number of slots reserved for VMs that use
+	// this VirtualMachineClass.
+	// This field is only valid in conjunction with reservedProfileID.
+	ReservedSlots int32 `json:"reservedSlots,omitempty"`
 }
 
 // VirtualMachineClassStatus defines the observed state of VirtualMachineClass.  VirtualMachineClasses are immutable,
@@ -132,14 +147,15 @@ type VirtualMachineClassStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=vmclass
-// +kubebuilder:storageversion
+// +kubebuilder:resource:scope=Namespaced,shortName=vmclass
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="CPU",type="string",JSONPath=".spec.hardware.cpus"
 // +kubebuilder:printcolumn:name="Memory",type="string",JSONPath=".spec.hardware.memory"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 // +kubebuilder:printcolumn:name="VGPU-Devices-Profile-Names",type="string",priority=1,JSONPath=".spec.hardware.devices.vgpuDevices[*].profileName"
 // +kubebuilder:printcolumn:name="Passthrough-DeviceIDs",type="string",priority=1,JSONPath=".spec.hardware.devices.dynamicDirectPathIODevices[*].deviceID"
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineClass is the Schema for the virtualmachineclasses API.
 // A VirtualMachineClass represents the desired specification and the observed status of a VirtualMachineClass
@@ -155,6 +171,7 @@ type VirtualMachineClass struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineClassList contains a list of VirtualMachineClass.
 type VirtualMachineClassList struct {
@@ -164,5 +181,5 @@ type VirtualMachineClassList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachineClass{}, &VirtualMachineClassList{})
+	objectTypes = append(objectTypes, &VirtualMachineClass{}, &VirtualMachineClassList{})
 }

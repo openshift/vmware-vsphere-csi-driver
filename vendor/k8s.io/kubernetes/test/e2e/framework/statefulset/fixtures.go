@@ -105,7 +105,7 @@ func NewStatefulSetPVC(name string) v1.PersistentVolumeClaim {
 			AccessModes: []v1.PersistentVolumeAccessMode{
 				v1.ReadWriteOnce,
 			},
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceStorage: *resource.NewQuantity(1, resource.BinarySI),
 				},
@@ -156,7 +156,9 @@ func PauseNewPods(ss *appsv1.StatefulSet) {
 // or if it finds more than one paused Pod existing at the same time.
 // This is a no-op if there are no paused pods.
 func ResumeNextPod(ctx context.Context, c clientset.Interface, ss *appsv1.StatefulSet) {
-	podList := GetPodList(ctx, c, ss)
+	podList, err := GetPodList(ctx, c, ss)
+	framework.ExpectNoError(err)
+
 	resumedPod := ""
 	for _, pod := range podList.Items {
 		if pod.Status.Phase != v1.PodRunning {

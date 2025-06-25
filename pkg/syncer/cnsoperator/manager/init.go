@@ -29,8 +29,8 @@ import (
 	k8stypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
-	"sigs.k8s.io/controller-runtime/pkg/manager/signals"
 
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
 	cnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/config"
@@ -184,9 +184,42 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 					}
 				}
 			}()
+
+			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CnsUnregisterVolume) {
+				// Create CnsUnregisterVolume CRD from manifest.
+				log.Infof("Creating %q CRD", cnsoperatorv1alpha1.CnsUnregisterVolumePlural)
+				err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, cnsoperatorconfig.EmbedCnsUnregisterVolumeCRFile,
+					cnsoperatorconfig.EmbedCnsUnregisterVolumeCRFileName)
+				if err != nil {
+					log.Errorf("Failed to create %q CRD. Err: %+v", cnsoperatorv1alpha1.CnsUnregisterVolumePlural, err)
+					return err
+				}
+				log.Infof("%q CRD is created successfully", cnsoperatorv1alpha1.CnsUnregisterVolumePlural)
+
+				// Clean up routine to cleanup successful CnsUnregisterVolume instances.
+				log.Info("Starting go routine to cleanup successful CnsUnregisterVolume instances.")
+				err = watcher(ctx, cnsOperator)
+				if err != nil {
+					log.Error("Failed to watch on config file for changes to "+
+						"CnsRegisterVolumesCleanupIntervalInMin. Error: %+v", err)
+					return err
+				}
+				go func() {
+					for {
+						ctx, log = logger.GetNewContextWithLogger()
+						log.Infof("Triggering CnsUnregisterVolume cleanup routine")
+						cleanUpCnsUnregisterVolumeInstances(ctx, restConfig,
+							cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin)
+						log.Infof("Completed CnsUnregisterVolume cleanup")
+						for i := 1; i <= cnsOperator.configInfo.Cfg.Global.CnsRegisterVolumesCleanupIntervalInMin; i++ {
+							time.Sleep(time.Duration(1 * time.Minute))
+						}
+					}
+				}()
+			}
 		}
 
-		if !stretchedSupervisor {
+		if !stretchedSupervisor || (stretchedSupervisor && syncer.IsWorkloadDomainIsolationSupported) {
 			if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.FileVolume) {
 				// Create CnsFileAccessConfig CRD from manifest if file volume feature
 				// is enabled.
@@ -230,8 +263,9 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	// Create a new operator to provide shared dependencies and start components
 	// Setting namespace to empty would let operator watch all namespaces.
 	mgr, err := manager.New(restConfig, manager.Options{
-		Namespace:          "",
-		MetricsBindAddress: fmt.Sprintf("%s:%d", metricsHost, metricsPort),
+		Metrics: metricsserver.Options{
+			BindAddress: fmt.Sprintf("%s:%d", metricsHost, metricsPort),
+		},
 	})
 	if err != nil {
 		log.Errorf("failed to create new Cns operator instance. Err: %+v", err)
@@ -263,7 +297,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	log.Info("Starting Cns Operator")
 
 	// Start the operator.
-	if err := mgr.Start(signals.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(ctx); err != nil {
 		log.Errorf("failed to start Cns operator. Err: %+v", err)
 		return err
 	}
@@ -290,6 +324,7 @@ func InitCommonModules(ctx context.Context, clusterFlavor cnstypes.CnsClusterFla
 		log.Errorf("failed to create CO agnostic interface. Err: %v", err)
 		return err
 	}
+
 	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TriggerCsiFullSync) {
 		log.Infof("Triggerfullsync feature enabled")
 		err := k8s.CreateCustomResourceDefinitionFromManifest(ctx, internalapiscnsoperatorconfig.EmbedTriggerCsiFullSync,

@@ -45,16 +45,14 @@ func NewContainerScope(policy Policy) Scope {
 }
 
 func (s *containerScope) Admit(pod *v1.Pod) lifecycle.PodAdmitResult {
-	// Exception - Policy : none
-	if s.policy.Name() == PolicyNone {
-		return s.admitPolicyNone(pod)
-	}
-
 	for _, container := range append(pod.Spec.InitContainers, pod.Spec.Containers...) {
 		bestHint, admit := s.calculateAffinity(pod, &container)
 		klog.InfoS("Best TopologyHint", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
 
 		if !admit {
+			if IsAlignmentGuaranteed(s.policy) {
+				metrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopeContainer, metrics.AlignedNUMANode).Inc()
+			}
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(&TopologyAffinityError{})
 		}
@@ -65,6 +63,11 @@ func (s *containerScope) Admit(pod *v1.Pod) lifecycle.PodAdmitResult {
 		if err != nil {
 			metrics.TopologyManagerAdmissionErrorsTotal.Inc()
 			return admission.GetPodAdmitResult(err)
+		}
+
+		if IsAlignmentGuaranteed(s.policy) {
+			klog.V(4).InfoS("Resource alignment at container scope guaranteed", "pod", klog.KObj(pod))
+			metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopeContainer, metrics.AlignedNUMANode).Inc()
 		}
 	}
 	return admission.GetPodAdmitResult(nil)
@@ -85,6 +88,6 @@ func (s *containerScope) accumulateProvidersHints(pod *v1.Pod, container *v1.Con
 func (s *containerScope) calculateAffinity(pod *v1.Pod, container *v1.Container) (TopologyHint, bool) {
 	providersHints := s.accumulateProvidersHints(pod, container)
 	bestHint, admit := s.policy.Merge(providersHints)
-	klog.InfoS("ContainerTopologyHint", "bestHint", bestHint)
+	klog.InfoS("ContainerTopologyHint", "bestHint", bestHint, "pod", klog.KObj(pod), "containerName", container.Name)
 	return bestHint, admit
 }

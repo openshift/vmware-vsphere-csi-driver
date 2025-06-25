@@ -1,4 +1,5 @@
-// Copyright (c) 2020 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -39,5 +40,5 @@ type ContentSourceBindingList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ContentSourceBinding{}, &ContentSourceBindingList{})
+	objectTypes = append(objectTypes, &ContentSourceBinding{}, &ContentSourceBindingList{})
 }

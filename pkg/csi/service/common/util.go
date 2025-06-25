@@ -28,20 +28,21 @@ import (
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
 	"github.com/vmware/govmomi/vim25/types"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-
+	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
 )
 
 const (
 	defaultK8sCloudOperatorServicePort = 10000
+	MissingSnapshotAggregatedCapacity  = "csi.vsphere.missing-snapshot-aggregated-capacity"
 )
 
 var ErrAvailabilityZoneCRNotRegistered = errors.New("AvailabilityZone custom resource not registered")
@@ -430,9 +431,37 @@ func MergeMaps(first map[string]string, second map[string]string) map[string]str
 
 // GetCSINamespace returns the namespace in which CSI driver is installed
 func GetCSINamespace() string {
-	CSINamespace := os.Getenv(csitypes.EnvVarNamespace)
-	if CSINamespace == "" {
-		CSINamespace = cnsconfig.DefaultCSINamespace
+	return cnsconfig.GetCSINamespace()
+}
+
+func GetValidatedCNSVolumeInfoPatch(ctx context.Context,
+	cnsSnapshotInfo *cnsvolume.CnsSnapshotInfo) (map[string]interface{}, error) {
+	log := logger.GetLogger(ctx)
+	var patch map[string]interface{}
+	if cnsSnapshotInfo == nil || cnsSnapshotInfo.SourceVolumeID == "" {
+		log.Errorf("VolumeID %q values cannot be empty", cnsSnapshotInfo.SourceVolumeID)
+		return nil, logger.LogNewErrorf(log, "VolumeID values cannot be empty")
 	}
-	return CSINamespace
+	if cnsSnapshotInfo.AggregatedSnapshotCapacityInMb == -1 {
+		log.Infof("Couldn't retrieve aggregated snapshot capacity for volume %q", cnsSnapshotInfo.SourceVolumeID)
+		patch = map[string]interface{}{
+			"spec": map[string]interface{}{
+				"validaggregatedsnapshotsize": false,
+			},
+		}
+	} else {
+		aggregatedSnapshotSizeBytes := cnsSnapshotInfo.AggregatedSnapshotCapacityInMb * MbInBytes
+		log.Infof("retrieved aggregated snapshot capacity %d for volume %q",
+			cnsSnapshotInfo.AggregatedSnapshotCapacityInMb, cnsSnapshotInfo.SourceVolumeID)
+		patch = map[string]interface{}{
+			"spec": map[string]interface{}{
+				"validaggregatedsnapshotsize": true,
+				"aggregatedsnapshotsize": resource.NewQuantity(
+					aggregatedSnapshotSizeBytes, resource.BinarySI),
+				"snapshotlatestoperationcompletetime": &metav1.Time{
+					Time: cnsSnapshotInfo.SnapshotLatestOperationCompleteTime},
+			},
+		}
+	}
+	return patch, nil
 }

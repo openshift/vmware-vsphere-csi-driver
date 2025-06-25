@@ -224,10 +224,12 @@ func (or *operationRequestStore) StoreRequestDetails(
 			}
 			if isPodVMOnStretchSupervisorFSSEnabled && operationToStore.QuotaDetails != nil {
 				newInstance.Status.StorageQuotaDetails = &cnsvolumeoprequestv1alpha1.QuotaDetails{
-					Reserved:         operationToStore.QuotaDetails.Reserved,
-					StoragePolicyId:  operationToStore.QuotaDetails.StoragePolicyId,
-					StorageClassName: operationToStore.QuotaDetails.StorageClassName,
-					Namespace:        operationToStore.QuotaDetails.Namespace,
+					Reserved:                            operationToStore.QuotaDetails.Reserved,
+					StoragePolicyId:                     operationToStore.QuotaDetails.StoragePolicyId,
+					StorageClassName:                    operationToStore.QuotaDetails.StorageClassName,
+					Namespace:                           operationToStore.QuotaDetails.Namespace,
+					AggregatedSnapshotSize:              operationToStore.QuotaDetails.AggregatedSnapshotSize,
+					SnapshotLatestOperationCompleteTime: operationToStore.QuotaDetails.SnapshotLatestOperationCompleteTime,
 				}
 			}
 			err = or.k8sclient.Create(ctx, newInstance)
@@ -266,16 +268,19 @@ func (or *operationRequestStore) StoreRequestDetails(
 	updatedInstance.Status.Capacity = operationToStore.Capacity
 	if isPodVMOnStretchSupervisorFSSEnabled && operationToStore.QuotaDetails != nil {
 		updatedInstance.Status.StorageQuotaDetails = &cnsvolumeoprequestv1alpha1.QuotaDetails{
-			Reserved:         operationToStore.QuotaDetails.Reserved,
-			StoragePolicyId:  operationToStore.QuotaDetails.StoragePolicyId,
-			StorageClassName: operationToStore.QuotaDetails.StorageClassName,
-			Namespace:        operationToStore.QuotaDetails.Namespace,
+			Reserved:                            operationToStore.QuotaDetails.Reserved,
+			StoragePolicyId:                     operationToStore.QuotaDetails.StoragePolicyId,
+			StorageClassName:                    operationToStore.QuotaDetails.StorageClassName,
+			Namespace:                           operationToStore.QuotaDetails.Namespace,
+			AggregatedSnapshotSize:              operationToStore.QuotaDetails.AggregatedSnapshotSize,
+			SnapshotLatestOperationCompleteTime: operationToStore.QuotaDetails.SnapshotLatestOperationCompleteTime,
 		}
 	}
 
-	// Modify FirstOperationDetails only if TaskID's match.
+	// Modify FirstOperationDetails only if TaskID's match or the initial TaskID is empty.
 	firstOp := instance.Status.FirstOperationDetails
-	if firstOp.TaskStatus == TaskInvocationStatusInProgress && firstOp.TaskID == operationToStore.OperationDetails.TaskID {
+	if firstOp.TaskStatus == TaskInvocationStatusInProgress &&
+		(firstOp.TaskID == operationToStore.OperationDetails.TaskID || firstOp.TaskID == "") {
 		updatedInstance.Status.FirstOperationDetails = *operationDetailsToStore
 	}
 
@@ -285,7 +290,7 @@ func (or *operationRequestStore) StoreRequestDetails(
 	for index := len(instance.Status.LatestOperationDetails) - 1; index >= 0; index-- {
 		operationDetail := instance.Status.LatestOperationDetails[index]
 		if operationDetail.TaskStatus == TaskInvocationStatusInProgress &&
-			operationDetailsToStore.TaskID == operationDetail.TaskID {
+			(operationDetailsToStore.TaskID == operationDetail.TaskID || operationDetail.TaskID == "") {
 			updatedInstance.Status.LatestOperationDetails[index] = *operationDetailsToStore
 			operationExistsInList = true
 			break

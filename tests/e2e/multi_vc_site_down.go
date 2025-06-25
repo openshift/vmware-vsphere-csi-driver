@@ -35,8 +35,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", func() {
-	f := framework.NewDefaultFramework("multi-vc-sitedown")
+var _ = ginkgo.Describe("[multivc-sitedown] MultiVc-SiteDown", func() {
+	f := framework.NewDefaultFramework("multivc-sitedown")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -95,8 +95,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 		scParameters = make(map[string]string)
 		storagePolicyInVc1Vc2 = GetAndExpectStringEnvVar(envStoragePolicyNameInVC1VC2)
 		nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
@@ -118,7 +118,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		clusterWorkerMap := GetAndExpectStringEnvVar(workerClusterMap)
-		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap, topologyLength)
+		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap)
 
 		// fetching cluster details
 		clientIndex := 0
@@ -169,7 +169,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 	*/
 
 	ginkgo.It("Bring down few esx on VC2 availability zones in a multi-vc setup", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest, flaky, disruptive), func() {
+		block, vanilla, multiVc, vc70, flaky, disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -234,14 +234,14 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 			}
 
 			ginkgo.By("Wait for k8s cluster to be healthy")
-			wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+			wait4AllK8sNodesToBeUp(nodeList)
 			err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
-			//gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		}()
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -318,7 +318,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 	*/
 
 	ginkgo.It("Bring down few esx on VC1 availability zones in a multi-vc setup", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest, flaky, disruptive), func() {
+		block, vanilla, multiVc, vc70, flaky, disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -383,14 +383,14 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 			}
 
 			ginkgo.By("Wait for k8s cluster to be healthy")
-			wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+			wait4AllK8sNodesToBeUp(nodeList)
 			err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		}()
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -422,7 +422,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 	*/
 
 	ginkgo.It("Bring down full site VC2 in a multi setup", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest, flaky, disruptive), func() {
+		block, vanilla, multiVc, vc70, flaky, disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -493,7 +493,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 			}
 
 			ginkgo.By("Wait for k8s cluster to be healthy")
-			wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+			wait4AllK8sNodesToBeUp(nodeList)
 			err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -505,7 +505,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 		}
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -561,7 +561,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 	*/
 
 	ginkgo.It("Bring down full site VC1 in a multi setup", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest, flaky, disruptive), func() {
+		block, vanilla, multiVc, vc70, flaky, disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -632,7 +632,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 			}
 
 			ginkgo.By("Wait for k8s cluster to be healthy")
-			wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+			wait4AllK8sNodesToBeUp(nodeList)
 			err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -644,7 +644,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 		}
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -700,7 +700,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology-sitedown] Multi-VC-SiteDown", fu
 	*/
 
 	ginkgo.It("Bring down datastores in a multi vc setup", ginkgo.Label(p2,
-		block, vanilla, multiVc, newTest, flaky, disruptive), func() {
+		block, vanilla, multiVc, vc70, flaky, disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

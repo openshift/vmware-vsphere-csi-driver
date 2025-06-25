@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"reflect"
 	"strconv"
@@ -770,7 +771,7 @@ func (vs *vSphere) getVsanClusterResource(ctx context.Context, forceRefresh ...b
 				cluster = clusterComputeResource[1]
 			}
 
-			framework.Logf("Looking for cluster with the default datastore passed into test in DC: " + dc)
+			framework.Logf("Looking for cluster with the default datastore passed into test in DC: %s", dc)
 			datastoreURL := GetAndExpectStringEnvVar(envSharedDatastoreURL)
 			defaultDatastore, err = getDatastoreByURL(ctx, datastoreURL, defaultDatacenter)
 			if err == nil {
@@ -894,7 +895,7 @@ func (c *VsanClient) QueryVsanObjects(ctx context.Context, uuids []string, vs *v
 }
 
 // queryCNSVolumeWithWait gets the cns volume health status
-func queryCNSVolumeWithWait(ctx context.Context, client clientset.Interface, volHandle string) error {
+func queryCNSVolumeWithWait(ctx context.Context, volHandle string) error {
 	waitErr := wait.PollUntilContextTimeout(ctx, pollTimeoutShort, pollTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			framework.Logf("wait for next poll %v", pollTimeoutShort)
@@ -1179,11 +1180,6 @@ func (vs *vSphere) verifyPreferredDatastoreMatch(volumeID string, dsUrls []strin
 	for _, dsUrl := range dsUrls {
 		if actualDatastoreUrl == dsUrl {
 			flag = true
-			if rwxAccessMode {
-				if !strings.HasPrefix(dsUrl, "ds:///vmfs/volumes/vsan:") {
-					return false
-				}
-			}
 			return flag
 		}
 	}
@@ -1354,4 +1350,118 @@ func (vs *vSphere) getAllVms(ctx context.Context) []*object.VirtualMachine {
 	vms, err := finder.VirtualMachineList(ctx, "*")
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return vms
+}
+
+func (vs *vSphere) generateEncryptionKey(ctx context.Context, keyProviderID string) string {
+	vimClient := vs.Client.Client
+	cm := vimClient.ServiceContent.CryptoManager
+	resp, err := methods.GenerateKey(ctx, vimClient, &vim25types.GenerateKey{
+		This: *cm,
+		KeyProvider: &vim25types.KeyProviderId{
+			Id: keyProviderID,
+		},
+	})
+
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(resp.Returnval.Success).To(gomega.BeTrue())
+	gomega.Expect(resp.Returnval.KeyId.KeyId).NotTo(gomega.BeEmpty())
+
+	return resp.Returnval.KeyId.KeyId
+}
+
+func (vs *vSphere) findKeyProvier(ctx context.Context, keyProviderID string) (*vim25types.KmipClusterInfo, error) {
+	vimClient := vs.Client.Client
+	cm := vimClient.ServiceContent.CryptoManager
+	resp, err := methods.ListKmipServers(ctx, vimClient, &vim25types.ListKmipServers{
+		This: *cm,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	for idx := range resp.Returnval {
+		kms := &resp.Returnval[idx]
+		if kms.ClusterId.Id == keyProviderID {
+			return kms, nil
+		}
+	}
+
+	return nil, nil
+}
+
+// getAggregatedSnapshotCapacityInMb - get the cnsvolumeinfo aggregated value of snapshot
+func getAggregatedSnapshotCapacityInMb(e2eVSphere vSphere, volHandle string) int64 {
+	ginkgo.By(fmt.Sprintf("Invoking QueryCNSVolumeWithResult with VolumeID: %s", volHandle))
+	queryResult, err := e2eVSphere.queryCNSVolumeWithResult(volHandle)
+	ginkgo.By(fmt.Sprintf(" queryResult :%v", queryResult.Volumes[0]))
+
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	gomega.Expect(queryResult.Volumes).ShouldNot(gomega.BeEmpty())
+	ginkgo.By(fmt.Sprintf("volume Name:%s , aggregatorValue:%v",
+		queryResult.Volumes[0].Name,
+		queryResult.Volumes[0].BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails).AggregatedSnapshotCapacityInMb))
+
+	return queryResult.Volumes[0].BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails).AggregatedSnapshotCapacityInMb
+}
+
+// renameDs renames a datastore to the given name
+func (vs *vSphere) renameDs(ctx context.Context, datastoreName string,
+	dsRef *vim25types.ManagedObjectReference) {
+
+	s1 := rand.NewSource(time.Now().UnixNano())
+	r1 := rand.New(s1)
+	randomStr := strconv.Itoa(r1.Intn(1000))
+	req := vim25types.RenameDatastore{
+		This:    *dsRef,
+		NewName: datastoreName + randomStr,
+	}
+
+	_, err := methods.RenameDatastore(ctx, e2eVSphere.Client.Client, &req)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+}
+
+// fetchDatastoreNameFromDatastoreUrl fetches datastore name and datastore reference
+// from a given datastore url by querying volumeID and a list of datastore present in vCenter
+func (vs *vSphere) fetchDatastoreNameFromDatastoreUrl(ctx context.Context,
+	volumeID string) (string, vim25types.ManagedObjectReference, error) {
+
+	dsUrl := fetchDsUrl4CnsVol(*vs, volumeID)
+	datastoreName := ""
+	var dsRef vim25types.ManagedObjectReference
+	finder := find.NewFinder(vs.Client.Client, false)
+	dcString := e2eVSphere.Config.Global.Datacenters
+	dc, err := finder.Datacenter(ctx, dcString)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	finder.SetDatacenter(dc)
+	datastores, err := finder.DatastoreList(ctx, "*")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	var dsList []vim25types.ManagedObjectReference
+	for _, ds := range datastores {
+		dsList = append(dsList, ds.Reference())
+	}
+	var dsMoList []mo.Datastore
+	pc := property.DefaultCollector(vs.Client.Client)
+	properties := []string{"info"}
+	err = pc.Retrieve(ctx, dsList, properties, &dsMoList)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	for _, mo := range dsMoList {
+		if mo.Info.GetDatastoreInfo().Url == dsUrl {
+			dsRef = mo.Reference()
+			datastoreName = mo.Info.GetDatastoreInfo().Name
+			break
+		}
+	}
+
+	if datastoreName == "" {
+		return "", dsRef, fmt.Errorf("failed to find datastoreName with datastore url: %s", dsUrl)
+	}
+
+	return datastoreName, dsRef, nil
+}
+
+// renameDsInParallel renames a datastore to the given name in parallel
+func (vs *vSphere) renameDsInParallel(ctx context.Context, datastoreName string,
+	dsRef *vim25types.ManagedObjectReference, wg *sync.WaitGroup) {
+	defer wg.Done()
+	vs.renameDs(ctx, datastoreName, dsRef)
 }

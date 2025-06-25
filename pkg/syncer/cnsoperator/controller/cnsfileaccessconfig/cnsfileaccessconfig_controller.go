@@ -23,7 +23,7 @@ import (
 	"sync"
 	"time"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -86,7 +86,8 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
 				return err
 			}
-			if len(clusterComputeResourceMoIds) > 1 {
+			if len(clusterComputeResourceMoIds) > 1 &&
+				!commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WorkloadDomainIsolation) {
 				log.Infof("Not initializing the CnsFileAccessConfig Controller as stretched supervisor is detected.")
 				return nil
 			}
@@ -126,7 +127,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		return err
 	}
 
-	vmOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, vmoperatortypes.GroupName)
+	vmOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, vmoperatorv1alpha4.GroupName)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to initialize vmOperatorClient. Error: %+v", err)
 		log.Error(msg)
@@ -177,8 +178,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	backOffDuration = make(map[string]time.Duration)
 
 	// Watch for changes to primary resource CnsFileAccessConfig.
-	err = c.Watch(source.Kind(mgr.GetCache(), &cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{}),
-		&handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(
+		mgr.GetCache(),
+		&cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{},
+		&handler.TypedEnqueueRequestForObject[*cnsfileaccessconfigv1alpha1.CnsFileAccessConfig]{},
+	))
 	if err != nil {
 		log.Errorf("Failed to watch for changes to CnsFileAccessConfig resource with error: %+v", err)
 		return err
@@ -241,12 +245,59 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 		msg := fmt.Sprintf("Failed to get virtualmachine instance for the VM with name: %q. Error: %+v",
 			instance.Spec.VMName, err)
 		log.Error(msg)
+		// If virtualmachine instance is NotFound and if deletion timestamp is set on CnsFileAccessConfig instance,
+		// then proceed with the deletion of CnsFileAccessConfig instance.
+		if apierrors.IsNotFound(err) && instance.DeletionTimestamp != nil {
+			log.Infof("CnsFileAccessConfig instance %q has deletion timestamp set, but VM instance with "+
+				"name %q is not found. Processing the deletion of CnsFileAccessConfig instance.",
+				instance.Name, instance.Spec.VMName)
+			// Fetch the PVC and PV instance and get volume ID
+			skipConfigureVolumeACL := false
+			volumeID, err := cnsoperatorutil.GetVolumeID(ctx, r.client, instance.Spec.PvcName, instance.Namespace)
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					// If PVC instance is NotFound (deleted), then there is no need to configure ACL on file volume.
+					// TODO: When we support PV with retain policy on supervisor, then we need to configure ACL
+					// in cases where PVC is deleted but PV is not deleted.
+					skipConfigureVolumeACL = true
+				} else {
+					msg := fmt.Sprintf("Failed to get volumeID from pvcName: %q. Error: %+v", instance.Spec.PvcName, err)
+					log.Error(msg)
+					setInstanceError(ctx, r, instance, msg)
+					return reconcile.Result{RequeueAfter: timeout}, nil
+				}
+			}
+			err = r.removePermissionsForFileVolume(ctx, volumeID, instance, skipConfigureVolumeACL)
+			if err != nil {
+				msg := fmt.Sprintf("Failed to remove file volume permissions with error: %+v", err)
+				log.Error(msg)
+				setInstanceError(ctx, r, instance, msg)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+
+			// Remove finalizer from CnsFileAccessConfig CRD
+			removeFinalizerFromCRDInstance(ctx, instance)
+			err = updateCnsFileAccessConfig(ctx, r.client, instance)
+			if err != nil {
+				msg := fmt.Sprintf("failed to update CnsFileAccessConfig instance: %q on namespace: %q. Error: %+v",
+					instance.Name, instance.Namespace, err)
+				recordEvent(ctx, r, instance, v1.EventTypeWarning, msg)
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+			// Cleanup instance entry from backOffDuration map.
+			backOffDurationMapMutex.Lock()
+			delete(backOffDuration, instance.Name)
+			backOffDurationMapMutex.Unlock()
+			return reconcile.Result{}, nil
+		}
+
 		setInstanceError(ctx, r, instance, msg)
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	log.Debugf("Found virtualMachine instance for VM: %q/%q: +%v", instance.Namespace, instance.Spec.VMName, vm)
+	log.Debugf("Found virtualMachine instance for VM: %q/%q: %+v", instance.Namespace, instance.Spec.VMName, vm)
 
 	if instance.DeletionTimestamp != nil {
+		log.Infof("CnsFileAccessConfig instance %q has deletion timestamp set", instance.Name)
 		volumeID, err := cnsoperatorutil.GetVolumeID(ctx, r.client, instance.Spec.PvcName, instance.Namespace)
 		if err != nil {
 			msg := fmt.Sprintf("Failed to get volumeID from pvcName: %q. Error: %+v", instance.Spec.PvcName, err)
@@ -280,6 +331,8 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 	// and not deleted by the user, remove the instance from the queue.
 	if instance.Status.Done {
 		// Cleanup instance entry from backOffDuration map.
+		log.Infof("CnsFileAccessConfig instance: %q on namespace: %q has status marked as done. Skipping reconcile.",
+			instance.Name, instance.Namespace)
 		backOffDurationMapMutex.Lock()
 		delete(backOffDuration, instance.Name)
 		backOffDurationMapMutex.Unlock()
@@ -308,7 +361,7 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 	vmOwnerRefExists := false
 	if len(instance.OwnerReferences) != 0 {
 		for _, ownerRef := range instance.OwnerReferences {
-			if ownerRef.Kind == reflect.TypeOf(vmoperatortypes.VirtualMachine{}).Name() &&
+			if ownerRef.Kind == reflect.TypeOf(vmoperatorv1alpha4.VirtualMachine{}).Name() &&
 				ownerRef.Name == instance.Spec.VMName && ownerRef.UID == vm.UID {
 				vmOwnerRefExists = true
 				break
@@ -364,7 +417,7 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 			msg := fmt.Sprintf("CNS Volume: %s is not RWX volume", volumeID)
 			err = logger.LogNewError(log, msg)
 			setInstanceError(ctx, r, instance, msg)
-			return reconcile.Result{RequeueAfter: timeout}, err
+			return reconcile.Result{RequeueAfter: timeout}, reconcile.TerminalError(err)
 		}
 		vSANFileBackingDetails := volume.BackingObjectDetails.(*cnstypes.CnsVsanFileShareBackingDetails)
 		accessPoints := make(map[string]string)
@@ -404,12 +457,52 @@ func (r *ReconcileCnsFileAccessConfig) Reconcile(ctx context.Context,
 	return reconcile.Result{}, nil
 }
 
+// removePermissionsForFileVolume helps to remove net permissions for a given file volume.
+// This method is used when we don't have VM instance. It fetches the VM IP from CNSFileVolumeClient
+// instance for the VM name associated with CnsFileAccessConfig.
+func (r *ReconcileCnsFileAccessConfig) removePermissionsForFileVolume(ctx context.Context, volumeID string,
+	instance *cnsfileaccessconfigv1alpha1.CnsFileAccessConfig, skipConfigureVolumeACL bool) error {
+	log := logger.GetLogger(ctx)
+	cnsFileVolumeClientInstance, err := cnsfilevolumeclient.GetFileVolumeClientInstance(ctx)
+	if err != nil {
+		return logger.LogNewErrorf(log, "Failed to get CNSFileVolumeClient instance. Error: %+v", err)
+	}
+
+	vmIP, vmsAssociatedWithIP, err := cnsFileVolumeClientInstance.GetVMIPFromVMName(ctx,
+		instance.Namespace+"/"+instance.Spec.PvcName, instance.Spec.VMName)
+	if err != nil {
+		return logger.LogNewErrorf(log, "Failed to get VM IP from VM name in CNSFileVolumeClient instance. "+
+			"Error: %+v", err)
+	}
+	// If PVC is not found, then skipConfigureVolumeACL will be true.
+	// There is no need to configure volume ACL on volume if PVC is already deleted.
+	if !skipConfigureVolumeACL && (vmsAssociatedWithIP == 1) {
+		// In case of VDS setup, we will always have 1 VM associated with IP. But, in case of
+		// SNAT setup, we may have multiple VMs associated with same IP. We will remove ACL
+		// permission only when it is the last VM associated with IP.
+		err = r.configureVolumeACLs(ctx, volumeID, vmIP, true)
+		if err != nil {
+			return logger.LogNewErrorf(log, "Failed to remove net permissions for file volume %q. Error: %+v",
+				volumeID, err)
+		}
+	}
+	err = cnsFileVolumeClientInstance.RemoveClientVMFromIPList(ctx,
+		instance.Namespace+"/"+instance.Spec.PvcName, instance.Spec.VMName, vmIP)
+	if err != nil {
+		return logger.LogNewErrorf(log, "Failed to remove VM %q with IP %q from IPList. Error: %+v",
+			instance.Spec.VMName, vmIP, err)
+	}
+	log.Infof("Successfully removed VM IP %q from IPList for CnsFileAccessConfig request with name: %q on "+
+		"namespace: %q", vmIP, instance.Name, instance.Namespace)
+	return nil
+}
+
 // configureNetPermissionsForFileVolume helps to add or remove net permissions
 // for a given file volume. The callers of this method can remove or add net
 // permissions by setting the parameter removePermission to true or false
 // respectively. Returns error if any operation fails.
 func (r *ReconcileCnsFileAccessConfig) configureNetPermissionsForFileVolume(ctx context.Context,
-	volumeID string, vm *vmoperatortypes.VirtualMachine, instance *cnsfileaccessconfigv1alpha1.CnsFileAccessConfig,
+	volumeID string, vm *vmoperatorv1alpha4.VirtualMachine, instance *cnsfileaccessconfigv1alpha1.CnsFileAccessConfig,
 	removePermission bool) error {
 	log := logger.GetLogger(ctx)
 	tkgVMIP, err := r.getVMExternalIP(ctx, vm)
@@ -426,6 +519,8 @@ func (r *ReconcileCnsFileAccessConfig) configureNetPermissionsForFileVolume(ctx 
 	if err != nil {
 		return logger.LogNewErrorf(log, "Failed to get the list of clients VMs for IP %q. Error: %+v", tkgVMIP, err)
 	}
+	log.Infof("CNSFileVolumeClient for PVC %s/%s has the following ClientVMs registered: %v for IP: %q",
+		instance.Namespace, instance.Spec.PvcName, clientVms, tkgVMIP)
 	if !removePermission {
 		if len(clientVms) == 0 {
 			err = r.configureVolumeACLs(ctx, volumeID, tkgVMIP, false)
@@ -440,7 +535,7 @@ func (r *ReconcileCnsFileAccessConfig) configureNetPermissionsForFileVolume(ctx 
 			return logger.LogNewErrorf(log, "Failed to add VM %q with IP %q to IPList. Error: %+v",
 				vm.Name, tkgVMIP, err)
 		}
-		log.Debugf("Successfully added VM IP %q to IPList for CnsFileAccessConfig request with name: %q on namespace: %q",
+		log.Infof("Successfully added VM IP %q to IPList for CnsFileAccessConfig request with name: %q on namespace: %q",
 			tkgVMIP, instance.Name, instance.Namespace)
 		return nil
 	}
@@ -457,7 +552,7 @@ func (r *ReconcileCnsFileAccessConfig) configureNetPermissionsForFileVolume(ctx 
 	if err != nil {
 		return logger.LogNewErrorf(log, "Failed to remove VM %q with IP %q to IPList. Error: %+v", vm.Name, tkgVMIP, err)
 	}
-	log.Debugf("Successfully removed VM IP %q to IPList for CnsFileAccessConfig request with name: %q on namespace: %q",
+	log.Infof("Successfully removed VM IP %q from IPList for CnsFileAccessConfig request with name: %q on namespace: %q",
 		tkgVMIP, instance.Name, instance.Namespace)
 	return nil
 }
@@ -493,37 +588,49 @@ func (r *ReconcileCnsFileAccessConfig) configureVolumeACLs(ctx context.Context,
 	if err != nil {
 		return logger.LogNewErrorf(log, "Failed to configure ACLs for volume: %q. Error: %+v", volumeID, err)
 	}
-	log.Debugf("Successfully configured ACLs for volume %q", volumeID)
+	log.Infof("Successfully configured ACLs for volume %q", volumeID)
 	return nil
 }
 
 // getVMExternalIP helps to fetch the external facing IP for a given TKG VM.
 func (r *ReconcileCnsFileAccessConfig) getVMExternalIP(ctx context.Context,
-	vm *vmoperatortypes.VirtualMachine) (string, error) {
+	vm *vmoperatorv1alpha4.VirtualMachine) (string, error) {
 	log := logger.GetLogger(ctx)
 	networkProvider, err := cnsoperatorutil.GetNetworkProvider(ctx)
 	if err != nil {
 		return "", logger.LogNewErrorf(log, "Failed to identify the network provider. Error: %+v", err)
 	}
-	var nsxConfiguration bool
+
 	if networkProvider == "" {
 		return "", logger.LogNewError(log, "unable to find network provider information")
 	}
-	if networkProvider == cnsoperatorutil.NSXTNetworkProvider {
-		nsxConfiguration = true
-	} else if networkProvider == cnsoperatorutil.VDSNetworkProvider {
-		nsxConfiguration = false
-	} else {
+
+	networkTypes := []string{cnsoperatorutil.NSXTNetworkProvider, cnsoperatorutil.
+		VDSNetworkProvider}
+
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.VPCCapabilitySupervisor) {
+		networkTypes = append(networkTypes, cnsoperatorutil.VPCNetworkProvider)
+	}
+
+	supported_found := false
+	for _, networkType := range networkTypes {
+		if networkType == networkProvider {
+			supported_found = true
+			break
+		}
+	}
+
+	if !supported_found {
 		return "", logger.LogNewErrorf(log, "Unknown network provider. Error: %+v", err)
 	}
 
 	tkgVMIP, err := cnsoperatorutil.GetTKGVMIP(ctx, r.vmOperatorClient,
-		r.dynamicClient, vm.Namespace, vm.Name, nsxConfiguration)
+		r.dynamicClient, vm.Namespace, vm.Name, networkProvider)
 	if err != nil {
 		return "", logger.LogNewErrorf(log, "Failed to get external facing IP address for VM %q/%q. Err: %+v",
 			vm.Namespace, vm.Name, err)
 	}
-	log.Debugf("Found tkg VMIP %q for VM %q in namespace %q", tkgVMIP, vm.Name, vm.Namespace)
+	log.Infof("Found tkg VMIP %q for VM %q in namespace %q", tkgVMIP, vm.Name, vm.Namespace)
 	return tkgVMIP, nil
 }
 

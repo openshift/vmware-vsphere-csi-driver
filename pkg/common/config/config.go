@@ -62,6 +62,8 @@ const (
 	DefaultInternalFSSConfigMapName = "internal-feature-states.csi.vsphere.vmware.com"
 	// DefaultCSINamespace is the default namespace for CNS-CSI and pvCSI drivers.
 	DefaultCSINamespace = "vmware-system-csi"
+	// EnvCSINamespace specifies the namespace in which CSI driver is installed.
+	EnvCSINamespace = "CSI_NAMESPACE"
 	// DefaultCnsRegisterVolumesCleanupIntervalInMin is the default time
 	// interval after which successful CnsRegisterVolumes will be cleaned up.
 	// Current default value is set to 12 hours
@@ -102,6 +104,8 @@ const (
 	TKCAPIVersion = "run.tanzu.vmware.com/v1alpha1"
 	// ClusterIDConfigMapName refers to the name of the immutable ConfigMap used to store cluster ID
 	ClusterIDConfigMapName = "vsphere-csi-cluster-id"
+	// ClusterVersionv1beta1 refers to the api version of non-legacy cluster
+	ClusterVersionv1beta1 = "cluster.x-k8s.io/v1beta1"
 )
 
 // Errors
@@ -696,7 +700,7 @@ func GetClusterFlavor(ctx context.Context) (cnstypes.CnsClusterFlavor, error) {
 	}
 	errMsg := "unrecognized value set for CLUSTER_FLAVOR"
 	log.Error(errMsg)
-	return "", fmt.Errorf(errMsg)
+	return "", fmt.Errorf("%s", errMsg)
 }
 
 // GetConfig loads configuration from secret and returns config object.
@@ -756,6 +760,7 @@ func GetConfigPath(ctx context.Context) string {
 			cfgPath = DefaultCloudConfigPath
 		}
 	}
+
 	return cfgPath
 }
 
@@ -805,4 +810,13 @@ func (vc VirtualCenterConfig) String() string {
 	}
 
 	return fmt.Sprintf("{%s}", strings.Join(fields, " "))
+}
+
+// GetCSINamespace returns the namespace in which CSI driver is installed
+func GetCSINamespace() string {
+	CSINamespace := os.Getenv(EnvCSINamespace)
+	if CSINamespace == "" {
+		CSINamespace = DefaultCSINamespace
+	}
+	return CSINamespace
 }

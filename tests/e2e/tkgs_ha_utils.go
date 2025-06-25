@@ -138,6 +138,7 @@ func verifyVolumeProvisioningWithServiceDown(serviceName string, namespace strin
 	f *framework.Framework) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var err error
 
 	ginkgo.By("CNS_TEST: Running for GC setup")
 	nodeList, err := fnodes.GetReadySchedulableNodes(ctx, client)
@@ -147,7 +148,6 @@ func verifyVolumeProvisioningWithServiceDown(serviceName string, namespace strin
 	}
 
 	ginkgo.By(fmt.Sprintf("Stopping %v on the vCenter host", serviceName))
-	vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 	err = invokeVCenterServiceControl(ctx, stopOperation, serviceName, vcAddress)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	isServiceStopped = true
@@ -167,7 +167,9 @@ func verifyVolumeProvisioningWithServiceDown(serviceName string, namespace strin
 	}()
 
 	ginkgo.By("Create statefulset with default pod management policy with replica 3")
-	createResourceQuota(client, namespace, rqLimit, storagePolicyName)
+	//createResourceQuota(client, namespace, rqLimit, storagePolicyName)
+	svcClient, svNamespace := getSvcClientAndNamespace()
+	setResourceQuota(svcClient, svNamespace, rqLimit)
 	storageclass, err := client.StorageV1().StorageClasses().Get(ctx, storagePolicyName, metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -219,7 +221,8 @@ func verifyVolumeProvisioningWithServiceDown(serviceName string, namespace strin
 			fmt.Sprintf("Failed to find the volume in pending state with err: %v", err))
 	}
 
-	pods := fss.GetPodList(ctx, client, statefulset)
+	pods, err := fss.GetPodList(ctx, client, statefulset)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	for _, pod := range pods.Items {
 		if pod.Status.Phase != v1.PodPending {
 			framework.Failf("Expected pod to be in: %s state but is in: %s state", v1.PodPending,
@@ -244,35 +247,78 @@ func verifyVolumeProvisioningWithServiceDown(serviceName string, namespace strin
 // verifyOnlineVolumeExpansionOnGc is a util method which helps in verifying online volume expansion on gc
 func verifyOnlineVolumeExpansionOnGc(client clientset.Interface, namespace string, svcPVCName string,
 	volHandle string, pvclaim *v1.PersistentVolumeClaim, pod *v1.Pod, f *framework.Framework) {
-	rand.New(rand.NewSource(time.Now().Unix()))
-	testdataFile := fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
-	ginkgo.By(fmt.Sprintf("Creating a 512mb test data file %v", testdataFile))
-	op, err := exec.Command("dd", "if=/dev/urandom", fmt.Sprintf("of=%v", testdataFile),
-		"bs=64k", "count=8000").Output()
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	defer func() {
-		op, err = exec.Command("rm", "-f", testdataFile).Output()
+	var testdataFile string
+	var op []byte
+	var err error
+	if !windowsEnv {
+		rand.New(rand.NewSource(time.Now().Unix()))
+		testdataFile := fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
+		ginkgo.By(fmt.Sprintf("Creating a 512mb test data file %v", testdataFile))
+		op, err = exec.Command("dd", "if=/dev/urandom", fmt.Sprintf("of=%v", testdataFile),
+			"bs=64k", "count=8000").Output()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}()
+		defer func() {
+			op, err = exec.Command("rm", "-f", testdataFile).Output()
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+	}
 
-	_ = e2ekubectl.RunKubectlOrDie(namespace, "cp", testdataFile,
-		fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name))
+	if windowsEnv {
+		cmdTestData := []string{
+			"exec",
+			pod.Name,
+			"--namespace=" + namespace,
+			"powershell.exe",
+			"$out = New-Object byte[] 536870912; (New-Object Random).NextBytes($out); " +
+				"[System.IO.File]::WriteAllBytes('/mnt/volume1/testdata2.txt', $out)",
+		}
+		_ = e2ekubectl.RunKubectlOrDie(namespace, cmdTestData...)
+	} else {
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp", testdataFile,
+			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name))
+	}
 
 	onlineVolumeResizeCheck(f, client, namespace, svcPVCName, volHandle, pvclaim, pod)
 
 	ginkgo.By("Checking data consistency after PVC resize")
-	_ = e2ekubectl.RunKubectlOrDie(namespace, "cp",
-		fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name), testdataFile+"_pod")
-	defer func() {
-		op, err = exec.Command("rm", "-f", testdataFile+"_pod").Output()
-		fmt.Println("rm: ", op)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}()
+	if windowsEnv {
+		cmdTestData := []string{
+			"exec",
+			pod.Name,
+			"--namespace=" + namespace,
+			"powershell.exe",
+			"Copy-Item -Path '/mnt/volume1/testdata2.txt' " +
+				"-Destination '/mnt/volume1/testdata2_pod.txt'",
+		}
+		_ = e2ekubectl.RunKubectlOrDie(namespace, cmdTestData...)
+	} else {
+		_ = e2ekubectl.RunKubectlOrDie(namespace, "cp",
+			fmt.Sprintf("%v/%v:/mnt/volume1/testdata", namespace, pod.Name), testdataFile+"_pod")
+		defer func() {
+			op, err = exec.Command("rm", "-f", testdataFile+"_pod").Output()
+			fmt.Println("rm: ", op)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+	}
 	ginkgo.By("Running diff...")
-	op, err = exec.Command("diff", testdataFile, testdataFile+"_pod").Output()
-	fmt.Println("diff: ", op)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	gomega.Expect(len(op)).To(gomega.BeZero())
+	if windowsEnv {
+		cmdTestData := []string{
+			"exec",
+			pod.Name,
+			"--namespace=" + namespace,
+			"powershell.exe",
+			"((Get-FileHash '/mnt/volume1/testdata2.txt' -Algorithm SHA256).Hash -eq " +
+				"(Get-FileHash '/mnt/volume1/testdata2_pod.txt' -Algorithm SHA256).Hash)",
+		}
+
+		diffNotFound := strings.TrimSpace(e2ekubectl.RunKubectlOrDie(namespace, cmdTestData...))
+		gomega.Expect(diffNotFound).To(gomega.Equal("True"))
+	} else {
+		op, err = exec.Command("diff", testdataFile, testdataFile+"_pod").Output()
+		fmt.Println("diff: ", op)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		gomega.Expect(len(op)).To(gomega.BeZero())
+	}
 
 	ginkgo.By("File system resize finished successfully in GC")
 	ginkgo.By("Checking for PVC resize completion on SVC PVC")
@@ -285,7 +331,7 @@ func verifyOfflineVolumeExpansionOnGc(ctx context.Context, client clientset.Inte
 	pvclaim *v1.PersistentVolumeClaim, svcPVCName string, namespace string, volHandle string,
 	pod *v1.Pod, pv *v1.PersistentVolume, f *framework.Framework) {
 	ginkgo.By("Check filesystem size for mount point /mnt/volume1 before expansion")
-	originalFsSize, err := getFSSizeMb(f, pod)
+	originalFsSize, err := getFileSystemSizeForOsType(f, client, pod)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	// Delete POD.
@@ -379,7 +425,7 @@ func verifyOfflineVolumeExpansionOnGc(ctx context.Context, client clientset.Inte
 	expectEqual(len(pvcConditions), 0, "pvc should not have conditions")
 
 	ginkgo.By("Verify filesystem size for mount point /mnt/volume1 after expansion")
-	fsSize, err := getFSSizeMb(f, pod)
+	fsSize, err := getFileSystemSizeForOsType(f, client, pod)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	// Filesystem size may be smaller than the size of the block volume.
 	// Here since filesystem was already formatted on the original volume,
@@ -402,8 +448,11 @@ func verifyVolumeMetadataOnStatefulsets(client clientset.Interface, ctx context.
 	categories []string, storagePolicyName string, nodeList *v1.NodeList, f *framework.Framework) {
 	// Waiting for pods status to be Ready
 	fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
-	gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-	ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+	if !windowsEnv {
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+	}
+	ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 		fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 	gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -444,14 +493,15 @@ func verifyVolumeMetadataOnStatefulsets(client clientset.Interface, ctx context.
 	}
 
 	replicas = 5
-	framework.Logf(fmt.Sprintf("Scaling up statefulset: %v to number of Replica: %v",
-		statefulset.Name, replicas))
+	framework.Logf("Scaling up statefulset: %v to number of Replica: %v",
+		statefulset.Name, replicas)
 	_, scaleupErr := fss.Scale(ctx, client, statefulset, replicas)
 	gomega.Expect(scaleupErr).NotTo(gomega.HaveOccurred())
 
 	fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
 	fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
-	ssPodsAfterScaleUp := fss.GetPodList(ctx, client, statefulset)
+	ssPodsAfterScaleUp, err := fss.GetPodList(ctx, client, statefulset)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
 		fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 	gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -480,8 +530,8 @@ func verifyVolumeMetadataOnStatefulsets(client clientset.Interface, ctx context.
 				verifyAnnotationsAndNodeAffinity(allowedTopologyHAMap, categories, pod,
 					nodeList, svcPVC, pv, svcPVCName)
 
-				framework.Logf(fmt.Sprintf("Verify volume: %s is attached to the node: %s",
-					pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName))
+				framework.Logf("Verify volume: %s is attached to the node: %s",
+					pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
 				var vmUUID string
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -661,9 +711,14 @@ func getClusterNameFromZone(ctx context.Context, availabilityZone string) string
 	cmd := fmt.Sprintf("dcli +username %s +password %s +skip +show com vmware "+
 		"vcenter consumptiondomains zones cluster associations get --zone "+
 		"%s", adminUser, nimbusGeneratedVcPwd, availabilityZone)
-	vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
-	framework.Logf("Invoking command %v on vCenter host %v", cmd, vcAddress)
-	result, err := fssh.SSH(ctx, cmd, vcAddress, framework.TestContext.Provider)
+
+	// Read hosts sshd port number
+	ip, portNum, err := getPortNumAndIP(vcAddress)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	addr := ip + ":" + portNum
+
+	framework.Logf("Invoking command %v on vCenter host %v", cmd, addr)
+	result, err := fssh.SSH(ctx, cmd, addr, framework.TestContext.Provider)
 	framework.Logf("result: %v", result)
 	clusterId := strings.Split(result.Stdout, "- ")[1]
 	clusterID := strings.TrimSpace(clusterId)
@@ -838,8 +893,11 @@ func verifyStsVolumeMetadata(client clientset.Interface, ctx context.Context, na
 	categories []string, storagePolicyName string, nodeList *v1.NodeList, f *framework.Framework) {
 	// Waiting for pods status to be Ready
 	fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
-	gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-	ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+	if !windowsEnv {
+		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
+	}
+	ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 		fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 	gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -876,8 +934,8 @@ func verifyStsVolumeMetadata(client clientset.Interface, ctx context.Context, na
 					pv, pod)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-				framework.Logf(fmt.Sprintf("Verify volume: %s is attached to the node: %s",
-					pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName))
+				framework.Logf("Verify volume: %s is attached to the node: %s",
+					pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName)
 				var vmUUID string
 				ctx, cancel := context.WithCancel(context.Background())
 				defer cancel()
@@ -897,4 +955,18 @@ func verifyStsVolumeMetadata(client clientset.Interface, ctx context.Context, na
 		}
 	}
 
+}
+
+// verifyAnnotationsAndNodeAffinityInSVC verifies annotations on SVC PVC
+// and node affinities and pod location of volumes on correct zones
+func verifyAnnotationsAndNodeAffinityInSVC(allowedTopologyHAMap map[string][]string,
+	pod *v1.Pod, nodeList *v1.NodeList, pv *v1.PersistentVolume) {
+
+	framework.Logf("Verify  PV has has required  node affinity details")
+	_, err := verifyVolumeTopologyForLevel5(pv, allowedTopologyHAMap)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	framework.Logf("SVC PV: %s has required Pv node affinity details", pv.Name)
+
+	_, err = verifyPodLocationLevel5(pod, nodeList, allowedTopologyHAMap)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 }

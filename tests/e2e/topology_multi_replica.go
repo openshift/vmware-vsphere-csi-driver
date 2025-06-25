@@ -48,9 +48,9 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provisioning-With-MultiReplica-Level5",
+var _ = ginkgo.Describe("[topology-multireplica] Topology-MultiReplica",
 	func() {
-		f := framework.NewDefaultFramework("e2e-vsphere-topology-aware-provisioning")
+		f := framework.NewDefaultFramework("topology-multireplica")
 		f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 		var (
 			client                     clientset.Interface
@@ -64,7 +64,6 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			isSPSServiceStopped        bool
 			isVsanHealthServiceStopped bool
 			sshClientConfig            *ssh.ClientConfig
-			vcAddress                  string
 			container_name             string
 			sts_count                  int
 			statefulSetReplicaCount    int32
@@ -112,9 +111,9 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			isVsanHealthServiceStopped = false
 			clientIndex = 0
 
-			topologyMap := GetAndExpectStringEnvVar(topologyMap)
-			topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap, topologyLength)
-			allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+			topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+			topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap)
+			allowedTopologies = createAllowedTopolgies(topologyMap)
 
 			nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
 			nimbusGeneratedVcPwd = GetAndExpectStringEnvVar(nimbusVcPwd)
@@ -126,7 +125,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				},
 				HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 			}
-			vcAddress = e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
+
 			if os.Getenv(envPandoraSyncWaitTime) != "" {
 				pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -167,7 +166,6 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				c = remoteC
 			}
-
 		})
 
 		ginkgo.AfterEach(func() {
@@ -721,7 +719,8 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			e2ekubectl.RunKubectlOrDie(csiSystemNamespace, statusCheck...)
 
 			// wait for csi Pods to be in running ready state
-			err = fpod.WaitForPodsRunningReady(ctx, client, csiSystemNamespace, int32(num_csi_pods), 0, pollTimeout)
+			err = fpod.WaitForPodsRunningReady(ctx, client, csiSystemNamespace, int(num_csi_pods),
+				time.Duration(pollTimeout))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			// Scale up statefulSets replicas count
@@ -956,7 +955,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 			for i := 0; i < len(podList); i++ {
 				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-					namespace, allowedTopologies)
+					allowedTopologies)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		})
@@ -1164,7 +1163,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 			for i := 0; i < len(podList); i++ {
 				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-					namespace, allowedTopologies)
+					allowedTopologies)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		})
@@ -1299,8 +1298,8 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			num_csi_pods := len(list_of_pods)
 			time.Sleep(1 * time.Minute)
-			err = fpod.WaitForPodsRunningReady(ctx, client, namespace, int32(num_csi_pods), 0,
-				pollTimeout)
+			err = fpod.WaitForPodsRunningReady(ctx, client, namespace, int(num_csi_pods),
+				time.Duration(pollTimeout))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		})
 
@@ -1673,7 +1672,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 			for i := 0; i < len(podList); i++ {
 				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-					namespace, allowedTopologies)
+					allowedTopologies)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		})
@@ -1753,7 +1752,6 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By(fmt.Sprintln("Changing password on the vCenter host"))
-			vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 			username := vsphereCfg.Global.User
 			newPassword := e2eTestPassword
 			err = invokeVCenterChangePassword(ctx, username, nimbusGeneratedVcPwd, newPassword, vcAddress,
@@ -1914,8 +1912,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			for each StatefulSet pod */
 			ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 			for i := 0; i < len(podList); i++ {
-				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-					namespace, allowedTopologies)
+				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i], allowedTopologies)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 		})
@@ -2083,8 +2080,7 @@ var _ = ginkgo.Describe("[csi-topology-multireplica-level5] Topology-Aware-Provi
 			ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 				"appropriate node as specified in the allowed topologies of SC")
 			for i := 0; i < len(podList); i++ {
-				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i], namespace,
-					allowedTopologies)
+				err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i], allowedTopologies)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 

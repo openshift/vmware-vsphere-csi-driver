@@ -27,9 +27,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
+	"google.golang.org/grpc/codes"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -41,7 +42,6 @@ import (
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -597,6 +597,13 @@ func initFSS(ctx context.Context, k8sClient clientset.Interface,
 		},
 		// Update.
 		func(oldObj interface{}, newObj interface{}) {
+			if controllerClusterFlavor == cnstypes.CnsClusterFlavorGuest &&
+				operationMode != "WEBHOOK_SERVER" &&
+				serviceMode != "node" &&
+				k8sOrchestratorInstance.IsPVCSIFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) &&
+				!k8sOrchestratorInstance.IsCNSCSIFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) {
+				handleEnablementOfWLDIFSS(oldObj, newObj)
+			}
 			configMapUpdated(oldObj, newObj)
 		},
 		// Delete.
@@ -740,6 +747,50 @@ func configMapUpdated(oldObj, newObj interface{}) {
 		log.Warnf("configMapUpdated: Internal feature state values from %q stored successfully: %v",
 			newFssConfigMap.Name, k8sOrchestratorInstance.internalFSS.featureStates)
 		k8sOrchestratorInstance.internalFSS.featureStatesLock.Unlock()
+	}
+}
+
+// handleEnablementOfWLDIFSS checks if workload-domain-isolation FSS is enabled in csi-feature-states configmap
+// if workload-domain-isolation FSS wsa disabled and found enabled, container will be restarted
+func handleEnablementOfWLDIFSS(oldObj, newObj interface{}) {
+	var err error
+	ctx := context.Background()
+	log := logger.GetLogger(ctx)
+	oldFssConfigMap, ok := oldObj.(*v1.ConfigMap)
+	if oldFssConfigMap == nil || !ok {
+		log.Warnf("configMapUpdated: unrecognized old object %+v", oldObj)
+		return
+	}
+	newFssConfigMap, ok := newObj.(*v1.ConfigMap)
+	if newFssConfigMap == nil || !ok {
+		log.Warnf("configMapUpdated: unrecognized new object %+v", newObj)
+		return
+	}
+	if oldFssConfigMap.Name == cnsconfig.DefaultSupervisorFSSConfigMapName {
+		log.Infof("Observed Configmap update for %q in namespace %q",
+			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace)
+		var oldfssValBool, newfssValBool bool
+		if oldFSSValue, ok := oldFssConfigMap.Data[common.WorkloadDomainIsolationFSS]; ok {
+			oldfssValBool, err = strconv.ParseBool(oldFSSValue)
+			if err != nil {
+				log.Errorf("failed to parse fss value: %q for fss: %q",
+					oldFSSValue, common.WorkloadDomainIsolationFSS)
+				os.Exit(1)
+			}
+		}
+		if newFSSValue, ok := newFssConfigMap.Data[common.WorkloadDomainIsolationFSS]; ok {
+			newfssValBool, err = strconv.ParseBool(newFSSValue)
+			if err != nil {
+				log.Errorf("failed to parse fss value: %q for fss: %q",
+					newFSSValue, common.WorkloadDomainIsolationFSS)
+				os.Exit(1)
+			}
+		}
+		if !oldfssValBool && newfssValBool {
+			log.Infof("Detected Enablement of FSS: %q. Restarting Container.",
+				common.WorkloadDomainIsolationFSS)
+			os.Exit(1)
+		}
 	}
 }
 
@@ -1104,8 +1155,39 @@ func (c *K8sOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) 
 				}
 				log.Debugf("Supervisor feature state %q in WCP cluster capabilities is set to %t", featureName,
 					supervisorFeatureState)
+
+				if !supervisorFeatureState {
+					// if capability can be enabled after upgrading CSI, we need to fetch config again and confirm FSS
+					// is still disabled, or it got enabled
+					// WCPFeatureStatesSupportsLateEnablement contains capabilities which can be enabled later after
+					// CSI is upgraded and up and running
+					if _, exists = common.WCPFeatureStatesSupportsLateEnablement[featureName]; exists {
+						wcpCapabilityConfigMap, err := c.k8sClient.CoreV1().ConfigMaps(common.KubeSystemNamespace).Get(ctx,
+							common.WCPCapabilityConfigMapName, metav1.GetOptions{})
+						if err != nil {
+							log.Errorf("failed to fetch WCP FSS configmap %q/%q. Setting the feature state "+
+								"to false. Error: %+v", common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
+							return false
+						}
+						wcpCapabilityFssMap = wcpCapabilityConfigMap.Data
+						log.Infof("WCP cluster capabilities map - %+v", wcpCapabilityFssMap)
+
+						if fssVal, exists := wcpCapabilityFssMap[featureName]; exists {
+							supervisorFeatureState, err = strconv.ParseBool(fssVal)
+							if err != nil {
+								log.Errorf("Error while converting %q feature state with value: %q in "+
+									"%q/%q configmap to boolean. Setting the feature state to false. Error: %+v", featureName,
+									fssVal, common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
+								return false
+							}
+							log.Debugf("Supervisor feature state %q in WCP cluster capabilities is set to %t", featureName,
+								supervisorFeatureState)
+						}
+					}
+				}
 				return supervisorFeatureState
 			}
+			return false
 		}
 
 		// Check SV FSS map.
@@ -1125,52 +1207,112 @@ func (c *K8sOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) 
 			"Setting the feature state to false", featureName, c.supervisorFSS.configMapName)
 		return false
 	} else if c.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
-		// Check internal FSS map.
-		c.internalFSS.featureStatesLock.RLock()
-		if flag, ok := c.internalFSS.featureStates[featureName]; ok {
-			c.internalFSS.featureStatesLock.RUnlock()
-			internalFeatureState, err = strconv.ParseBool(flag)
-			if err != nil {
-				log.Errorf("Error while converting %v feature state value: %v to boolean. "+
-					"Setting the feature state to false", featureName, internalFeatureState)
-				return false
+		isPVCSIFSSEnabled := c.IsPVCSIFSSEnabled(ctx, featureName)
+		if isPVCSIFSSEnabled {
+			// Skip SV FSS check for Windows Support since there is no dependency on supervisor
+			if featureName == common.CSIWindowsSupport {
+				log.Info("CSI Windows Suppport is set to true in pvcsi fss configmap. Skipping SV FSS check")
+				return true
 			}
-			if !internalFeatureState {
-				// If FSS set to false, return.
-				log.Infof("%s feature state set to false in %s ConfigMap", featureName, c.internalFSS.configMapName)
-				return internalFeatureState
-			}
-		} else {
-			c.internalFSS.featureStatesLock.RUnlock()
-			log.Infof("Could not find the %s feature state in ConfigMap %s. Setting the feature state to false",
-				featureName, c.internalFSS.configMapName)
-			return false
+			return c.IsCNSCSIFSSEnabled(ctx, featureName)
 		}
-		// Check SV FSS map.
-		c.supervisorFSS.featureStatesLock.RLock()
-		if flag, ok := c.supervisorFSS.featureStates[featureName]; ok {
-			c.supervisorFSS.featureStatesLock.RUnlock()
-			supervisorFeatureState, err = strconv.ParseBool(flag)
-			if err != nil {
-				log.Errorf("Error while converting %v feature state value: %v to boolean. "+
-					"Setting the feature state to false", featureName, supervisorFeatureState)
-				return false
-			}
-			if !supervisorFeatureState {
-				// If FSS set to false, return.
-				log.Infof("%s feature state is set to false in %s ConfigMap", featureName, c.supervisorFSS.configMapName)
-				return supervisorFeatureState
-			}
-		} else {
-			c.supervisorFSS.featureStatesLock.RUnlock()
-			log.Infof("Could not find the %s feature state in ConfigMap %s. Setting the feature state to false",
-				featureName, c.supervisorFSS.configMapName)
-			return false
-		}
-		return true
+		return false
 	}
 	log.Debugf("cluster flavor %q not recognised. Defaulting to false", c.clusterFlavor)
 	return false
+}
+
+// IsCNSCSIFSSEnabled checks if Feature is enabled in CNSCSI and returns true if enabled
+func (c *K8sOrchestrator) IsCNSCSIFSSEnabled(ctx context.Context, featureName string) bool {
+	var supervisorFeatureState bool
+	var err error
+	log := logger.GetLogger(ctx)
+	// Check SV FSS map.
+	c.supervisorFSS.featureStatesLock.RLock()
+	if flag, ok := c.supervisorFSS.featureStates[featureName]; ok {
+		c.supervisorFSS.featureStatesLock.RUnlock()
+		supervisorFeatureState, err = strconv.ParseBool(flag)
+		if err != nil {
+			log.Errorf("Error while converting %v feature state value: %v to boolean. "+
+				"Setting the feature state to false", featureName, supervisorFeatureState)
+			return false
+		}
+		if !supervisorFeatureState {
+			// If FSS set to false, return.
+			log.Infof("%s feature state is set to false in %s ConfigMap", featureName, c.supervisorFSS.configMapName)
+			return supervisorFeatureState
+		}
+	} else {
+		c.supervisorFSS.featureStatesLock.RUnlock()
+		log.Infof("Could not find the %s feature state in ConfigMap %s. Setting the feature state to false",
+			featureName, c.supervisorFSS.configMapName)
+		return false
+	}
+	return true
+}
+
+// IsPVCSIFSSEnabled checks if Feature is enabled in PVCSI and returns true if enabled
+func (c *K8sOrchestrator) IsPVCSIFSSEnabled(ctx context.Context, featureName string) bool {
+	var internalFeatureState bool
+	var err error
+	log := logger.GetLogger(ctx)
+	c.internalFSS.featureStatesLock.RLock()
+	if flag, ok := c.internalFSS.featureStates[featureName]; ok {
+		c.internalFSS.featureStatesLock.RUnlock()
+		internalFeatureState, err = strconv.ParseBool(flag)
+		if err != nil {
+			log.Errorf("Error while converting %v feature state value: %v to boolean. "+
+				"Setting the feature state to false", featureName, internalFeatureState)
+			return false
+		}
+		if !internalFeatureState {
+			// If FSS set to false, return.
+			log.Infof("%s feature state set to false in %s ConfigMap", featureName, c.internalFSS.configMapName)
+			return internalFeatureState
+		}
+	} else {
+		c.internalFSS.featureStatesLock.RUnlock()
+		log.Infof("Could not find the %s feature state in ConfigMap %s. Setting the feature state to false",
+			featureName, c.internalFSS.configMapName)
+		return false
+	}
+	return true
+}
+
+// EnableFSS helps enable feature state switch in the FSS config map
+func (c *K8sOrchestrator) EnableFSS(ctx context.Context, featureName string) error {
+	log := logger.GetLogger(ctx)
+	if c.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		csifeaturestatesconfigmap, err := c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Get(ctx,
+			cnsconfig.DefaultSupervisorFSSConfigMapName, metav1.GetOptions{})
+		if err != nil {
+			log.Errorf("failed to "+
+				"get configmap: %q from namespace: %q. err: %v",
+				cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, err)
+			return err
+		}
+		csifeaturestatesconfigmap.Data[featureName] = "true"
+		csifeaturestatesconfigmap, err = c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Update(ctx,
+			csifeaturestatesconfigmap, metav1.UpdateOptions{})
+		if err != nil {
+			log.Errorf("failed to update configmap: %q in namespace: %q to enable FSS %q. err: %v",
+				cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName, err)
+			return err
+		}
+		log.Infof("Successfully updated configmap: %q in namespace: %q to enable FSS %q. ConfigMapData: %v",
+			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName,
+			csifeaturestatesconfigmap.Data)
+		return nil
+	} else {
+		return fmt.Errorf("EnableFSS is not implemented for clusterFlavor: %q", c.clusterFlavor)
+	}
+}
+
+// DisableFSS helps disable feature state switch in the FSS config map
+func (c *K8sOrchestrator) DisableFSS(ctx context.Context, featureName string) error {
+	log := logger.GetLogger(ctx)
+	return logger.LogNewErrorCode(log, codes.Unimplemented,
+		"DisableFSS is not implemented.")
 }
 
 // IsFakeAttachAllowed checks if the volume is eligible to be fake attached

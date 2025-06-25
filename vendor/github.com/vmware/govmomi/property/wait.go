@@ -92,10 +92,6 @@ func Wait(ctx context.Context, c *Collector, obj types.ManagedObjectReference, p
 // By default, ObjectUpdate.MissingSet faults are not propagated to the returned
 // error, set WaitFilter.PropagateMissing=true to enable MissingSet fault
 // propagation.
-//
-// Deprecated: Please consider using WaitForUpdatesEx instead, as it does not
-// create a new property collector, instead it destroys the property filter
-// after the expected update is received.
 func WaitForUpdates(
 	ctx context.Context,
 	c *Collector,
@@ -127,7 +123,7 @@ func WaitForUpdates(
 		return err
 	}
 
-	return pc.WaitForUpdatesEx(ctx, filter.WaitOptions, onUpdatesFn)
+	return pc.WaitForUpdatesEx(ctx, &filter.WaitOptions, onUpdatesFn)
 }
 
 // WaitForUpdates waits for any of the specified properties of the specified
@@ -170,5 +166,5 @@ func WaitForUpdatesEx(
 
 	}()
 
-	return pc.WaitForUpdatesEx(ctx, filter.WaitOptions, onUpdatesFn)
+	return pc.WaitForUpdatesEx(ctx, &filter.WaitOptions, onUpdatesFn)
 }

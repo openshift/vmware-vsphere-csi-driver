@@ -27,8 +27,8 @@ import (
 	"sync"
 	"time"
 
-	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -147,7 +147,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] Re
 
 		ginkgo.By("Expect claim to provision volume successfully")
 		err = fpv.WaitForPersistentVolumeClaimPhase(ctx, v1.ClaimBound, client,
-			pvclaim.Namespace, pvclaim.Name, framework.Poll, time.Minute)
+			pvclaim.Namespace, pvclaim.Name, framework.Poll, framework.ClaimProvisionTimeout)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to provision volume")
 
 		pvclaims = append(pvclaims, pvclaim)
@@ -1081,7 +1081,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] Re
 		ginkgo.By("Adding labels to volume and writing IO to pod whle relocating volume")
 		var wg sync.WaitGroup
 		wg.Add(3)
-		go writeKnownData2PodInParallel(f, pods[0], testdataFile, &wg)
+		go writeKnownData2PodInParallel(f, client, pods[0], testdataFile, &wg)
 		go updatePvcLabelsInParallel(ctx, client, namespace, labels, pvcs, &wg)
 		go updatePvLabelsInParallel(ctx, client, namespace, labels, pvs, &wg)
 		wg.Wait()
@@ -1110,7 +1110,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] Re
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify the data on the PVCs match what was written in step 7")
-		verifyKnownDataInPod(f, pods[0], testdataFile)
+		verifyKnownDataInPod(f, client, pods[0], testdataFile)
 
 		storagePolicyMatches, err = e2eVSphere.VerifySpbmPolicyOfVolume(volumeID, policyNames[0])
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1312,7 +1312,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] Re
 		lock := &sync.Mutex{}
 		var wg sync.WaitGroup
 		wg.Add(2)
-		go writeKnownData2PodInParallel(f, pods[0], testdataFile, &wg)
+		go writeKnownData2PodInParallel(f, client, pods[0], testdataFile, &wg)
 		go createSnapshotInParallel(ctx, namespace, snapc, pvclaim.Name, volumeSnapshotClass.Name,
 			ch, lock, &wg)
 		go func() {
@@ -1369,7 +1369,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] Re
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify the data on the PVCs match what was written in step 7")
-		verifyKnownDataInPod(f, pods[0], testdataFile)
+		verifyKnownDataInPod(f, client, pods[0], testdataFile)
 
 		storagePolicyMatches, err = e2eVSphere.VerifySpbmPolicyOfVolume(volumeID, policyNames[0])
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())

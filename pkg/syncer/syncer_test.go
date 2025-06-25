@@ -110,6 +110,8 @@ func TestSyncerWorkflows(t *testing.T) {
 
 	// CNS based CSI requires a valid cluster name.
 	csiConfig.Global.ClusterID = testClusterName
+	// Normally set by InitMetadataSyncer
+	clusterIDforVolumeMetadata = testClusterName
 
 	// Init VC configuration.
 	cnsVCenterConfig, err = cnsvsphere.GetVirtualCenterConfig(ctx, csiConfig)
@@ -551,7 +553,7 @@ func getPersistentVolumeClaimSpec(pvcName string, namespace string,
 			AccessModes: []v1.PersistentVolumeAccessMode{
 				v1.ReadWriteOnce,
 			},
-			Resources: v1.ResourceRequirements{
+			Resources: v1.VolumeResourceRequirements{
 				Requests: v1.ResourceList{
 					v1.ResourceName(v1.ResourceStorage): resource.MustParse("1Gi"),
 				},

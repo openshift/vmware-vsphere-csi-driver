@@ -19,6 +19,7 @@ package wcpguest
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -28,12 +29,16 @@ import (
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/fsnotify/fsnotify"
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha2 "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
+	vmoperatorv1alpha3 "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"google.golang.org/protobuf/types/known/wrapperspb"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -46,16 +51,20 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"slices"
+
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsfileaccessconfigv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsfileaccessconfig/v1alpha1"
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	csifault "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/fault"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/prometheus"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/types"
 )
 
 var (
@@ -66,6 +75,7 @@ var (
 		csi.ControllerServiceCapability_RPC_EXPAND_VOLUME,
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_SNAPSHOT,
 		csi.ControllerServiceCapability_RPC_LIST_SNAPSHOTS,
+		csi.ControllerServiceCapability_RPC_GET_CAPACITY,
 	}
 )
 
@@ -78,6 +88,8 @@ type controller struct {
 	vmWatcher                   *cache.ListWatch
 	supervisorNamespace         string
 	tanzukubernetesClusterUID   string
+	tanzukubernetesClusterName  string
+	guestClusterDist            string
 }
 
 // New creates a CNS controller
@@ -96,6 +108,8 @@ func (c *controller) Init(config *commonconfig.Config, version string) error {
 		return err
 	}
 	c.tanzukubernetesClusterUID = config.GC.TanzuKubernetesClusterUID
+	c.tanzukubernetesClusterName = config.GC.TanzuKubernetesClusterName
+	c.guestClusterDist = config.GC.ClusterDistribution
 	c.restClientConfig = k8s.GetRestClientConfigForSupervisor(ctx, config.GC.Endpoint, config.GC.Port)
 	c.supervisorClient, err = k8s.NewSupervisorClient(ctx, c.restClientConfig)
 	if err != nil {
@@ -109,7 +123,7 @@ func (c *controller) Init(config *commonconfig.Config, version string) error {
 		return err
 	}
 
-	c.vmOperatorClient, err = k8s.NewClientForGroup(ctx, c.restClientConfig, vmoperatortypes.GroupName)
+	c.vmOperatorClient, err = k8s.NewClientForGroup(ctx, c.restClientConfig, vmoperatorv1alpha4.GroupName)
 	if err != nil {
 		log.Errorf("failed to create vmOperatorClient. Error: %+v", err)
 		return err
@@ -124,6 +138,13 @@ func (c *controller) Init(config *commonconfig.Config, version string) error {
 	if err != nil {
 		log.Errorf("failed to create vmWatcher. Error: %+v", err)
 		return err
+	}
+
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) {
+		err := commonco.ContainerOrchestratorUtility.StartZonesInformer(ctx, c.restClientConfig, c.supervisorNamespace)
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to listen on zones CR. Error: %v", err)
+		}
 	}
 
 	pvcsiConfigPath := commonconfig.GetConfigPath(ctx)
@@ -214,7 +235,7 @@ func (c *controller) ReloadConfiguration() error {
 			return err
 		}
 		log.Infof("successfully re-created supervisorClient using updated configuration")
-		c.vmOperatorClient, err = k8s.NewClientForGroup(ctx, c.restClientConfig, vmoperatortypes.GroupName)
+		c.vmOperatorClient, err = k8s.NewClientForGroup(ctx, c.restClientConfig, vmoperatorv1alpha4.GroupName)
 		if err != nil {
 			log.Errorf("failed to create vmOperatorClient. Error: %+v", err)
 			return err
@@ -301,22 +322,33 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 		if err != nil {
 			if errors.IsNotFound(err) {
 				diskSize := strconv.FormatInt(volSizeMB, 10) + "Mi"
-				var annotations map[string]string
-				if !isFileVolumeRequest && commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) &&
-					req.AccessibilityRequirements != nil {
+				labels := make(map[string]string)
+				annotations := make(map[string]string)
+				key := fmt.Sprintf("%s/%s", c.tanzukubernetesClusterName, c.guestClusterDist)
+				labels[key] = c.tanzukubernetesClusterUID
+				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) &&
+					req.AccessibilityRequirements != nil &&
+					(commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) ||
+						!isFileVolumeRequest) {
 					// Generate volume topology requirement annotation.
-					annotations = make(map[string]string)
 					topologyAnnotation, err := generateGuestClusterRequestedTopologyJSON(req.AccessibilityRequirements.Preferred)
 					if err != nil {
 						msg := fmt.Sprintf("failed to generate accessibility topology for pvc with name: %s "+
 							"on namespace: %s from supervisorCluster. Error: %+v",
 							supervisorPVCName, c.supervisorNamespace, err)
-						return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+						return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 					}
 					annotations[common.AnnGuestClusterRequestedTopology] = topologyAnnotation
 				}
+				// Add CnsVolumeFinalizer to Supervisor PVC if SVPVCSnapshotProtectionFinalizer FSS is enabled
+				finalizers := []string{}
+				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+					common.SVPVCSnapshotProtectionFinalizer) {
+					finalizers = append(finalizers, cnsoperatortypes.CNSVolumeFinalizer)
+				}
 				claim := getPersistentVolumeClaimSpecWithStorageClass(supervisorPVCName, c.supervisorNamespace,
-					diskSize, supervisorStorageClass, getAccessMode(accessMode), annotations, volumeSnapshotName)
+					diskSize, supervisorStorageClass, getAccessMode(accessMode), annotations, labels,
+					finalizers, volumeSnapshotName)
 				log.Debugf("PVC claim spec is %+v", spew.Sdump(claim))
 				pvc, err = c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Create(
 					ctx, claim, metav1.CreateOptions{})
@@ -324,13 +356,13 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 					msg := fmt.Sprintf("failed to create pvc with name: %s on namespace: %s in supervisorCluster. Error: %+v",
 						supervisorPVCName, c.supervisorNamespace, err)
 					log.Error(msg)
-					return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+					return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 				}
 			} else {
 				msg := fmt.Sprintf("failed to get pvc with name: %s on namespace: %s from supervisorCluster. Error: %+v",
 					supervisorPVCName, c.supervisorNamespace, err)
 				log.Error(msg)
-				return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+				return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 			}
 		}
 		isBound, err := isPVCInSupervisorClusterBound(ctx, c.supervisorClient,
@@ -348,7 +380,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			if err != nil {
 				log.Errorf("Unable to fetch events for pvc %q/%q from supervisor cluster with err: %+v",
 					c.supervisorNamespace, pvc.Name, err)
-				return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+				return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 			}
 
 			var failureMessage string
@@ -365,7 +397,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 
 			log.Errorf("Last observed events on the pvc %q/%q in supervisor cluster: %+v",
 				c.supervisorNamespace, pvc.Name, spew.Sdump(eventList.Items))
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		attributes := make(map[string]string)
 		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.FileVolume) && isFileVolumeRequest {
@@ -396,8 +428,10 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 
 		// Calculate node affinity terms for topology aware provisioning.
 		var accessibleTopologies []map[string]string
-		if !isFileVolumeRequest && commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) &&
-			req.AccessibilityRequirements != nil {
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) &&
+			req.AccessibilityRequirements != nil &&
+			(commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) ||
+				!isFileVolumeRequest) {
 			// Retrieve the latest version of the PVC
 			pvc, err = c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Get(
 				ctx, supervisorPVCName, metav1.GetOptions{})
@@ -492,6 +526,28 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 				volumeType = prometheus.PrometheusFileVolumeType
 			}
 		}
+		// Remove the finalizer before deleting the Supervisor PVC if SVPVCSnapshotProtectionFinalizer FSS is enabled
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.SVPVCSnapshotProtectionFinalizer) {
+			for i, finalizer := range svPVC.ObjectMeta.Finalizers {
+				if finalizer == cnsoperatortypes.CNSVolumeFinalizer {
+					log.Infof("Removing %q finalizer from PersistentVolumeClaim with name: %q on namespace: %q",
+						cnsoperatortypes.CNSVolumeFinalizer, svPVC.Name, svPVC.Namespace)
+					svPVC.ObjectMeta.Finalizers = slices.Delete(svPVC.ObjectMeta.Finalizers, i, i+1)
+					// Update the instance after removing finalizer
+					_, err := c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Update(ctx, svPVC,
+						metav1.UpdateOptions{})
+					if err != nil {
+						msg := fmt.Sprintf("failed to update supervisor PVC %q in %q namespace. Error: %+v",
+							req.VolumeId, c.supervisorNamespace, err)
+						log.Error(msg)
+						return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
+					}
+					break
+				}
+			}
+		}
+
+		// Delete Supervisor PVC
 		err = c.supervisorClient.CoreV1().PersistentVolumeClaims(c.supervisorNamespace).Delete(
 			ctx, req.VolumeId, *metav1.NewDeleteOptions(0))
 		if err != nil {
@@ -501,8 +557,20 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 			}
 			msg := fmt.Sprintf("DeleteVolume Request: %+v has failed. Error: %+v", *req, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
+
+		// Wait for PVC to be deleted from supervisor cluster
+		err = common.WaitForPVCDeleted(ctx, c.supervisorClient,
+			req.VolumeId, c.supervisorNamespace,
+			time.Duration(getProvisionTimeoutInMin(ctx))*time.Minute)
+		if err != nil {
+			msg := fmt.Sprintf("persistentVolumeClaim: %s on namespace: %s in supervisor cluster was not deleted. "+
+				"Error: %+v", req.VolumeId, c.supervisorNamespace, err)
+			log.Error(msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
+		}
+
 		log.Infof("DeleteVolume: Volume deleted successfully. VolumeID: %q", req.VolumeId)
 		return &csi.DeleteVolumeResponse{}, "", nil
 	}
@@ -551,7 +619,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		if err != nil {
 			msg := fmt.Sprintf("Validation for PublishVolume Request: %+v has failed. Error: %v", *req, err)
 			log.Error(msg)
-			return nil, csifault.CSIInvalidArgumentFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInvalidArgumentFault, status.Error(codes.Internal, msg)
 		}
 
 		// File volumes support
@@ -597,7 +665,7 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 	var diskUUID string
 	var err error
 
-	virtualMachine := &vmoperatortypes.VirtualMachine{}
+	virtualMachine := &vmoperatorv1alpha4.VirtualMachine{}
 	vmKey := types.NamespacedName{
 		Namespace: c.supervisorNamespace,
 		Name:      req.NodeId,
@@ -606,10 +674,12 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 	timeoutSeconds := int64(getAttacherTimeoutInMin(ctx) * 60)
 	timeout := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 	for {
-		if err = c.vmOperatorClient.Get(ctx, vmKey, virtualMachine); err != nil {
+		virtualMachine, err = utils.GetVirtualMachineAllApiVersions(
+			ctx, vmKey, c.vmOperatorClient)
+		if err != nil {
 			msg := fmt.Sprintf("failed to get VirtualMachines for the node: %q. Error: %+v", req.NodeId, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		// Check if volume is already present in the virtualMachine.Spec.Volumes
 		for _, volume := range virtualMachine.Spec.Volumes {
@@ -622,26 +692,23 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 		if isVolumePresentInSpec {
 			break
 		}
-
 		// Create a patch for the VM prior to modifying it with the new volumes.
-		vmPatch := client.MergeFromWithOptions(
-			virtualMachine.DeepCopy(),
-			client.MergeFromWithOptimisticLock{})
-
+		old_virtualMachine := virtualMachine.DeepCopy()
 		// Volume is not present in the virtualMachine.Spec.Volumes, so adding
 		// volume in the spec and patching virtualMachine instance.
-		vmvolumes := vmoperatortypes.VirtualMachineVolume{
+		vmvolumes := vmoperatorv1alpha4.VirtualMachineVolume{
 			Name: req.VolumeId,
-			PersistentVolumeClaim: &vmoperatortypes.PersistentVolumeClaimVolumeSource{
-				PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: req.VolumeId,
+			VirtualMachineVolumeSource: vmoperatorv1alpha4.VirtualMachineVolumeSource{
+				PersistentVolumeClaim: &vmoperatorv1alpha4.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaimVolumeSource: corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: req.VolumeId,
+					},
 				},
 			},
 		}
 		virtualMachine.Spec.Volumes = append(virtualMachine.Spec.Volumes, vmvolumes)
-
 		// Issue a patch with the modified VM against the patch created above.
-		if err := c.vmOperatorClient.Patch(ctx, virtualMachine, vmPatch); err == nil {
+		if err := utils.PatchVirtualMachine(ctx, c.vmOperatorClient, virtualMachine, old_virtualMachine); err == nil {
 			break
 		} else {
 			log.Errorf("failed to update virtualmachine. Err: %v", err)
@@ -649,31 +716,30 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 		if time.Now().After(timeout) {
 			msg := fmt.Sprintf("timedout to update VirtualMachines %q", virtualMachine.Name)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
-		virtualMachine = &vmoperatortypes.VirtualMachine{}
+		virtualMachine = &vmoperatorv1alpha4.VirtualMachine{}
 	}
 
 	for _, volume := range virtualMachine.Status.Volumes {
-		if volume.Name == req.VolumeId && volume.Attached && volume.DiskUuid != "" {
-			diskUUID = volume.DiskUuid
+		if volume.Name == req.VolumeId && volume.Attached && volume.DiskUUID != "" {
+			diskUUID = volume.DiskUUID
 			isVolumeAttached = true
 			log.Infof("Volume %q is already attached in the virtualMachine.Spec.Volumes. Disk UUID: %q",
-				volume.Name, volume.DiskUuid)
+				volume.Name, volume.DiskUUID)
 			break
 		}
 	}
 	// volume is not attached, so wait until volume is attached and DiskUuid is set
 	if !isVolumeAttached {
-		watchVirtualMachine, err := c.vmWatcher.Watch(metav1.ListOptions{
-			FieldSelector:   fields.SelectorFromSet(fields.Set{"metadata.name": string(virtualMachine.Name)}).String(),
-			ResourceVersion: virtualMachine.ResourceVersion,
-			TimeoutSeconds:  &timeoutSeconds,
+		watchVirtualMachine, err := c.vmWatcher.WatchWithContext(ctx, metav1.ListOptions{
+			FieldSelector:  fields.SelectorFromSet(fields.Set{"metadata.name": string(virtualMachine.Name)}).String(),
+			TimeoutSeconds: &timeoutSeconds,
 		})
 		if err != nil {
 			msg := fmt.Sprintf("failed to watch virtualMachine %q with Error: %v", virtualMachine.Name, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		defer watchVirtualMachine.Stop()
 
@@ -682,11 +748,44 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 			// blocking wait for update event
 			log.Debugf("waiting for update on virtualmachine: %q", virtualMachine.Name)
 			event := <-watchVirtualMachine.ResultChan()
-			vm, ok := event.Object.(*vmoperatortypes.VirtualMachine)
+			vm := &vmoperatorv1alpha4.VirtualMachine{}
+			vm4, ok := event.Object.(*vmoperatorv1alpha4.VirtualMachine)
 			if !ok {
-				msg := fmt.Sprintf("Watch on virtualmachine %q timed out", virtualMachine.Name)
-				log.Error(msg)
-				return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+				vm3, ok := event.Object.(*vmoperatorv1alpha3.VirtualMachine)
+				if !ok {
+					vm2, ok := event.Object.(*vmoperatorv1alpha2.VirtualMachine)
+					if !ok {
+						vm1, ok := event.Object.(*vmoperatorv1alpha1.VirtualMachine)
+						if !ok {
+							msg := fmt.Sprintf("Watch on virtualmachine %q timed out", virtualMachine.Name)
+							log.Error(msg)
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
+						} else {
+							log.Infof("converting v1alpha1 VirtualMachine to v1alpha4 VirtualMachine, name %s", vm1.Name)
+							err = vmoperatorv1alpha1.Convert_v1alpha1_VirtualMachine_To_v1alpha4_VirtualMachine(
+								vm1, vm, nil)
+							if err != nil {
+								return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+							}
+						}
+					} else {
+						log.Infof("converting v1alpha2 VirtualMachine to v1alpha4 VirtualMachine, name %s", vm2.Name)
+						err = vmoperatorv1alpha2.Convert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(
+							vm2, vm, nil)
+						if err != nil {
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+						}
+					}
+				} else {
+					log.Infof("converting v1alpha2 VirtualMachine to v1alpha4 VirtualMachine, name %s", vm3.Name)
+					err = vmoperatorv1alpha3.Convert_v1alpha3_VirtualMachine_To_v1alpha4_VirtualMachine(
+						vm3, vm, nil)
+					if err != nil {
+						return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+					}
+				}
+			} else {
+				vm = vm4
 			}
 			if vm.Name != virtualMachine.Name {
 				log.Debugf("Observed vm name: %q, expecting vm name: %q, volumeID: %q",
@@ -697,16 +796,16 @@ func controllerPublishForBlockVolume(ctx context.Context, req *csi.ControllerPub
 				virtualMachine.Name, req.VolumeId)
 			for _, volume := range vm.Status.Volumes {
 				if volume.Name == req.VolumeId {
-					if volume.Attached && volume.DiskUuid != "" && volume.Error == "" {
-						diskUUID = volume.DiskUuid
+					if volume.Attached && volume.DiskUUID != "" && volume.Error == "" {
+						diskUUID = volume.DiskUUID
 						log.Infof("observed disk UUID %q is set for the volume %q on virtualmachine %q",
-							volume.DiskUuid, volume.Name, vm.Name)
+							volume.DiskUUID, volume.Name, vm.Name)
 					} else {
 						if volume.Error != "" {
 							msg := fmt.Sprintf("observed Error: %q is set on the volume %q on virtualmachine %q",
 								volume.Error, volume.Name, vm.Name)
 							log.Error(msg)
-							return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 						}
 					}
 					break
@@ -749,7 +848,7 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 			msg := fmt.Sprintf("failed to get CnsFileAccessConfig instance: %q/%q. Error: %+v",
 				c.supervisorNamespace, cnsFileAccessConfigInstance.Name, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		// Create the CnsFileAccessConfig instance since it is not found
 		cnsFileAccessConfigInstance = &cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{
@@ -767,7 +866,7 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 			msg := fmt.Sprintf("failed to create cnsFileAccessConfig: %q/%q. Error: %v",
 				c.supervisorNamespace, cnsFileAccessConfigInstance.Name, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 	}
 	log.Debugf("Found CnsFileAccessConfig: %q/%q", c.supervisorNamespace, cnsFileAccessConfigInstance.Name)
@@ -780,7 +879,7 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 			"A new instance will be created in the subsequent ControllerPublishVolume request",
 			c.supervisorNamespace, cnsFileAccessConfigInstance.Name)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	publishInfo := make(map[string]string)
 	// Verify if the CnsFileAccessConfig instance has status with done set to true and error is empty
@@ -802,12 +901,12 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 	if err != nil {
 		msg := fmt.Sprintf("failed to create cnsFileAccessConfigWatcher. Error: %+v", err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	// Attacher timeout, default is set to 4 minutes
 	timeoutSeconds := int64(getAttacherTimeoutInMin(ctx) * 60)
 	// Adding watch on the CnsFileAccessConfig instance to register for updates
-	watchCnsFileAccessConfig, err := cnsFileAccessConfigWatcher.Watch(metav1.ListOptions{
+	watchCnsFileAccessConfig, err := cnsFileAccessConfigWatcher.WatchWithContext(ctx, metav1.ListOptions{
 		FieldSelector:   fields.SelectorFromSet(fields.Set{"metadata.name": cnsFileAccessConfigInstance.Name}).String(),
 		ResourceVersion: cnsFileAccessConfigInstance.ResourceVersion,
 		TimeoutSeconds:  &timeoutSeconds,
@@ -815,7 +914,7 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 	if err != nil {
 		msg := fmt.Sprintf("failed to watch cnsfileaccessconfig %q with Error: %v", cnsFileAccessConfigInstance.Name, err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	defer watchCnsFileAccessConfig.Stop()
 	var cnsFileAccessConfigInstanceErr string
@@ -828,7 +927,7 @@ func controllerPublishForFileVolume(ctx context.Context, req *csi.ControllerPubl
 			msg := fmt.Sprintf("Watch on cnsfileaccessconfig instance %q timed out. Last seen error on the instance=%q",
 				cnsFileAccessConfigInstance.Name, cnsFileAccessConfigInstanceErr)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		if cnsfileaccessconfig.Name != cnsFileAccessConfigInstanceName {
 			log.Debugf("Observed cnsFileAccessConfig instance name: %q, expecting cnsFileAccessConfig instance name: %q",
@@ -946,7 +1045,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest, c *controller) (
 	*csi.ControllerUnpublishVolumeResponse, string, error) {
 	log := logger.GetLogger(ctx)
-	virtualMachine := &vmoperatortypes.VirtualMachine{}
+	virtualMachine := &vmoperatorv1alpha4.VirtualMachine{}
 	vmKey := types.NamespacedName{
 		Namespace: c.supervisorNamespace,
 		Name:      req.NodeId,
@@ -955,7 +1054,9 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 	timeoutSeconds := int64(getAttacherTimeoutInMin(ctx) * 60)
 	timeout := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
 	for {
-		if err := c.vmOperatorClient.Get(ctx, vmKey, virtualMachine); err != nil {
+		virtualMachine, err = utils.GetVirtualMachineAllApiVersions(
+			ctx, vmKey, c.vmOperatorClient)
+		if err != nil {
 			if errors.IsNotFound(err) {
 				log.Infof("VirtualMachine %s/%s not found. Assuming volume %s was detached.",
 					c.supervisorNamespace, req.NodeId, req.VolumeId)
@@ -963,7 +1064,7 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 			}
 			msg := fmt.Sprintf("failed to get VirtualMachines for node: %q. Error: %+v", req.NodeId, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		log.Debugf("Found VirtualMachine for node: %q.", req.NodeId)
 
@@ -972,7 +1073,7 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 				log.Debugf("Removing volume %q from VirtualMachine %q", volume.Name, virtualMachine.Name)
 				virtualMachine.Spec.Volumes = append(virtualMachine.Spec.Volumes[:index],
 					virtualMachine.Spec.Volumes[index+1:]...)
-				err = c.vmOperatorClient.Update(ctx, virtualMachine)
+				err = utils.UpdateVirtualMachine(ctx, c.vmOperatorClient, virtualMachine)
 				break
 			}
 		}
@@ -984,9 +1085,9 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 		if time.Now().After(timeout) {
 			msg := fmt.Sprintf("timedout to update VirtualMachines %q", virtualMachine.Name)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
-		virtualMachine = &vmoperatortypes.VirtualMachine{}
+		virtualMachine = &vmoperatorv1alpha4.VirtualMachine{}
 	}
 	isVolumePresentInVMStatus := false
 	for _, volume := range virtualMachine.Status.Volumes {
@@ -999,20 +1100,19 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 			req.VolumeId, req.NodeId)
 	} else {
 		// Watch virtual machine object and wait for volume name to be removed from the status field.
-		watchVirtualMachine, err := c.vmWatcher.Watch(metav1.ListOptions{
-			FieldSelector:   fields.SelectorFromSet(fields.Set{"metadata.name": string(virtualMachine.Name)}).String(),
-			ResourceVersion: virtualMachine.ResourceVersion,
-			TimeoutSeconds:  &timeoutSeconds,
+		watchVirtualMachine, err := c.vmWatcher.WatchWithContext(ctx, metav1.ListOptions{
+			FieldSelector:  fields.SelectorFromSet(fields.Set{"metadata.name": string(virtualMachine.Name)}).String(),
+			TimeoutSeconds: &timeoutSeconds,
 		})
 		if err != nil {
 			msg := fmt.Sprintf("failed to watch VirtualMachine %q with Error: %v", virtualMachine.Name, err)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		if watchVirtualMachine == nil {
 			msg := fmt.Sprintf("watchVirtualMachine for %q is nil", virtualMachine.Name)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 
 		}
 		defer watchVirtualMachine.Stop()
@@ -1023,11 +1123,41 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 			log.Debugf("Waiting for update on VirtualMachine: %q", virtualMachine.Name)
 			// Block on update events
 			event := <-watchVirtualMachine.ResultChan()
-			vm, ok := event.Object.(*vmoperatortypes.VirtualMachine)
+			vm := &vmoperatorv1alpha4.VirtualMachine{}
+			vm4, ok := event.Object.(*vmoperatorv1alpha4.VirtualMachine)
 			if !ok {
-				msg := fmt.Sprintf("Watch on virtualmachine %q timed out", virtualMachine.Name)
-				log.Error(msg)
-				return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+				vm3, ok := event.Object.(*vmoperatorv1alpha3.VirtualMachine)
+				if !ok {
+					vm2, ok := event.Object.(*vmoperatorv1alpha2.VirtualMachine)
+					if !ok {
+						vm1, ok := event.Object.(*vmoperatorv1alpha1.VirtualMachine)
+						if !ok {
+							msg := fmt.Sprintf("Watch on virtualmachine %q timed out", virtualMachine.Name)
+							log.Error(msg)
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
+						} else {
+							err = vmoperatorv1alpha1.Convert_v1alpha1_VirtualMachine_To_v1alpha4_VirtualMachine(
+								vm1, vm, nil)
+							if err != nil {
+								return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+							}
+						}
+					} else {
+						err = vmoperatorv1alpha2.Convert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(
+							vm2, vm, nil)
+						if err != nil {
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+						}
+					}
+				} else {
+					err = vmoperatorv1alpha3.Convert_v1alpha3_VirtualMachine_To_v1alpha4_VirtualMachine(
+						vm3, vm, nil)
+					if err != nil {
+						return nil, csifault.CSIInternalFault, status.Error(codes.Internal, err.Error())
+					}
+				}
+			} else {
+				vm = vm4
 			}
 			if vm.Name != virtualMachine.Name {
 				log.Debugf("Observed vm name: %q, expecting vm name: %q, volumeID: %q",
@@ -1045,7 +1175,7 @@ func controllerUnpublishForBlockVolume(ctx context.Context, req *csi.ControllerU
 							msg := fmt.Sprintf("failed to detach volume %q from VirtualMachine %q with Error: %v",
 								volume.Name, virtualMachine.Name, volume.Error)
 							log.Error(msg)
-							return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+							return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 						}
 						break
 					}
@@ -1070,7 +1200,7 @@ func controllerUnpublishForFileVolume(ctx context.Context, req *csi.ControllerUn
 	if err != nil {
 		msg := fmt.Sprintf("failed to create cnsFileAccessConfigWatcher. Error: %+v", err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	cnsFileAccessConfigInstance := &cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{}
 	cnsFileAccessConfigInstanceName := req.NodeId + "-" + req.VolumeId
@@ -1087,11 +1217,11 @@ func controllerUnpublishForFileVolume(ctx context.Context, req *csi.ControllerUn
 		msg := fmt.Sprintf("failed to get CnsFileAccessConfig instance: %q/%q. Error: %+v",
 			c.supervisorNamespace, cnsFileAccessConfigInstanceName, err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	// Attach/Detach timeout, default is set to 4 minutes
 	timeoutSeconds := int64(getAttacherTimeoutInMin(ctx) * 60)
-	watchCnsFileAccessConfig, err := cnsFileAccessConfigWatcher.Watch(metav1.ListOptions{
+	watchCnsFileAccessConfig, err := cnsFileAccessConfigWatcher.WatchWithContext(ctx, metav1.ListOptions{
 		FieldSelector:   fields.SelectorFromSet(fields.Set{"metadata.name": cnsFileAccessConfigInstanceName}).String(),
 		ResourceVersion: cnsFileAccessConfigInstance.ResourceVersion,
 		TimeoutSeconds:  &timeoutSeconds,
@@ -1100,7 +1230,7 @@ func controllerUnpublishForFileVolume(ctx context.Context, req *csi.ControllerUn
 		msg := fmt.Sprintf("failed to watch cnsFileAccessConfig instance %q/%q with Error: %v",
 			c.supervisorNamespace, cnsFileAccessConfigInstanceName, err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	if err := c.cnsOperatorClient.Delete(ctx, &cnsfileaccessconfigv1alpha1.CnsFileAccessConfig{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1116,7 +1246,7 @@ func controllerUnpublishForFileVolume(ctx context.Context, req *csi.ControllerUn
 		msg := fmt.Sprintf("failed to delete CnsFileAccessConfig instance: %q/%q. Error: %+v",
 			c.supervisorNamespace, cnsFileAccessConfigInstanceName, err)
 		log.Error(msg)
-		return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+		return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 	}
 	defer watchCnsFileAccessConfig.Stop()
 	var cnsFileAccessConfigInstanceErr string
@@ -1131,7 +1261,7 @@ func controllerUnpublishForFileVolume(ctx context.Context, req *csi.ControllerUn
 			msg := fmt.Sprintf("Watch on cnsfileaccessconfig instance %q/%q timed out. Last seen error on the instance=%q",
 				c.supervisorNamespace, cnsFileAccessConfigInstanceName, cnsFileAccessConfigInstanceErr)
 			log.Error(msg)
-			return nil, csifault.CSIInternalFault, status.Errorf(codes.Internal, msg)
+			return nil, csifault.CSIInternalFault, status.Error(codes.Internal, msg)
 		}
 		if cnsfileaccessconfig.Name != cnsFileAccessConfigInstanceName {
 			log.Debugf("Observed CnsFileAccessConfig instance name: %q, expecting CnsFileAccessConfig instance name: %q",
@@ -1193,8 +1323,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		volSizeBytes := int64(req.GetCapacityRange().GetRequiredBytes())
 
 		if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.OnlineVolumeExtend) {
-			vmList := &vmoperatortypes.VirtualMachineList{}
-			err = c.vmOperatorClient.List(ctx, vmList, client.InNamespace(c.supervisorNamespace))
+			vmList, err := utils.GetVirtualMachineListAllApiVersions(ctx, c.supervisorNamespace, c.vmOperatorClient)
 			if err != nil {
 				msg := fmt.Sprintf("failed to list virtualmachines with error: %+v", err)
 				log.Error(msg)
@@ -1341,11 +1470,38 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 
 func (c *controller) GetCapacity(ctx context.Context, req *csi.GetCapacityRequest) (
 	*csi.GetCapacityResponse, error) {
-
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
 	log.Infof("GetCapacity: called with args %+v", *req)
-	return nil, status.Error(codes.Unimplemented, "")
+
+	// Setting capacity to MaxInt64 for all topologies except for those which have been marked for deletion by VI Admin.
+	totalcapacity := int64(math.MaxInt64)
+	maxvolumesize := int64(math.MaxInt64)
+
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) {
+		zonesMap := commonco.ContainerOrchestratorUtility.GetZonesForNamespace(c.supervisorNamespace)
+		if req.AccessibleTopology != nil {
+			if zonesMap == nil {
+				return nil, logger.LogNewErrorCode(log, codes.Internal, "the guest cluster seems to be topology "+
+					"aware but CSI controller could not find zone instances in supervisor cluster.")
+			}
+
+			segments := req.AccessibleTopology.GetSegments()
+			if _, exists := zonesMap[segments["topology.kubernetes.io/zone"]]; !exists {
+				totalcapacity = 0
+				maxvolumesize = 0
+				log.Infof("Zone %q is either marked for deletion or is not part of the namespace %q. "+
+					"Setting capacity to 0.", segments["topology.kubernetes.io/zone"], c.supervisorNamespace)
+			}
+		} else {
+			log.Debug("Not a topology aware guest cluster")
+		}
+	}
+
+	return &csi.GetCapacityResponse{
+		AvailableCapacity: totalcapacity,
+		MaximumVolumeSize: &wrapperspb.Int64Value{Value: maxvolumesize},
+	}, nil
 }
 
 func (c *controller) ControllerGetCapabilities(ctx context.Context, req *csi.ControllerGetCapabilitiesRequest) (
@@ -1418,8 +1574,19 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 				// the supervisor cluster to indicate that snapshot creation is initiated from Guest cluster
 				annotation := make(map[string]string)
 				annotation[common.SupervisorVolumeSnapshotAnnotationKey] = "true"
+				labels := make(map[string]string)
+				finalizers := []string{}
+				// Add CnsSnapshotFinalizer and TKC label to Supervisor snapshot
+				// if SVPVCSnapshotProtectionFinalizer FSS is enabled
+				if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+					common.SVPVCSnapshotProtectionFinalizer) {
+					key := fmt.Sprintf("%s/%s", c.tanzukubernetesClusterName, c.guestClusterDist)
+					labels[key] = c.tanzukubernetesClusterUID
+					finalizers = append(finalizers, cnsoperatortypes.CNSSnapshotFinalizer)
+				}
 				supVolumeSnapshot := constructVolumeSnapshotWithVolumeSnapshotClass(supervisorVolumeSnapshotName,
-					c.supervisorNamespace, supervisorVolumeSnapshotClass, supervisorPVCName, annotation)
+					c.supervisorNamespace, supervisorVolumeSnapshotClass, supervisorPVCName, annotation,
+					labels, finalizers)
 				log.Infof("Supervisosr VolumeSnapshot Spec: %+v", supVolumeSnapshot)
 				_, err = c.supervisorSnapshotterClient.SnapshotV1().VolumeSnapshots(
 					c.supervisorNamespace).Create(ctx, supVolumeSnapshot, metav1.CreateOptions{})
@@ -1427,7 +1594,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 					msg := fmt.Sprintf("failed to create volumesnapshot with name: %s on namespace: %s "+
 						"in supervisorCluster. Error: %+v", supervisorVolumeSnapshotName, c.supervisorNamespace, err)
 					log.Error(msg)
-					return nil, status.Errorf(codes.Internal, msg)
+					return nil, status.Error(codes.Internal, msg)
 				}
 				log.Infof("Successfully created VolumeSnapshot %s/%s on the supervisor cluster",
 					c.supervisorNamespace, supervisorVolumeSnapshotName)
@@ -1436,7 +1603,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 					"namespace: %s in supervisorCluster. Error: %+v",
 					supervisorVolumeSnapshotName, c.supervisorNamespace, err)
 				log.Error(msg)
-				return nil, status.Errorf(codes.Internal, msg)
+				return nil, status.Error(codes.Internal, msg)
 			}
 		}
 		// Wait for VolumeSnapshot to be ready to use
@@ -1447,7 +1614,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 			msg := fmt.Sprintf("volumesnapshot: %s on namespace: %s in supervisor cluster was not Ready. "+
 				"Error: %+v", supervisorVolumeSnapshotName, c.supervisorNamespace, err)
 			log.Error(msg)
-			return nil, status.Errorf(codes.Internal, msg)
+			return nil, status.Error(codes.Internal, msg)
 		}
 		// Extract the fcd-id + snapshot-id annotation from the supervisor volumesnapshot CR
 		snapshotID := vs.Annotations[common.VolumeSnapshotInfoKey]
@@ -1514,7 +1681,29 @@ func (c *controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshot
 				msg := fmt.Sprintf("failed to retrieve the supervisor volumesnapshot %s/%s, Error: %+v",
 					c.supervisorNamespace, supervisorVolumeSnapshotName, err)
 				log.Error(msg)
-				return nil, status.Errorf(codes.Internal, msg)
+				return nil, status.Error(codes.Internal, msg)
+			}
+		}
+		// Remove the finalizer before deleting the Supervisor VolumeSnapshot,
+		// if SVPVCSnapshotProtectionFinalizer FSS is enabled
+		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.SVPVCSnapshotProtectionFinalizer) {
+			for i, finalizer := range supervisorVolumeSnapshot.ObjectMeta.Finalizers {
+				if finalizer == cnsoperatortypes.CNSSnapshotFinalizer {
+					log.Infof("Removing %q finalizer from VolumeSnapshot with name: %q on namespace: %q",
+						cnsoperatortypes.CNSSnapshotFinalizer, supervisorVolumeSnapshotName, c.supervisorNamespace)
+					supervisorVolumeSnapshot.ObjectMeta.Finalizers =
+						slices.Delete(supervisorVolumeSnapshot.ObjectMeta.Finalizers, i, i+1)
+					// Update the instance after removing finalizer
+					_, err = c.supervisorSnapshotterClient.SnapshotV1().VolumeSnapshots(c.supervisorNamespace).
+						Update(ctx, supervisorVolumeSnapshot, metav1.UpdateOptions{})
+					if err != nil {
+						msg := fmt.Sprintf("failed to update supervisor VolumeSnapshot %q in %q namespace. Error: %+v",
+							supervisorVolumeSnapshotName, c.supervisorNamespace, err)
+						log.Error(msg)
+						return nil, status.Error(codes.Internal, msg)
+					}
+					break
+				}
 			}
 		}
 		log.Infof("Found the supervisor volumesnapshot %s/%s on the supervisor cluster",
@@ -1531,8 +1720,20 @@ func (c *controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshot
 			msg := fmt.Sprintf("failed to delete the supervisor volumesnapshot %s/%s, Error: %+v",
 				c.supervisorNamespace, supervisorVolumeSnapshotName, err)
 			log.Error(msg)
-			return nil, status.Errorf(codes.Internal, msg)
+			return nil, status.Error(codes.Internal, msg)
 		}
+
+		// Wait for VolumeSnapshot to be deleted from supervisor cluster
+		err = common.WaitForVolumeSnapshotDeleted(ctx, c.supervisorSnapshotterClient,
+			supervisorVolumeSnapshotName, c.supervisorNamespace,
+			time.Duration(getSnapshotTimeoutInMin(ctx))*time.Minute)
+		if err != nil {
+			msg := fmt.Sprintf("volumeSnapshot: %s on namespace: %s in supervisor cluster was not deleted. "+
+				"Error: %+v", supervisorVolumeSnapshotName, c.supervisorNamespace, err)
+			log.Error(msg)
+			return nil, status.Error(codes.Internal, msg)
+		}
+
 		log.Infof("DeleteSnapshot: successfully deleted snapshot %q", csiSnapshotID)
 		return &csi.DeleteSnapshotResponse{}, nil
 	}
@@ -1582,7 +1783,7 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 				msg := fmt.Sprintf("failed to get volumesnapshot with name: %s on namespace: %s from "+
 					"Supervisor Cluster. Error: %+v", snapshotID, c.supervisorNamespace, err)
 				log.Error(msg)
-				return nil, status.Errorf(codes.Internal, msg)
+				return nil, status.Error(codes.Internal, msg)
 			}
 			entry := constructListSnapshotEntry(*vs)
 			entries = append(entries, entry)

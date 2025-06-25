@@ -34,8 +34,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-replica] Multi-VC-Replica", func() {
-	f := framework.NewDefaultFramework("multi-vc-replica")
+var _ = ginkgo.Describe("[multivc-multireplica] MultiVc-MultiReplica", func() {
+	f := framework.NewDefaultFramework("multivc-multireplica")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -78,8 +78,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-replica] Multi-VC-Replica", func() {
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 		nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
 
 		sshClientConfig = &ssh.ClientConfig{
@@ -136,7 +136,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-replica] Multi-VC-Replica", func() {
 
 	ginkgo.It("Verify behaviour when CSI-Provisioner, CSI-Attacher, Vsphere-Syncer is "+
 		"deleted repeatedly during workload creation in multivc", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

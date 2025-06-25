@@ -95,9 +95,8 @@ var (
 	isTopologyAwareFileVolumeEnabled bool
 
 	// variables for list volumes
-	volIDsInK8s               = make([]string, 0)
-	CNSVolumesforListVolume   = make([]cnstypes.CnsVolume, 0)
-	checkCompatibleDataStores = true
+	volIDsInK8s             = make([]string, 0)
+	CNSVolumesforListVolume = make([]cnstypes.CnsVolume, 0)
 
 	// errAllDSFilteredOut is an error thrown by auth service when it
 	// filters out all the potential shared datastores in a volume provisioning call.
@@ -781,8 +780,11 @@ func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolum
 		}
 
 		volumeInfo, faultType, err = common.CreateBlockVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
-			c.manager, &createVolumeSpec, sharedDatastores, filterSuspendedDatastores, false,
-			checkCompatibleDataStores, nil)
+			c.manager, &createVolumeSpec, sharedDatastores,
+			common.CreateBlockVolumeOptions{
+				FilterSuspendedDatastores: filterSuspendedDatastores,
+			},
+			nil)
 		if err != nil {
 			return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to create volume. Error: %+v", err)
@@ -912,13 +914,13 @@ func (c *controller) getAccessibleTopologiesForDatastore(ctx context.Context, vc
 		// Get UUID from VM reference.
 		vmUUID, err := cnsvsphere.GetUUIDFromVMReference(ctx, vcenter, vmref.Reference())
 		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				err.Error())
 		}
 		// Get NodeVM name from VM UUID.
 		nodeName, err := c.nodeMgr.GetNodeNameByUUID(ctx, vmUUID)
 		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				err.Error())
 		}
 		accessibleNodeNames = append(accessibleNodeNames, nodeName)
@@ -1544,13 +1546,13 @@ func (c *controller) calculateAccessibleTopologiesForDatastore(ctx context.Conte
 		// Get UUID from VM reference.
 		vmUUID, err := cnsvsphere.GetUUIDFromVMReference(ctx, vcenter, vmref.Reference())
 		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				err.Error())
 		}
 		// Get NodeVM name from VM UUID.
 		nodeName, err := c.nodeMgr.GetNodeNameByUUID(ctx, vmUUID)
 		if err != nil {
-			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				err.Error())
 		}
 		accessibleNodeNames = append(accessibleNodeNames, nodeName)
@@ -1848,7 +1850,7 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 				}
 				// TODO: Few errors encountered in CreateFileVolumeUtil can be retried instead of
 				// moving unto next VC. Need to throw a custom error for such scenarios.
-				volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
+				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
 					vcenter, c.managers.VolumeManagers[vcHost], c.managers.CnsConfig, &createVolumeSpec,
 					fsEnabledCandidateDatastores, filterSuspendedDatastores, false, nil)
 				if err != nil {
@@ -1856,6 +1858,7 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 					combinedErrMssgs = append(combinedErrMssgs, err.Error())
 					continue
 				}
+				volumeID = volumeInfo.VolumeID.Id
 				log.Infof("volume %q created in vCenter %q.", volumeID, vcHost)
 
 				// In case task was successful from previous run but the CR was not created.
@@ -1905,26 +1908,28 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 						"failed to get vCenter instance for host %q. Error: %+v", vcHost, err)
 				}
-				volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
+				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
 					vcenter, c.managers.VolumeManagers[vcHost], c.managers.CnsConfig, &createVolumeSpec,
 					filteredDatastores, filterSuspendedDatastores, false, nil)
 				if err != nil {
 					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 						"failed to create volume. Error: %+v", err)
 				}
+				volumeID = volumeInfo.VolumeID.Id
 			} else {
 				vcenter, err = c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
 				if err != nil {
 					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 						"failed to get vCenter. Error: %+v", err)
 				}
-				volumeID, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
+				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
 					vcenter, c.manager.VolumeManager, c.manager.CnsConfig, &createVolumeSpec,
 					filteredDatastores, filterSuspendedDatastores, false, nil)
 				if err != nil {
 					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 						"failed to create volume. Error: %+v", err)
 				}
+				volumeID = volumeInfo.VolumeID.Id
 			}
 		}
 	}
@@ -1949,10 +1954,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	start := time.Now()
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	if chkDataStoreCompatibility := req.Parameters["checkCompatibleDatastores"]; chkDataStoreCompatibility == "false" {
-		checkCompatibleDataStores = false
-		delete(req.Parameters, "checkCompatibleDatastores")
-	}
+
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	createVolumeInternal := func() (
 		*csi.CreateVolumeResponse, string, error) {
@@ -2656,11 +2658,6 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 			volIDsInK8s = commonco.ContainerOrchestratorUtility.GetAllK8sVolumes()
 			log.Debugf("Number of Volume IDs of PVs from K8s cluster %v, list of volumes %v", len(volIDsInK8s),
 				volIDsInK8s)
-			// Step 2: Get all Volume IDs from CNS QueryAll API
-			// Select only the volume type.
-			queryFilter := cnstypes.CnsQueryFilter{
-				ContainerClusterIds: []string{cfg.Global.ClusterID},
-			}
 			querySelection := cnstypes.CnsQuerySelection{
 				Names: []string{
 					string(cnstypes.QuerySelectionNameTypeVolumeType),
@@ -2671,7 +2668,8 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 			if multivCenterCSITopologyEnabled {
 				var cnsVolumes = make([]cnstypes.CnsVolume, 0)
 				for vcHost, volumeManager := range c.managers.VolumeManagers {
-					cnsQueryResult, err := volumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
+					cnsQueryResult, err := utils.QueryAllVolumesForCluster(ctx, volumeManager,
+						cfg.Global.ClusterID, querySelection)
 					if err != nil {
 						return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 							"queryVolume failed on Cluster ID %q for vCenter %s with err = %+v ",
@@ -2681,6 +2679,9 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 				}
 				CNSVolumesforListVolume = cnsVolumes
 			} else {
+				queryFilter := cnstypes.CnsQueryFilter{
+					ContainerClusterIds: []string{cfg.Global.ClusterID},
+				}
 				cnsQueryResult, err := c.manager.VolumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
 				if err != nil {
 					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
@@ -3066,12 +3067,12 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		// sign. That is, a string of "<UUID>+<UUID>". Because, all other CNS snapshot APIs still require both
 		// VolumeID and SnapshotID as the input, while corresponding snapshot APIs in upstream CSI require SnapshotID.
 		// So, we need to bridge the gap in vSphere CSI driver and return a combined SnapshotID to CSI Snapshotter.
-		snapshotID, snapshotCreateTimePtr, err := common.CreateSnapshotUtil(ctx, volumeManager, volumeID, req.Name)
+		snapshotID, cnsSnapshotInfo, err := common.CreateSnapshotUtil(ctx, volumeManager, volumeID, req.Name, nil)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to create snapshot on volume %q: %v", volumeID, err)
+				"failed to create snapshot on volume %q with error: %v", volumeID, err)
 		}
-		snapshotCreateTimeInProto := timestamppb.New(*snapshotCreateTimePtr)
+		snapshotCreateTimeInProto := timestamppb.New(cnsSnapshotInfo.SnapshotLatestOperationCompleteTime)
 
 		createSnapshotResponse := &csi.CreateSnapshotResponse{
 			Snapshot: &csi.Snapshot{
@@ -3086,7 +3087,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		log.Infof("CreateSnapshot succeeded for snapshot %s "+
 			"on volume %s size %d Time proto %+v Timestamp %+v Response: %+v",
 			snapshotID, volumeID, snapshotSizeInMB*common.MbInBytes, snapshotCreateTimeInProto,
-			*snapshotCreateTimePtr, createSnapshotResponse)
+			cnsSnapshotInfo.SnapshotLatestOperationCompleteTime, createSnapshotResponse)
 		return createSnapshotResponse, nil
 	}
 
@@ -3148,7 +3149,7 @@ func (c *controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshot
 
 	deleteSnapshotInternal := func() (*csi.DeleteSnapshotResponse, error) {
 		csiSnapshotID := req.GetSnapshotId()
-		err := common.DeleteSnapshotUtil(ctx, volumeManager, csiSnapshotID)
+		_, err := common.DeleteSnapshotUtil(ctx, volumeManager, csiSnapshotID, nil)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"Failed to delete snapshot %q. Error: %+v",

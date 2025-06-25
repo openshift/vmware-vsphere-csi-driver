@@ -1,4 +1,5 @@
-// Copyright (c) 2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha2
@@ -7,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
+	vmopv1a2common "github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
 )
 
 const (
@@ -23,11 +24,34 @@ const (
 	// For more information please see VirtualMachineImage.Status.Ready.
 	VirtualMachineConditionImageReady = "VirtualMachineImageReady"
 
-	VirtualMachineConditionNetworkReady = "VirtualMachineNetworkReady"
+	// VirtualMachineConditionVMSetResourcePolicyReady indicates that a referenced
+	// VirtualMachineSetResourcePolicy is Ready.
+	VirtualMachineConditionVMSetResourcePolicyReady = "VirtualMachineConditionVMSetResourcePolicyReady"
 
+	// VirtualMachineConditionStorageReady indicates that the storage prerequisites for the VM are ready.
 	VirtualMachineConditionStorageReady = "VirtualMachineStorageReady"
 
+	// VirtualMachineConditionBootstrapReady indicates that the bootstrap prerequisites for the VM are ready.
 	VirtualMachineConditionBootstrapReady = "VirtualMachineBootstrapReady"
+
+	// VirtualMachineConditionNetworkReady indicates that the network prerequisites for the VM are ready.
+	VirtualMachineConditionNetworkReady = "VirtualMachineNetworkReady"
+
+	// VirtualMachineConditionPlacementReady indicates that the placement decision for the VM is ready.
+	VirtualMachineConditionPlacementReady = "VirtualMachineConditionPlacementReady"
+
+	// VirtualMachineConditionCreated indicates that the VM has been created.
+	VirtualMachineConditionCreated = "VirtualMachineCreated"
+
+	// VirtualMachineClassConfigurationSynced indicates that the VM's current configuration is synced to the
+	// current version of its VirtualMachineClass.
+	VirtualMachineClassConfigurationSynced = "VirtualMachineClassConfigurationSynced"
+)
+
+const (
+	// GuestBootstrapCondition exposes the status of guest bootstrap from within
+	// the guest OS, when available.
+	GuestBootstrapCondition = "GuestBootstrap"
 )
 
 const (
@@ -71,6 +95,19 @@ const (
 )
 
 const (
+	// VirtualMachineReconcileReady exposes the status of VirtualMachine reconciliation.
+	VirtualMachineReconcileReady = "VirtualMachineReconcileReady"
+
+	// VirtualMachineReconcileRunningReason indicates that VirtualMachine
+	// reconciliation is running.
+	VirtualMachineReconcileRunningReason = "VirtualMachineReconcileRunning"
+
+	// VirtualMachineReconcilePausedReason indicates that VirtualMachine
+	// reconciliation is being paused.
+	VirtualMachineReconcilePausedReason = "VirtualMachineReconcilePaused"
+)
+
+const (
 	// PauseAnnotation is an annotation that prevents a VM from being
 	// reconciled.
 	//
@@ -80,6 +117,43 @@ const (
 	//
 	// The VM will not be reconciled again until this annotation is removed.
 	PauseAnnotation = GroupName + "/pause-reconcile"
+
+	// InstanceIDAnnotation is an annotation that can be applied to set Cloud-Init metadata Instance ID.
+	//
+	// This cannot be set by users. It is for VM Operator to handle corner cases.
+	//
+	// In a corner case where a VM first boot failed to bootstrap with Cloud-Init, VM Operator sets Instance ID
+	// the same with the first boot Instance ID to prevent Cloud-Init from treating this VM as first boot
+	// due to different Instance ID. This annotation is used in upgrade script.
+	InstanceIDAnnotation = GroupName + "/cloud-init-instance-id"
+
+	// FirstBootDoneAnnotation is an annotation that indicates the VM has been
+	// booted at least once. This annotation cannot be set by users and will not
+	// be removed once set until the VM is deleted.
+	FirstBootDoneAnnotation = "virtualmachine." + GroupName + "/first-boot-done"
+)
+
+const (
+	// ManagedByExtensionKey and ManagedByExtensionType represent the ManagedBy
+	// field on the VM. They are used to differentiate VM Service managed VMs
+	// from traditional vSphere VMs.
+	ManagedByExtensionKey  = "com.vmware.vcenter.wcp"
+	ManagedByExtensionType = "VirtualMachine"
+)
+
+const (
+	// PauseVMExtraConfigKey is the ExtraConfig key to allow override
+	// operations for admins to pause reconciliation of VM Service VM.
+	//
+	// Please note, the value that takes effect is the string "True"(case-insensitive).
+	PauseVMExtraConfigKey = "vmservice.virtualmachine.pause"
+
+	// PausedVMLabelKey is the label key to identify VMs that reconciliation
+	// are paused. Value will specify whose operation is responsible for
+	// the pause. It can be admins or devops or both.
+	//
+	// Only privileged user can edit this label.
+	PausedVMLabelKey = GroupName + "/paused"
 )
 
 // VirtualMachinePowerState defines a VM's desired and observed power states.
@@ -101,7 +175,7 @@ const (
 )
 
 // VirtualMachinePowerOpMode represents the various power operation modes when
-// when powering off or suspending a VM.
+// powering off or suspending a VM.
 // +kubebuilder:validation:Enum=Hard;Soft;TrySoft
 type VirtualMachinePowerOpMode string
 
@@ -135,24 +209,25 @@ type VirtualMachineSpec struct {
 	//
 	// This field may be used to specify the name of a VirtualMachineImage
 	// or ClusterVirtualMachineImage resource. The resolver first checks to see
-	// if there is a ClusterVirtualMachineImage with the specified name. If no
-	// such resource exists, the resolver then checks to see if there is a
-	// VirtualMachineImage resource with the specified name in the same
-	// Namespace as the VM being deployed.
+	// if there is a VirtualMachineImage with the specified name in the
+	// same namespace as the VM being deployed. If no such resource exists, the
+	// resolver then checks to see if there is a ClusterVirtualMachineImage
+	// resource with the specified name.
 	//
-	// This field is optional in the cases where there exists a sensible
-	// default value, such as when there is a single VirtualMachineImage
-	// resource available in the same Namespace as the VM being deployed.
+	// This field may also be used to specify the display name (vSphere name) of
+	// a VirtualMachineImage or ClusterVirtualMachineImage resource. If the
+	// display name unambiguously resolves to a distinct VM image (among all
+	// existing VirtualMachineImages in the VM's namespace and all existing
+	// ClusterVirtualMachineImages), then a mutation webhook updates this field
+	// with the VM image resource name. If the display name resolves to multiple
+	// or no VM images, then the mutation webhook denies the request and outputs
+	// an error message accordingly.
 	//
 	// +optional
 	ImageName string `json:"imageName,omitempty"`
 
-	// Class describes the name of the VirtualMachineClass resource used to
+	// ClassName describes the name of the VirtualMachineClass resource used to
 	// deploy this VM.
-	//
-	// This field is optional in the cases where there exists a sensible
-	// default value, such as when there is a single VirtualMachineClass
-	// resource available in the same Namespace as the VM being deployed.
 	//
 	// +optional
 	ClassName string `json:"className,omitempty"`
@@ -163,27 +238,17 @@ type VirtualMachineSpec struct {
 	// Please see https://kubernetes.io/docs/concepts/storage/storage-classes/
 	// for more information on Kubernetes storage classes.
 	//
-	// This field is optional in the cases where there exists a sensible
-	// default value, such as when there is a single StorageClass
-	// resource available in the same Namespace as the VM being deployed.
-	//
 	// +optional
 	StorageClass string `json:"storageClass,omitempty"`
 
 	// Bootstrap describes the desired state of the guest's bootstrap
 	// configuration.
 	//
-	// If omitted, then the bootstrap method is determined based on the guest
-	// identifier from the VirtualMachineImage. If the image's guest OS type is
-	// Windows, then the Sysprep bootstrap method is used; if Linux, the
-	// LinuxPrep method is used.
-	//
-	// Please note that defaulting to Sysprep for Windows images only works if
-	// the image uses a volume license key, otherwise the image's product ID is
-	// required.
+	// If omitted, a default bootstrap method may be selected based on the
+	// guest OS identifier. If Linux, then the LinuxPrep method is used.
 	//
 	// +optional
-	Bootstrap VirtualMachineBootstrapSpec `json:"bootstrap,omitempty"`
+	Bootstrap *VirtualMachineBootstrapSpec `json:"bootstrap,omitempty"`
 
 	// Network describes the desired network configuration for the VM.
 	//
@@ -192,7 +257,7 @@ type VirtualMachineSpec struct {
 	// Namespace's default network.
 	//
 	// +optional
-	Network VirtualMachineNetworkSpec `json:"network,omitempty"`
+	Network *VirtualMachineNetworkSpec `json:"network,omitempty"`
 
 	// PowerState describes the desired power state of a VirtualMachine.
 	//
@@ -282,23 +347,11 @@ type VirtualMachineSpec struct {
 	// ReadinessProbe describes a probe used to determine the VM's ready state.
 	//
 	// +optional
-	ReadinessProbe VirtualMachineReadinessProbeSpec `json:"readinessProbe,omitempty"`
-
-	// ReadinessGates, if specified, will be evaluated to determine the VM's
-	// readiness.
-	//
-	// A VM is ready when its readiness probe, if specified, is true AND all of
-	// the conditions specified by the readiness gates have a status equal to
-	// "True".
-	//
-	// +optional
-	// +listType=map
-	// +listMapKey=conditionType
-	ReadinessGates []VirtualMachineReadinessGate `json:"readinessGates,omitempty"`
+	ReadinessProbe *VirtualMachineReadinessProbeSpec `json:"readinessProbe,omitempty"`
 
 	// Advanced describes a set of optional, advanced VM configuration options.
 	// +optional
-	Advanced VirtualMachineAdvancedSpec `json:"advanced,omitempty"`
+	Advanced *VirtualMachineAdvancedSpec `json:"advanced,omitempty"`
 
 	// Reserved describes a set of VM configuration options reserved for system
 	// use.
@@ -307,7 +360,46 @@ type VirtualMachineSpec struct {
 	// will result in a validation error.
 	//
 	// +optional
-	Reserved VirtualMachineReservedSpec `json:"reserved,omitempty"`
+	Reserved *VirtualMachineReservedSpec `json:"reserved,omitempty"`
+
+	// +optional
+	// +kubebuilder:validation:Minimum=13
+
+	// MinHardwareVersion describes the desired, minimum hardware version.
+	//
+	// The logic that determines the hardware version is as follows:
+	//
+	// 1. If this field is set, then its value is used.
+	// 2. Otherwise, if the VirtualMachineClass used to deploy the VM contains a
+	//    non-empty hardware version, then it is used.
+	// 3. Finally, if the hardware version is still undetermined, the value is
+	//    set to the default hardware version for the Datacenter/Cluster/Host
+	//    where the VM is provisioned.
+	//
+	// This field is never updated to reflect the derived hardware version.
+	// Instead, VirtualMachineStatus.HardwareVersion surfaces
+	// the observed hardware version.
+	//
+	// Please note, setting this field's value to N ensures a VM's hardware
+	// version is equal to or greater than N. For example, if a VM's observed
+	// hardware version is 10 and this field's value is 13, then the VM will be
+	// upgraded to hardware version 13. However, if the observed hardware
+	// version is 17 and this field's value is 13, no change will occur.
+	//
+	// Several features are hardware version dependent, for example:
+	//
+	// * NVMe Controllers                >= 14
+	// * Dynamic Direct Path I/O devices >= 17
+	//
+	// Please refer to https://kb.vmware.com/s/article/1003746 for a list of VM
+	// hardware versions.
+	//
+	// It is important to remember that a VM's hardware version may not be
+	// downgraded and upgrading a VM deployed from an image based on an older
+	// hardware version to a more recent one may result in unpredictable
+	// behavior. In other words, please be careful when choosing to upgrade a
+	// VM to a newer hardware version.
+	MinHardwareVersion int32 `json:"minHardwareVersion,omitempty"`
 }
 
 // VirtualMachineReservedSpec describes a set of VM configuration options
@@ -335,7 +427,7 @@ type VirtualMachineAdvancedSpec struct {
 	// affect the VM.
 	//
 	// +optional
-	BootDiskCapacity resource.Quantity `json:"bootDiskCapacity,omitempty"`
+	BootDiskCapacity *resource.Quantity `json:"bootDiskCapacity,omitempty"`
 
 	// DefaultVolumeProvisioningMode specifies the default provisioning mode for
 	// persistent volumes managed by this VM.
@@ -348,7 +440,7 @@ type VirtualMachineAdvancedSpec struct {
 	// VMware Data Recovery.
 	//
 	// +optional
-	ChangeBlockTracking bool `json:"changeBlockTracking,omitempty"`
+	ChangeBlockTracking *bool `json:"changeBlockTracking,omitempty"`
 }
 
 // VirtualMachineStatus defines the observed state of a VirtualMachine instance.
@@ -357,13 +449,13 @@ type VirtualMachineStatus struct {
 	// this VM.
 	//
 	// +optional
-	Image *common.LocalObjectRef `json:"image,omitempty"`
+	Image *vmopv1a2common.LocalObjectRef `json:"image,omitempty"`
 
 	// Class is a reference to the VirtualMachineClass resource used to deploy
 	// this VM.
 	//
 	// +optional
-	Class *common.LocalObjectRef `json:"class,omitempty"`
+	Class *vmopv1a2common.LocalObjectRef `json:"class,omitempty"`
 
 	// Host describes the hostname or IP address of the infrastructure host
 	// where the VM is executed.
@@ -428,16 +520,25 @@ type VirtualMachineStatus struct {
 	//
 	// +optional
 	LastRestartTime *metav1.Time `json:"lastRestartTime,omitempty"`
+
+	// HardwareVersion describes the VirtualMachine resource's observed
+	// hardware version.
+	//
+	// Please refer to VirtualMachineSpec.MinHardwareVersion for more
+	// information on the topic of a VM's hardware version.
+	//
+	// +optional
+	HardwareVersion int32 `json:"hardwareVersion,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vm
-// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Class",type="string",priority=1,JSONPath=".status.class.name"
-// +kubebuilder:printcolumn:name="Image",type="string",priority=1,JSONPath=".status.image.name"
-// +kubebuilder:printcolumn:name="PowerState",type="string",JSONPath=".status.powerState"
+// +kubebuilder:printcolumn:name="Power-State",type="string",JSONPath=".status.powerState"
+// +kubebuilder:printcolumn:name="Class",type="string",priority=1,JSONPath=".spec.className"
+// +kubebuilder:printcolumn:name="Image",type="string",priority=1,JSONPath=".spec.imageName"
 // +kubebuilder:printcolumn:name="Primary-IP4",type="string",priority=1,JSONPath=".status.network.primaryIP4"
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
 
 // VirtualMachine is the schema for the virtualmachines API and represents the
 // desired state and observed status of a virtualmachines resource.
@@ -449,8 +550,16 @@ type VirtualMachine struct {
 	Status VirtualMachineStatus `json:"status,omitempty"`
 }
 
-func (vm VirtualMachine) NamespacedName() string {
+func (vm *VirtualMachine) NamespacedName() string {
 	return vm.Namespace + "/" + vm.Name
+}
+
+func (vm *VirtualMachine) GetConditions() []metav1.Condition {
+	return vm.Status.Conditions
+}
+
+func (vm *VirtualMachine) SetConditions(conditions []metav1.Condition) {
+	vm.Status.Conditions = conditions
 }
 
 // +kubebuilder:object:root=true
@@ -463,5 +572,5 @@ type VirtualMachineList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachine{}, &VirtualMachineList{})
+	objectTypes = append(objectTypes, &VirtualMachine{}, &VirtualMachineList{})
 }

@@ -52,7 +52,6 @@ import (
 	hashutil "k8s.io/kubernetes/pkg/util/hash"
 	taintutils "k8s.io/kubernetes/pkg/util/taints"
 	"k8s.io/utils/clock"
-	"k8s.io/utils/integer"
 
 	"k8s.io/klog/v2"
 )
@@ -84,6 +83,16 @@ const (
 	// The number of batches is given by:
 	//      1+floor(log_2(ceil(N/SlowStartInitialBatchSize)))
 	SlowStartInitialBatchSize = 1
+
+	// PodNodeNameKeyIndex is the name of the index used by PodInformer to index pods by their node name.
+	PodNodeNameKeyIndex = "spec.nodeName"
+
+	// OrphanPodIndexKey is used to index all Orphan pods to this key
+	OrphanPodIndexKey = "_ORPHAN_POD"
+
+	// podControllerUIDIndex is the name for the Pod store's index function,
+	// which is to index by pods's controllerUID.
+	PodControllerUIDIndex = "podControllerUID"
 )
 
 var UpdateTaintBackoff = wait.Backoff{
@@ -146,15 +155,15 @@ var ExpKeyFunc = func(obj interface{}) (string, error) {
 // types of controllers, because the keys might conflict across types.
 type ControllerExpectationsInterface interface {
 	GetExpectations(controllerKey string) (*ControlleeExpectations, bool, error)
-	SatisfiedExpectations(controllerKey string) bool
-	DeleteExpectations(controllerKey string)
-	SetExpectations(controllerKey string, add, del int) error
-	ExpectCreations(controllerKey string, adds int) error
-	ExpectDeletions(controllerKey string, dels int) error
-	CreationObserved(controllerKey string)
-	DeletionObserved(controllerKey string)
-	RaiseExpectations(controllerKey string, add, del int)
-	LowerExpectations(controllerKey string, add, del int)
+	SatisfiedExpectations(logger klog.Logger, controllerKey string) bool
+	DeleteExpectations(logger klog.Logger, controllerKey string)
+	SetExpectations(logger klog.Logger, controllerKey string, add, del int) error
+	ExpectCreations(logger klog.Logger, controllerKey string, adds int) error
+	ExpectDeletions(logger klog.Logger, controllerKey string, dels int) error
+	CreationObserved(logger klog.Logger, controllerKey string)
+	DeletionObserved(logger klog.Logger, controllerKey string)
+	RaiseExpectations(logger klog.Logger, controllerKey string, add, del int)
+	LowerExpectations(logger klog.Logger, controllerKey string, add, del int)
 }
 
 // ControllerExpectations is a cache mapping controllers to what they expect to see before being woken up for a sync.
@@ -172,10 +181,11 @@ func (r *ControllerExpectations) GetExpectations(controllerKey string) (*Control
 }
 
 // DeleteExpectations deletes the expectations of the given controller from the TTLStore.
-func (r *ControllerExpectations) DeleteExpectations(controllerKey string) {
+func (r *ControllerExpectations) DeleteExpectations(logger klog.Logger, controllerKey string) {
 	if exp, exists, err := r.GetByKey(controllerKey); err == nil && exists {
 		if err := r.Delete(exp); err != nil {
-			klog.V(2).Infof("Error deleting expectations for controller %v: %v", controllerKey, err)
+
+			logger.V(2).Info("Error deleting expectations", "controller", controllerKey, "err", err)
 		}
 	}
 }
@@ -183,27 +193,27 @@ func (r *ControllerExpectations) DeleteExpectations(controllerKey string) {
 // SatisfiedExpectations returns true if the required adds/dels for the given controller have been observed.
 // Add/del counts are established by the controller at sync time, and updated as controllees are observed by the controller
 // manager.
-func (r *ControllerExpectations) SatisfiedExpectations(controllerKey string) bool {
+func (r *ControllerExpectations) SatisfiedExpectations(logger klog.Logger, controllerKey string) bool {
 	if exp, exists, err := r.GetExpectations(controllerKey); exists {
 		if exp.Fulfilled() {
-			klog.V(4).Infof("Controller expectations fulfilled %#v", exp)
+			logger.V(4).Info("Controller expectations fulfilled", "expectations", exp)
 			return true
 		} else if exp.isExpired() {
-			klog.V(4).Infof("Controller expectations expired %#v", exp)
+			logger.V(4).Info("Controller expectations expired", "expectations", exp)
 			return true
 		} else {
-			klog.V(4).Infof("Controller still waiting on expectations %#v", exp)
+			logger.V(4).Info("Controller still waiting on expectations", "expectations", exp)
 			return false
 		}
 	} else if err != nil {
-		klog.V(2).Infof("Error encountered while checking expectations %#v, forcing sync", err)
+		logger.V(2).Info("Error encountered while checking expectations, forcing sync", "err", err)
 	} else {
 		// When a new controller is created, it doesn't have expectations.
 		// When it doesn't see expected watch events for > TTL, the expectations expire.
 		//	- In this case it wakes up, creates/deletes controllees, and sets expectations again.
 		// When it has satisfied expectations and no controllees need to be created/destroyed > TTL, the expectations expire.
 		//	- In this case it continues without setting expectations till it needs to create/delete controllees.
-		klog.V(4).Infof("Controller %v either never recorded expectations, or the ttl expired.", controllerKey)
+		logger.V(4).Info("Controller either never recorded expectations, or the ttl expired", "controller", controllerKey)
 	}
 	// Trigger a sync if we either encountered and error (which shouldn't happen since we're
 	// getting from local store) or this controller hasn't established expectations.
@@ -218,46 +228,46 @@ func (exp *ControlleeExpectations) isExpired() bool {
 }
 
 // SetExpectations registers new expectations for the given controller. Forgets existing expectations.
-func (r *ControllerExpectations) SetExpectations(controllerKey string, add, del int) error {
+func (r *ControllerExpectations) SetExpectations(logger klog.Logger, controllerKey string, add, del int) error {
 	exp := &ControlleeExpectations{add: int64(add), del: int64(del), key: controllerKey, timestamp: clock.RealClock{}.Now()}
-	klog.V(4).Infof("Setting expectations %#v", exp)
+	logger.V(4).Info("Setting expectations", "expectations", exp)
 	return r.Add(exp)
 }
 
-func (r *ControllerExpectations) ExpectCreations(controllerKey string, adds int) error {
-	return r.SetExpectations(controllerKey, adds, 0)
+func (r *ControllerExpectations) ExpectCreations(logger klog.Logger, controllerKey string, adds int) error {
+	return r.SetExpectations(logger, controllerKey, adds, 0)
 }
 
-func (r *ControllerExpectations) ExpectDeletions(controllerKey string, dels int) error {
-	return r.SetExpectations(controllerKey, 0, dels)
+func (r *ControllerExpectations) ExpectDeletions(logger klog.Logger, controllerKey string, dels int) error {
+	return r.SetExpectations(logger, controllerKey, 0, dels)
 }
 
 // Decrements the expectation counts of the given controller.
-func (r *ControllerExpectations) LowerExpectations(controllerKey string, add, del int) {
+func (r *ControllerExpectations) LowerExpectations(logger klog.Logger, controllerKey string, add, del int) {
 	if exp, exists, err := r.GetExpectations(controllerKey); err == nil && exists {
 		exp.Add(int64(-add), int64(-del))
 		// The expectations might've been modified since the update on the previous line.
-		klog.V(4).Infof("Lowered expectations %#v", exp)
+		logger.V(4).Info("Lowered expectations", "expectations", exp)
 	}
 }
 
 // Increments the expectation counts of the given controller.
-func (r *ControllerExpectations) RaiseExpectations(controllerKey string, add, del int) {
+func (r *ControllerExpectations) RaiseExpectations(logger klog.Logger, controllerKey string, add, del int) {
 	if exp, exists, err := r.GetExpectations(controllerKey); err == nil && exists {
 		exp.Add(int64(add), int64(del))
 		// The expectations might've been modified since the update on the previous line.
-		klog.V(4).Infof("Raised expectations %#v", exp)
+		logger.V(4).Info("Raised expectations", "expectations", exp)
 	}
 }
 
 // CreationObserved atomically decrements the `add` expectation count of the given controller.
-func (r *ControllerExpectations) CreationObserved(controllerKey string) {
-	r.LowerExpectations(controllerKey, 1, 0)
+func (r *ControllerExpectations) CreationObserved(logger klog.Logger, controllerKey string) {
+	r.LowerExpectations(logger, controllerKey, 1, 0)
 }
 
 // DeletionObserved atomically decrements the `del` expectation count of the given controller.
-func (r *ControllerExpectations) DeletionObserved(controllerKey string) {
-	r.LowerExpectations(controllerKey, 0, 1)
+func (r *ControllerExpectations) DeletionObserved(logger klog.Logger, controllerKey string) {
+	r.LowerExpectations(logger, controllerKey, 0, 1)
 }
 
 // ControlleeExpectations track controllee creates/deletes.
@@ -285,6 +295,20 @@ func (e *ControlleeExpectations) Fulfilled() bool {
 // GetExpectations returns the add and del expectations of the controllee.
 func (e *ControlleeExpectations) GetExpectations() (int64, int64) {
 	return atomic.LoadInt64(&e.add), atomic.LoadInt64(&e.del)
+}
+
+// MarshalLog makes a thread-safe copy of the values of the expectations that
+// can be used for logging.
+func (e *ControlleeExpectations) MarshalLog() interface{} {
+	return struct {
+		add int64
+		del int64
+		key string
+	}{
+		add: atomic.LoadInt64(&e.add),
+		del: atomic.LoadInt64(&e.del),
+		key: e.key,
+	}
 }
 
 // NewControllerExpectations returns a store for ControllerExpectations.
@@ -335,47 +359,47 @@ func (u *UIDTrackingControllerExpectations) GetUIDs(controllerKey string) sets.S
 }
 
 // ExpectDeletions records expectations for the given deleteKeys, against the given controller.
-func (u *UIDTrackingControllerExpectations) ExpectDeletions(rcKey string, deletedKeys []string) error {
+func (u *UIDTrackingControllerExpectations) ExpectDeletions(logger klog.Logger, rcKey string, deletedKeys []string) error {
 	expectedUIDs := sets.NewString()
 	for _, k := range deletedKeys {
 		expectedUIDs.Insert(k)
 	}
-	klog.V(4).Infof("Controller %v waiting on deletions for: %+v", rcKey, deletedKeys)
+	logger.V(4).Info("Controller waiting on deletions", "controller", rcKey, "keys", deletedKeys)
 	u.uidStoreLock.Lock()
 	defer u.uidStoreLock.Unlock()
 
 	if existing := u.GetUIDs(rcKey); existing != nil && existing.Len() != 0 {
-		klog.Errorf("Clobbering existing delete keys: %+v", existing)
+		logger.Error(nil, "Clobbering existing delete keys", "keys", existing)
 	}
 	if err := u.uidStore.Add(&UIDSet{expectedUIDs, rcKey}); err != nil {
 		return err
 	}
-	return u.ControllerExpectationsInterface.ExpectDeletions(rcKey, expectedUIDs.Len())
+	return u.ControllerExpectationsInterface.ExpectDeletions(logger, rcKey, expectedUIDs.Len())
 }
 
 // DeletionObserved records the given deleteKey as a deletion, for the given rc.
-func (u *UIDTrackingControllerExpectations) DeletionObserved(rcKey, deleteKey string) {
+func (u *UIDTrackingControllerExpectations) DeletionObserved(logger klog.Logger, rcKey, deleteKey string) {
 	u.uidStoreLock.Lock()
 	defer u.uidStoreLock.Unlock()
 
 	uids := u.GetUIDs(rcKey)
 	if uids != nil && uids.Has(deleteKey) {
-		klog.V(4).Infof("Controller %v received delete for pod %v", rcKey, deleteKey)
-		u.ControllerExpectationsInterface.DeletionObserved(rcKey)
+		logger.V(4).Info("Controller received delete for pod", "controller", rcKey, "key", deleteKey)
+		u.ControllerExpectationsInterface.DeletionObserved(logger, rcKey)
 		uids.Delete(deleteKey)
 	}
 }
 
 // DeleteExpectations deletes the UID set and invokes DeleteExpectations on the
 // underlying ControllerExpectationsInterface.
-func (u *UIDTrackingControllerExpectations) DeleteExpectations(rcKey string) {
+func (u *UIDTrackingControllerExpectations) DeleteExpectations(logger klog.Logger, rcKey string) {
 	u.uidStoreLock.Lock()
 	defer u.uidStoreLock.Unlock()
 
-	u.ControllerExpectationsInterface.DeleteExpectations(rcKey)
+	u.ControllerExpectationsInterface.DeleteExpectations(logger, rcKey)
 	if uidExp, exists, err := u.uidStore.GetByKey(rcKey); err == nil && exists {
 		if err := u.uidStore.Delete(uidExp); err != nil {
-			klog.V(2).Infof("Error deleting uid expectations for controller %v: %v", rcKey, err)
+			logger.V(2).Info("Error deleting uid expectations", "controller", rcKey, "err", err)
 		}
 	}
 }
@@ -573,12 +597,13 @@ func (r RealPodControl) createPods(ctx context.Context, namespace string, pod *v
 		}
 		return err
 	}
+	logger := klog.FromContext(ctx)
 	accessor, err := meta.Accessor(object)
 	if err != nil {
-		klog.Errorf("parentObject does not have ObjectMeta, %v", err)
+		logger.Error(err, "parentObject does not have ObjectMeta")
 		return nil
 	}
-	klog.V(4).Infof("Controller %v created pod %v", accessor.GetName(), newPod.Name)
+	logger.V(4).Info("Controller created pod", "controller", accessor.GetName(), "pod", klog.KObj(newPod))
 	r.Recorder.Eventf(object, v1.EventTypeNormal, SuccessfulCreatePodReason, "Created pod: %v", newPod.Name)
 
 	return nil
@@ -589,10 +614,11 @@ func (r RealPodControl) DeletePod(ctx context.Context, namespace string, podID s
 	if err != nil {
 		return fmt.Errorf("object does not have ObjectMeta, %v", err)
 	}
-	klog.V(2).InfoS("Deleting pod", "controller", accessor.GetName(), "pod", klog.KRef(namespace, podID))
+	logger := klog.FromContext(ctx)
+	logger.V(2).Info("Deleting pod", "controller", accessor.GetName(), "pod", klog.KRef(namespace, podID))
 	if err := r.KubeClient.CoreV1().Pods(namespace).Delete(ctx, podID, metav1.DeleteOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
-			klog.V(4).Infof("pod %v/%v has already been deleted.", namespace, podID)
+			logger.V(4).Info("Pod has already been deleted.", "pod", klog.KRef(namespace, podID))
 			return err
 		}
 		r.Recorder.Eventf(object, v1.EventTypeWarning, FailedDeletePodReason, "Error deleting: %v", err)
@@ -697,8 +723,8 @@ func (s ByLogging) Less(i, j int) bool {
 		}
 	}
 	// 5. Pods with containers with higher restart counts < lower restart counts
-	if maxContainerRestarts(s[i]) != maxContainerRestarts(s[j]) {
-		return maxContainerRestarts(s[i]) > maxContainerRestarts(s[j])
+	if res := compareMaxContainerRestarts(s[i], s[j]); res != nil {
+		return *res
 	}
 	// 6. older pods < newer pods < empty timestamp pods
 	if !s[i].CreationTimestamp.Equal(&s[j].CreationTimestamp) {
@@ -740,8 +766,8 @@ func (s ActivePods) Less(i, j int) bool {
 		}
 	}
 	// 5. Pods with containers with higher restart counts < lower restart counts
-	if maxContainerRestarts(s[i]) != maxContainerRestarts(s[j]) {
-		return maxContainerRestarts(s[i]) > maxContainerRestarts(s[j])
+	if res := compareMaxContainerRestarts(s[i], s[j]); res != nil {
+		return *res
 	}
 	// 6. Empty creation time pods < newer pods < older pods
 	if !s[i].CreationTimestamp.Equal(&s[j].CreationTimestamp) {
@@ -862,8 +888,8 @@ func (s ActivePodsWithRanks) Less(i, j int) bool {
 		}
 	}
 	// 7. Pods with containers with higher restart counts < lower restart counts
-	if maxContainerRestarts(s.Pods[i]) != maxContainerRestarts(s.Pods[j]) {
-		return maxContainerRestarts(s.Pods[i]) > maxContainerRestarts(s.Pods[j])
+	if res := compareMaxContainerRestarts(s.Pods[i], s.Pods[j]); res != nil {
+		return *res
 	}
 	// 8. Empty creation time pods < newer pods < older pods
 	if !s.Pods[i].CreationTimestamp.Equal(&s.Pods[j].CreationTimestamp) {
@@ -920,32 +946,98 @@ func podReadyTime(pod *v1.Pod) *metav1.Time {
 	return &metav1.Time{}
 }
 
-func maxContainerRestarts(pod *v1.Pod) int {
-	maxRestarts := 0
+func maxContainerRestarts(pod *v1.Pod) (regularRestarts, sidecarRestarts int) {
 	for _, c := range pod.Status.ContainerStatuses {
-		maxRestarts = integer.IntMax(maxRestarts, int(c.RestartCount))
+		regularRestarts = max(regularRestarts, int(c.RestartCount))
 	}
-	return maxRestarts
+	names := sets.New[string]()
+	for _, c := range pod.Spec.InitContainers {
+		if c.RestartPolicy != nil && *c.RestartPolicy == v1.ContainerRestartPolicyAlways {
+			names.Insert(c.Name)
+		}
+	}
+	for _, c := range pod.Status.InitContainerStatuses {
+		if names.Has(c.Name) {
+			sidecarRestarts = max(sidecarRestarts, int(c.RestartCount))
+		}
+	}
+	return
+}
+
+// We use *bool here to determine equality:
+// true: pi has a higher container restart count.
+// false: pj has a higher container restart count.
+// nil: Both have the same container restart count.
+func compareMaxContainerRestarts(pi *v1.Pod, pj *v1.Pod) *bool {
+	regularRestartsI, sidecarRestartsI := maxContainerRestarts(pi)
+	regularRestartsJ, sidecarRestartsJ := maxContainerRestarts(pj)
+	if regularRestartsI != regularRestartsJ {
+		res := regularRestartsI > regularRestartsJ
+		return &res
+	}
+	// If pods have the same restart count, an attempt is made to compare the restart counts of sidecar containers.
+	if sidecarRestartsI != sidecarRestartsJ {
+		res := sidecarRestartsI > sidecarRestartsJ
+		return &res
+	}
+	return nil
+}
+
+// FilterClaimedPods returns pods that are controlled by the controller and match the selector.
+func FilterClaimedPods(controller metav1.Object, selector labels.Selector, pods []*v1.Pod) []*v1.Pod {
+	var result []*v1.Pod
+	for _, pod := range pods {
+		if !metav1.IsControlledBy(pod, controller) {
+			// It's an orphan or owned by someone else.
+			continue
+		}
+		if selector.Matches(labels.Set(pod.Labels)) {
+			result = append(result, pod)
+		}
+	}
+	return result
 }
 
 // FilterActivePods returns pods that have not terminated.
-func FilterActivePods(pods []*v1.Pod) []*v1.Pod {
+func FilterActivePods(logger klog.Logger, pods []*v1.Pod) []*v1.Pod {
 	var result []*v1.Pod
 	for _, p := range pods {
 		if IsPodActive(p) {
 			result = append(result, p)
-		} else {
-			klog.V(4).Infof("Ignoring inactive pod %v/%v in state %v, deletion time %v",
-				p.Namespace, p.Name, p.Status.Phase, p.DeletionTimestamp)
 		}
 	}
 	return result
+}
+
+func FilterTerminatingPods(pods []*v1.Pod) []*v1.Pod {
+	var result []*v1.Pod
+	for _, p := range pods {
+		if IsPodTerminating(p) {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+func CountTerminatingPods(pods []*v1.Pod) int32 {
+	numberOfTerminatingPods := 0
+	for _, p := range pods {
+		if IsPodTerminating(p) {
+			numberOfTerminatingPods += 1
+		}
+	}
+	return int32(numberOfTerminatingPods)
 }
 
 func IsPodActive(p *v1.Pod) bool {
 	return v1.PodSucceeded != p.Status.Phase &&
 		v1.PodFailed != p.Status.Phase &&
 		p.DeletionTimestamp == nil
+}
+
+func IsPodTerminating(p *v1.Pod) bool {
+	return !podutil.IsPodTerminal(p) &&
+		p.DeletionTimestamp != nil
 }
 
 // FilterActiveReplicaSets returns replica sets that have (or at least ought to have) pods.
@@ -967,6 +1059,52 @@ func FilterReplicaSets(RSes []*apps.ReplicaSet, filterFn filterRS) []*apps.Repli
 		}
 	}
 	return filtered
+}
+
+// AddPodNodeNameIndexer adds an indexer for Pod's nodeName to the given PodInformer.
+// This indexer is used to efficiently look up pods by their node name.
+func AddPodNodeNameIndexer(podInformer cache.SharedIndexInformer) error {
+	if _, exists := podInformer.GetIndexer().GetIndexers()[PodNodeNameKeyIndex]; exists {
+		// indexer already exists, do nothing
+		return nil
+	}
+
+	return podInformer.AddIndexers(cache.Indexers{
+		PodNodeNameKeyIndex: func(obj interface{}) ([]string, error) {
+			pod, ok := obj.(*v1.Pod)
+			if !ok {
+				return []string{}, nil
+			}
+			if len(pod.Spec.NodeName) == 0 {
+				return []string{}, nil
+			}
+			return []string{pod.Spec.NodeName}, nil
+		},
+	})
+}
+
+// AddPodControllerUIDIndexer adds an indexer for Pod's controllerRef.UID to the given PodInformer.
+// This indexer is used to efficiently look up pods by their ControllerRef.UID
+func AddPodControllerUIDIndexer(podInformer cache.SharedIndexInformer) error {
+	if _, exists := podInformer.GetIndexer().GetIndexers()[PodControllerUIDIndex]; exists {
+		// indexer already exists, do nothing
+		return nil
+	}
+	return podInformer.AddIndexers(cache.Indexers{
+		PodControllerUIDIndex: func(obj interface{}) ([]string, error) {
+			pod, ok := obj.(*v1.Pod)
+			if !ok {
+				return nil, nil
+			}
+			// Get the ControllerRef of the Pod to check if it's managed by a controller
+			if ref := metav1.GetControllerOf(pod); ref != nil {
+				return []string{string(ref.UID)}, nil
+			}
+			// If the Pod has no controller (i.e., it's orphaned), index it with the OrphanPodIndexKey
+			// This helps identify orphan pods for reconciliation and adoption by controllers
+			return []string{OrphanPodIndexKey}, nil
+		},
+	})
 }
 
 // PodKey returns a key unique to the given pod within a cluster.

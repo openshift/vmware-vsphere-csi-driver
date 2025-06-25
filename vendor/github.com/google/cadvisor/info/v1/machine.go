@@ -53,6 +53,8 @@ type Core struct {
 	Caches       []Cache `json:"caches"`
 	UncoreCaches []Cache `json:"uncore_caches"`
 	SocketID     int     `json:"socket_id"`
+	BookID       string  `json:"book_id,omitempty"`
+	DrawerID     string  `json:"drawer_id,omitempty"`
 }
 
 type Cache struct {
@@ -263,6 +265,7 @@ func (m *MachineInfo) Clone() *MachineInfo {
 		NumSockets:       m.NumSockets,
 		CpuFrequency:     m.CpuFrequency,
 		MemoryCapacity:   m.MemoryCapacity,
+		SwapCapacity:     m.SwapCapacity,
 		MemoryByType:     memoryByType,
 		NVMInfo:          m.NVMInfo,
 		HugePages:        m.HugePages,

@@ -14,7 +14,7 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "update", "create", "delete", "patch"]
@@ -26,7 +26,7 @@ rules:
     verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
@@ -46,7 +46,7 @@ rules:
     resources: ["cnsfilevolumeclients"]
     verbs: ["get", "update", "create", "delete"]
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsregistervolumes"]
+    resources: ["cnsregistervolumes", "cnsunregistervolumes"]
     verbs: ["get", "list", "watch", "update", "delete"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["triggercsifullsyncs"]
@@ -76,13 +76,16 @@ rules:
     resources: ["storagepolicyusages"]
     verbs: ["create", "get", "list", "patch", "delete"]
   - apiGroups: ["cns.vmware.com"]
+    resources: ["storagepolicyusages/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["cns.vmware.com"]
     resources: ["storagepolicyquotas"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list"]
   - apiGroups: ["topology.tanzu.vmware.com"]
-    resources: ["availabilityzones"]
+    resources: ["availabilityzones", "zones"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [ "snapshot.storage.k8s.io" ]
     resources: [ "volumesnapshots" ]
@@ -99,6 +102,9 @@ rules:
   - apiGroups: ["cns.vmware.com"]
     resources: ["cnsvolumeinfoes"]
     verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: ["crd.nsx.vmware.com"]
+    resources: ["networkinfos"]
+    verbs: ["get", "watch", "list"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -134,7 +140,7 @@ metadata:
   name: vsphere-admin-csi-role
 rules:
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsregistervolumes"]
+    resources: ["cnsregistervolumes", "cnsunregistervolumes"]
     verbs: ["get", "list", "create", "delete", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
@@ -222,7 +228,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: csi-provisioner
-          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v4.0.0_vmware.4
+          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v5.0.2_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -239,6 +245,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
+            - "--enable-vdpp-on-stretched-supervisor=false"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -257,7 +264,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-attacher
-          image: localhost:5000/vmware.io/csi-attacher:v4.5.0_vmware.1
+          image: localhost:5000/vmware.io/csi-attacher:v4.7.0_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -268,7 +275,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
-            - "--worker-threads=25"
+            - "--worker-threads=100"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -281,7 +288,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-resizer
-          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.10.0_vmware.1
+          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.12.0_vmware.1
           imagePullPolicy: IfNotPresent
           args:
             - --v=4
@@ -357,7 +364,7 @@ spec:
             - mountPath: /etc/vmware/wcp/tls/
               name: host-vmca
         - name: liveness-probe
-          image: localhost:5000/vmware.io/csi-livenessprobe:v2.12.0_vmware.1
+          image: localhost:5000/vmware.io/csi-livenessprobe:v2.14.0_vmware.1
           args:
             - "--csi-address=/csi/csi.sock"
           volumeMounts:
@@ -409,7 +416,7 @@ spec:
             - mountPath: /etc/vmware/wcp/tls/
               name: host-vmca
         - name: csi-snapshotter
-          image: localhost:5000/vmware.io/csi-snapshotter:v6.1.0_vmware.6
+          image: localhost:5000/vmware.io/csi-snapshotter:v6.1.0_vmware.7
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -460,7 +467,10 @@ data:
   "tkgs-ha": "true"
   "list-volumes": "true"
   "cnsmgr-suspend-create-volume": "true"
-  "storage-quota-m2": "false"
+  "storage-quota-m2": "true"
+  "vdpp-on-stretched-supervisor": "false"
+  "cns-unregister-volume": "false"
+  "workload-domain-isolation": "false"
 kind: ConfigMap
 metadata:
   name: csi-feature-states

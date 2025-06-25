@@ -38,10 +38,6 @@ const (
 	// default interval for csi full sync, used unless overridden by user in csi-controller YAML
 	defaultFullSyncIntervalInMin = 30
 
-	// queryVolumeLimit is the page size, which should be set in the cursor when syncer container need to
-	// query many volumes using QueryVolume API
-	queryVolumeLimit = int64(500)
-
 	// key for HealthStatus annotation on PVC
 	annVolumeHealth = "volumehealth.storage.kubernetes.io/health"
 
@@ -140,4 +136,13 @@ const (
 	resizeRetryIntervalMax = 5 * time.Minute
 	// resizeWorkers represents the number of running worker threads
 	resizeWorkers = 10
+)
+
+const (
+	// storagePolicyQuotaRetryIntervalStart represents the start retry interval of the storagePolicyQuota reconciler
+	storagePolicyQuotaRetryIntervalStart = time.Second
+	// storagePolicyQuotaRetryIntervalMax represents the max retry interval of the storagePolicyQuota reconciler
+	storagePolicyQuotaRetryIntervalMax = 5 * time.Minute
+	// storagePolicyQuotaWorkers represents the number of running worker threads
+	storagePolicyQuotaWorkers = 10
 )
