@@ -126,14 +126,12 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 	})
 
 	ginkgo.AfterEach(func() {
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		if isVsanHealthServiceStopped {
 			startVCServiceWait4VPs(ctx, vcAddress, vsanhealthServiceName, &isVsanHealthServiceStopped)
 		}
 		if supervisorCluster {
-			deleteResourceQuota(client, namespace)
 			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
 		if guestCluster {
@@ -176,7 +174,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		time.Sleep(time.Duration(pandoraSyncWaitTime) * time.Second)
 
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -235,10 +232,11 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 			ginkgo.By("CNS_TEST: Running for WCP setup")
 			profileID := e2eVSphere.GetSpbmPolicyID(storagePolicyName)
 			scParameters[scParamStoragePolicyID] = profileID
-			// Create resource quota.
-			createResourceQuota(client, namespace, rqLimit, storagePolicyName)
+			restClientConfig := getRestConfigClient()
+			setStoragePolicyQuota(ctx, restClientConfig, storagePolicyName, namespace, rqLimit)
 			sc, pvc, err = createPVCAndStorageClass(ctx, client, namespace, nil,
-				scParameters, "", nil, "", false, "", storagePolicyName)
+				scParameters, "", nil, "", true, "", storagePolicyName)
+
 		}
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -264,7 +262,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		}()
 
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -322,11 +319,12 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 			ginkgo.By("CNS_TEST: Running for WCP setup")
 			profileID := e2eVSphere.GetSpbmPolicyID(storagePolicyName)
 			scParameters[scParamStoragePolicyID] = profileID
-			// Create resource quota.
-			createResourceQuota(client, namespace, rqLimit, storagePolicyName)
+			restClientConfig := getRestConfigClient()
+			setStoragePolicyQuota(ctx, restClientConfig, storagePolicyName, namespace, rqLimit)
 			sc, pvc, err = createPVCAndStorageClass(ctx, client, namespace, nil,
-				scParameters, "", nil, "", false, "", storagePolicyName)
+				scParameters, "", nil, "", true, "", storagePolicyName)
 		}
+
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
 			if !supervisorCluster {
@@ -364,7 +362,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		}
 		gomega.Expect(datastore).NotTo(gomega.BeNil())
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -435,7 +432,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 			pvs = append(pvs, pvList[0])
 		}
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -568,7 +564,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -653,7 +648,6 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		framework.ExpectNoError(fpv.WaitOnPVandPVC(ctx, client, f.Timeouts, namespace, pv, pvc))
 
 		ginkgo.By(fmt.Sprintln("Stopping vsan-health on the vCenter host"))
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -833,15 +827,14 @@ var _ bool = ginkgo.Describe("full-sync-test", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Stopping vsan-health on the vCenter host")
-		vcAddress := e2eVSphere.Config.Global.VCenterHostname + ":" + sshdPort
 		isVsanHealthServiceStopped = true
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// TODO: Replace static wait with polling
 		ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow vsan-health to completely shutdown",
-			vsanHealthServiceWaitTime))
-		time.Sleep(time.Duration(vsanHealthServiceWaitTime) * time.Second)
+			oneMinuteWaitTimeInSeconds))
+		time.Sleep(time.Duration(oneMinuteWaitTimeInSeconds) * time.Second)
 
 		ginkgo.By("when vsan-health is stopped, delete pod1")
 		err = fpod.DeletePodWithWait(ctx, client, pod)
@@ -933,8 +926,8 @@ func verifyCnsVolumeMetadata4GCVol(volumeID string, svcPVCName string, gcPvc *v1
 
 	cnsQueryResult, err := e2eVSphere.queryCNSVolumeWithResult(volumeID)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	if cnsQueryResult.Volumes == nil || len(cnsQueryResult.Volumes) == 0 {
-		framework.Logf("CNS volume query yielded no results for volume id: " + volumeID)
+	if len(cnsQueryResult.Volumes) == 0 {
+		framework.Logf("CNS volume query yielded no results for volume id: %s", volumeID)
 		return false
 	}
 	cnsVolume := cnsQueryResult.Volumes[0]

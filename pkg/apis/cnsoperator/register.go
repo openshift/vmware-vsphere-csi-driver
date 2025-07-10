@@ -28,8 +28,11 @@ import (
 	cnsfileaccessconfigv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsfileaccessconfig/v1alpha1"
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
+	cnsunregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsunregistervolume/v1alpha1"
 	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
 	storagepolicyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha1"
+	storagepolicyv1alpha2 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha2"
+	storagequotaperiodicsyncv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagequotaperiodicsync/v1alpha1"
 )
 
 // GroupName represents the group for cns operator apis
@@ -37,10 +40,12 @@ const GroupName = "cns.vmware.com"
 
 // Version represents the version for cns operator apis
 const Version = "v1alpha1"
+const VersionV2 = "v1alpha2"
 
 var (
 	// SchemeGroupVersion is group version used to register these objects
-	SchemeGroupVersion = schema.GroupVersion{Group: GroupName, Version: Version}
+	SchemeGroupVersion   = schema.GroupVersion{Group: GroupName, Version: Version}
+	SchemeGroupVersionV2 = schema.GroupVersion{Group: GroupName, Version: VersionV2}
 	// CnsNodeVMAttachmentSingular is Singular of CnsNodeVmAttachment
 	CnsNodeVMAttachmentSingular = "cnsnodevmattachment"
 	// CnsNodeVMAttachmentPlural is plural of CnsNodeVmAttachment
@@ -51,6 +56,8 @@ var (
 	CnsVolumeMetadataPlural = "cnsvolumemetadatas"
 	// CnsRegisterVolumePlural is plural of CnsRegisterVolume
 	CnsRegisterVolumePlural = "cnsregistervolumes"
+	// CnsUnregisterVolumePlural is plural of CnsUnregisterVolume
+	CnsUnregisterVolumePlural = "cnsunregistervolumes"
 	// CnsFileAccessConfigPlural is plural of CnsFileAccessConfig
 	CnsFileAccessConfigPlural = "cnsfileaccessconfigs"
 	// CnsStoragePolicyUsageSingular is singular of StoragePolicyUsage
@@ -97,6 +104,12 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 
 	scheme.AddKnownTypes(
 		SchemeGroupVersion,
+		&cnsunregistervolumev1alpha1.CnsUnregisterVolume{},
+		&cnsunregistervolumev1alpha1.CnsUnregisterVolumeList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersion,
 		&cnsvolumemetadatav1alpha1.CnsVolumeMetadata{},
 		&cnsvolumemetadatav1alpha1.CnsVolumeMetadataList{},
 	)
@@ -115,8 +128,26 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 
 	scheme.AddKnownTypes(
 		SchemeGroupVersion,
+		&storagequotaperiodicsyncv1alpha1.StorageQuotaPeriodicSync{},
+		&storagequotaperiodicsyncv1alpha1.StorageQuotaPeriodicSyncList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersion,
 		&storagepolicyv1alpha1.StoragePolicyUsage{},
 		&storagepolicyv1alpha1.StoragePolicyUsageList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersionV2,
+		&storagepolicyv1alpha2.StoragePolicyUsage{},
+		&storagepolicyv1alpha2.StoragePolicyUsageList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersionV2,
+		&storagepolicyv1alpha2.StoragePolicyQuota{},
+		&storagepolicyv1alpha2.StoragePolicyQuotaList{},
 	)
 
 	scheme.AddKnownTypes(
@@ -127,6 +158,11 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	metav1.AddToGroupVersion(
 		scheme,
 		SchemeGroupVersion,
+	)
+
+	metav1.AddToGroupVersion(
+		scheme,
+		SchemeGroupVersionV2,
 	)
 
 	return nil

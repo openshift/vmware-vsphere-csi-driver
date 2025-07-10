@@ -45,6 +45,7 @@ import (
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/admissionhandler"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/byokoperator"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/manager"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/k8scloudoperator"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/storagepool"
@@ -77,8 +78,10 @@ var (
 		"Name of the feature state switch configmap in supervisor cluster")
 	supervisorFSSNamespace = flag.String("supervisor-fss-namespace", "",
 		"Namespace of the feature state switch configmap in supervisor cluster")
-	internalFSSName      = flag.String("fss-name", "", "Name of the feature state switch configmap")
-	internalFSSNamespace = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
+	internalFSSName           = flag.String("fss-name", "", "Name of the feature state switch configmap")
+	internalFSSNamespace      = flag.String("fss-namespace", "", "Namespace of the feature state switch configmap")
+	periodicSyncIntervalInMin = flag.Duration("storagequota-sync-interval", 30*time.Minute,
+		"Periodic sync interval in Minutes")
 )
 
 // main for vsphere syncer.
@@ -287,6 +290,7 @@ func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 				}
 			}()
 		}
+
 		if clusterFlavor == cnstypes.CnsClusterFlavorVanilla {
 			// Initialize node manager so that syncer components can
 			// retrieve NodeVM using the NodeID.
@@ -343,6 +347,7 @@ func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 				}
 			}
 		}
+
 		go func() {
 			defer func() {
 				log.Info("Cleaning up vc sessions cns operator")
@@ -356,12 +361,44 @@ func initSyncerComponents(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 				os.Exit(0)
 			}
 		}()
+
+		if clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
+			commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WCP_VMService_BYOK) {
+			// Start BYOK Operator for Supervisor clusters.
+			go func() {
+				defer func() {
+					log.Info("Cleaning up vc sessions BYOK operator")
+					if r := recover(); r != nil {
+						cleanupSessions(ctx, r)
+					}
+				}()
+				if err := startByokOperator(ctx, clusterFlavor, configInfo); err != nil {
+					log.Errorf("Error initializing BYOK Operator. Error: %+v", err)
+					utils.LogoutAllvCenterSessions(ctx)
+					os.Exit(0)
+				}
+			}()
+		}
+
+		syncer.PeriodicSyncIntervalInMin = *periodicSyncIntervalInMin
 		if err := syncer.InitMetadataSyncer(ctx, clusterFlavor, configInfo); err != nil {
 			log.Errorf("Error initializing Metadata Syncer. Error: %+v", err)
 			utils.LogoutAllvCenterSessions(ctx)
 			os.Exit(0)
 		}
 	}
+}
+
+func startByokOperator(ctx context.Context,
+	clusterFlavor cnstypes.CnsClusterFlavor,
+	configInfo *config.ConfigurationInfo) error {
+
+	mgr, err := byokoperator.NewManager(ctx, clusterFlavor, configInfo)
+	if err != nil {
+		return err
+	}
+
+	return mgr.Start(ctx)
 }
 
 func cleanupSessions(ctx context.Context, r interface{}) {

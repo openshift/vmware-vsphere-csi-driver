@@ -26,7 +26,7 @@ import (
 	"sync"
 	"time"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
@@ -42,8 +42,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
-
 	csifault "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/fault"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 
 	typedcorev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 
@@ -107,7 +107,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		return err
 	}
 
-	vmOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, vmoperatortypes.GroupName)
+	vmOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, vmoperatorv1alpha4.GroupName)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to initialize vmOperatorClient. Error: %+v", err)
 		log.Error(msg)
@@ -144,8 +144,11 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	backOffDuration = make(map[string]time.Duration)
 
 	// Watch for changes to primary resource CnsNodeVmAttachment.
-	err = c.Watch(source.Kind(mgr.GetCache(), &cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment{}),
-		&handler.EnqueueRequestForObject{})
+	err = c.Watch(source.Kind(
+		mgr.GetCache(),
+		&cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment{},
+		&handler.TypedEnqueueRequestForObject[*cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment]{},
+	))
 	if err != nil {
 		log.Errorf("failed to watch for changes to CnsNodeVmAttachment resource with error: %+v", err)
 		return err
@@ -767,10 +770,9 @@ func updateSVPVC(ctx context.Context, client client.Client,
 // isVmCrPresent checks whether VM CR is present in SV namespace
 // with given vmuuid and returns the VirtualMachine CR object if it is found
 func isVmCrPresent(ctx context.Context, vmOperatorClient client.Client,
-	vmuuid string, namespace string) (*vmoperatortypes.VirtualMachine, error) {
+	vmuuid string, namespace string) (*vmoperatorv1alpha4.VirtualMachine, error) {
 	log := logger.GetLogger(ctx)
-	vmList := &vmoperatortypes.VirtualMachineList{}
-	err := vmOperatorClient.List(ctx, vmList, client.InNamespace(namespace))
+	vmList, err := utils.GetVirtualMachineListAllApiVersions(ctx, namespace, vmOperatorClient)
 	if err != nil {
 		msg := fmt.Sprintf("failed to list virtualmachines with error: %+v", err)
 		log.Error(msg)

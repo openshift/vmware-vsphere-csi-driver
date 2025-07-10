@@ -31,7 +31,8 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/apis/config"
 )
 
-var supportedScoringStrategyTypes = sets.NewString(
+// supportedScoringStrategyTypes has to be a set of strings for use with field.Unsupported
+var supportedScoringStrategyTypes = sets.New(
 	string(config.LeastAllocated),
 	string(config.MostAllocated),
 	string(config.RequestedToCapacityRatio),
@@ -148,13 +149,13 @@ func validateTopologyKey(p *field.Path, v string) field.ErrorList {
 }
 
 func validateWhenUnsatisfiable(p *field.Path, v v1.UnsatisfiableConstraintAction) *field.Error {
-	supportedScheduleActions := sets.NewString(string(v1.DoNotSchedule), string(v1.ScheduleAnyway))
+	supportedScheduleActions := sets.New(string(v1.DoNotSchedule), string(v1.ScheduleAnyway))
 
 	if len(v) == 0 {
 		return field.Required(p, "can not be empty")
 	}
 	if !supportedScheduleActions.Has(string(v)) {
-		return field.NotSupported(p, v, supportedScheduleActions.List())
+		return field.NotSupported(p, v, sets.List(supportedScheduleActions))
 	}
 	return nil
 }
@@ -221,7 +222,7 @@ func validateResources(resources []config.ResourceSpec, p *field.Path) field.Err
 // ValidateNodeResourcesBalancedAllocationArgs validates that NodeResourcesBalancedAllocationArgs are set correctly.
 func ValidateNodeResourcesBalancedAllocationArgs(path *field.Path, args *config.NodeResourcesBalancedAllocationArgs) error {
 	var allErrs field.ErrorList
-	seenResources := sets.NewString()
+	seenResources := sets.New[string]()
 	for i, resource := range args.Resources {
 		if seenResources.Has(resource.Name) {
 			allErrs = append(allErrs, field.Duplicate(path.Child("resources").Index(i).Child("name"), resource.Name))
@@ -260,17 +261,17 @@ func ValidateNodeAffinityArgs(path *field.Path, args *config.NodeAffinityArgs) e
 
 // VolumeBindingArgsValidationOptions contains the different settings for validation.
 type VolumeBindingArgsValidationOptions struct {
-	AllowVolumeCapacityPriority bool
+	AllowStorageCapacityScoring bool
 }
 
 // ValidateVolumeBindingArgs validates that VolumeBindingArgs are set correctly.
 func ValidateVolumeBindingArgs(path *field.Path, args *config.VolumeBindingArgs) error {
 	return ValidateVolumeBindingArgsWithOptions(path, args, VolumeBindingArgsValidationOptions{
-		AllowVolumeCapacityPriority: utilfeature.DefaultFeatureGate.Enabled(features.VolumeCapacityPriority),
+		AllowStorageCapacityScoring: utilfeature.DefaultFeatureGate.Enabled(features.StorageCapacityScoring),
 	})
 }
 
-// ValidateVolumeBindingArgs validates that VolumeBindingArgs with scheduler features.
+// ValidateVolumeBindingArgsWithOptions validates that VolumeBindingArgs and VolumeBindingArgsValidationOptions with scheduler features.
 func ValidateVolumeBindingArgsWithOptions(path *field.Path, args *config.VolumeBindingArgs, opts VolumeBindingArgsValidationOptions) error {
 	var allErrs field.ErrorList
 
@@ -278,13 +279,13 @@ func ValidateVolumeBindingArgsWithOptions(path *field.Path, args *config.VolumeB
 		allErrs = append(allErrs, field.Invalid(path.Child("bindTimeoutSeconds"), args.BindTimeoutSeconds, "invalid BindTimeoutSeconds, should not be a negative value"))
 	}
 
-	if opts.AllowVolumeCapacityPriority {
+	if opts.AllowStorageCapacityScoring {
 		allErrs = append(allErrs, validateFunctionShape(args.Shape, path.Child("shape"))...)
 	} else if args.Shape != nil {
 		// When the feature is off, return an error if the config is not nil.
 		// This prevents unexpected configuration from taking effect when the
 		// feature turns on in the future.
-		allErrs = append(allErrs, field.Invalid(path.Child("shape"), args.Shape, "unexpected field `shape`, remove it or turn on the feature gate VolumeCapacityPriority"))
+		allErrs = append(allErrs, field.Invalid(path.Child("shape"), args.Shape, "unexpected field `shape`, remove it or turn on the feature gate StorageCapacityScoring"))
 	}
 	return allErrs.ToAggregate()
 }
@@ -313,7 +314,7 @@ func ValidateNodeResourcesFitArgs(path *field.Path, args *config.NodeResourcesFi
 	strategyPath := path.Child("scoringStrategy")
 	if args.ScoringStrategy != nil {
 		if !supportedScoringStrategyTypes.Has(string(args.ScoringStrategy.Type)) {
-			allErrs = append(allErrs, field.NotSupported(strategyPath.Child("type"), args.ScoringStrategy.Type, supportedScoringStrategyTypes.List()))
+			allErrs = append(allErrs, field.NotSupported(strategyPath.Child("type"), args.ScoringStrategy.Type, sets.List(supportedScoringStrategyTypes)))
 		}
 		allErrs = append(allErrs, validateResources(args.ScoringStrategy.Resources, strategyPath.Child("resources"))...)
 		if args.ScoringStrategy.RequestedToCapacityRatio != nil {

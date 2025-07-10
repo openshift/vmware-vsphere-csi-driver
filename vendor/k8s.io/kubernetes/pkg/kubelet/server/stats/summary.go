@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//go:generate mockgen -source=summary.go -destination=testing/mock_summary_provider.go -package=testing SummaryProvider
+//go:generate mockery
 package stats
 
 import (
@@ -24,7 +24,9 @@ import (
 	"k8s.io/klog/v2"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	statsapi "k8s.io/kubelet/pkg/apis/stats/v1alpha1"
+	"k8s.io/kubernetes/pkg/features"
 	"k8s.io/kubernetes/pkg/kubelet/util"
 )
 
@@ -82,7 +84,7 @@ func (sp *summaryProviderImpl) Get(ctx context.Context, updateStats bool) (*stat
 	if err != nil {
 		return nil, fmt.Errorf("failed to get rootFs stats: %v", err)
 	}
-	imageFsStats, err := sp.provider.ImageFsStats(ctx)
+	imageFsStats, containerFsStats, err := sp.provider.ImageFsStats(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get imageFs stats: %v", err)
 	}
@@ -105,12 +107,16 @@ func (sp *summaryProviderImpl) Get(ctx context.Context, updateStats bool) (*stat
 		NodeName:         node.Name,
 		CPU:              rootStats.CPU,
 		Memory:           rootStats.Memory,
+		Swap:             rootStats.Swap,
 		Network:          networkStats,
 		StartTime:        sp.systemBootTime,
 		Fs:               rootFsStats,
-		Runtime:          &statsapi.RuntimeStats{ImageFs: imageFsStats},
+		Runtime:          &statsapi.RuntimeStats{ContainerFs: containerFsStats, ImageFs: imageFsStats},
 		Rlimit:           rlimit,
 		SystemContainers: sp.GetSystemContainersStats(nodeConfig, podStats, updateStats),
+	}
+	if utilfeature.DefaultFeatureGate.Enabled(features.KubeletPSI) {
+		nodeStats.IO = rootStats.IO
 	}
 	summary := statsapi.Summary{
 		Node: nodeStats,
@@ -141,6 +147,7 @@ func (sp *summaryProviderImpl) GetCPUAndMemoryStats(ctx context.Context) (*stats
 		NodeName:         node.Name,
 		CPU:              rootStats.CPU,
 		Memory:           rootStats.Memory,
+		Swap:             rootStats.Swap,
 		StartTime:        rootStats.StartTime,
 		SystemContainers: sp.GetSystemContainersCPUAndMemoryStats(nodeConfig, podStats, false),
 	}

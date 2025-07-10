@@ -26,6 +26,9 @@ import (
 	"time"
 
 	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha2 "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
+	vmoperatorv1alpha3 "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -43,10 +46,11 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	certutil "k8s.io/client-go/util/cert"
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
+	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	apiutils "sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	storagev1 "k8s.io/api/storage/v1"
 
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
@@ -72,14 +76,14 @@ func GetKubeConfig(ctx context.Context) (*restclient.Config, error) {
 	var err error
 	kubecfgPath := getKubeConfigPath(ctx)
 	if kubecfgPath != "" {
-		log.Infof("k8s client using kubeconfig from %s", kubecfgPath)
+		log.Debugf("k8s client using kubeconfig from %s", kubecfgPath)
 		config, err = clientcmd.BuildConfigFromFlags("", kubecfgPath)
 		if err != nil {
 			log.Errorf("BuildConfigFromFlags failed %v", err)
 			return nil, err
 		}
 	} else {
-		log.Info("k8s client using in-cluster config")
+		log.Debug("k8s client using in-cluster config")
 		config, err = restclient.InClusterConfig()
 		if err != nil {
 			log.Errorf("InClusterConfig failed %v", err)
@@ -102,24 +106,24 @@ func getKubeConfigPath(ctx context.Context) string {
 		flagValue := kubecfgFlag.Value.String()
 		if flagValue != "" {
 			kubecfgPath = flagValue
-			log.Infof("Kubeconfig path obtained from kubeconfig flag: %q", kubecfgPath)
+			log.Debugf("Kubeconfig path obtained from kubeconfig flag: %q", kubecfgPath)
 		} else {
-			log.Info("Kubeconfig flag is set but empty, checking environment variable value")
+			log.Debug("Kubeconfig flag is set but empty, checking environment variable value")
 		}
 	} else {
-		log.Info("Kubeconfig flag not set, checking environment variable value")
+		log.Debug("Kubeconfig flag not set, checking environment variable value")
 	}
 	if kubecfgPath == "" {
 		// Get the Kubeconfig path from the environment variable
 		kubecfgPath = os.Getenv(clientcmd.RecommendedConfigPathEnvVar)
-		log.Infof("Kubeconfig path obtained from environment variable %q: %q",
+		log.Debugf("Kubeconfig path obtained from environment variable %q: %q",
 			clientcmd.RecommendedConfigPathEnvVar, kubecfgPath)
 	}
 	// Final logging of the Kubeconfig path used
 	if kubecfgPath == "" {
-		log.Info("No Kubeconfig path found, either from environment variable or flag")
+		log.Debug("No Kubeconfig path found, either from environment variable or flag")
 	} else {
-		log.Infof("Final Kubeconfig path used: %q", kubecfgPath)
+		log.Debugf("Final Kubeconfig path used: %q", kubecfgPath)
 	}
 	return kubecfgPath
 }
@@ -211,8 +215,33 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 
 	scheme := runtime.NewScheme()
 	switch groupName {
-	case vmoperatorv1alpha1.GroupName:
+	case ccV1beta1.GroupVersion.Group:
+		err = ccV1beta1.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme for %s with err: %+v", ccV1beta1.GroupVersion.Group, err)
+			return nil, err
+		}
+	case vmoperatorv1alpha4.GroupName:
+		log.Info("adding scheme for vm-operator version v1alpha1")
 		err = vmoperatorv1alpha1.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		log.Info("adding scheme for vm-operator version v1alpha2")
+		err = vmoperatorv1alpha2.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		log.Info("adding scheme for vm-operator version v1alpha3")
+		err = vmoperatorv1alpha3.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		log.Info("adding scheme for vm-operator version v1alpha4")
+		err = vmoperatorv1alpha4.AddToScheme(scheme)
 		if err != nil {
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
@@ -300,13 +329,27 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 	log := logger.GetLogger(ctx)
 
 	scheme := runtime.NewScheme()
+	log.Info("adding scheme for vm-operator versions v1alpha1, v1alpha2, v1alpha3, v1alpha4")
+	err = vmoperatorv1alpha4.AddToScheme(scheme)
+	if err != nil {
+		log.Errorf("failed to add to scheme with err: %+v", err)
+	}
+	err = vmoperatorv1alpha3.AddToScheme(scheme)
+	if err != nil {
+		log.Errorf("failed to add to scheme with err: %+v", err)
+	}
+	err = vmoperatorv1alpha2.AddToScheme(scheme)
+	if err != nil {
+		log.Errorf("failed to add to scheme with err: %+v", err)
+	}
 	err = vmoperatorv1alpha1.AddToScheme(scheme)
 	if err != nil {
 		log.Errorf("failed to add to scheme with err: %+v", err)
 	}
+
 	gvk := schema.GroupVersionKind{
-		Group:   vmoperatorv1alpha1.SchemeGroupVersion.Group,
-		Version: vmoperatorv1alpha1.SchemeGroupVersion.Version,
+		Group:   vmoperatorv1alpha1.GroupVersion.Group,
+		Version: vmoperatorv1alpha1.GroupVersion.Version,
 		Kind:    virtualMachineKind,
 	}
 
@@ -431,7 +474,7 @@ func getClientThroughput(ctx context.Context, isSupervisorClient bool) (float32,
 			burst = value
 		}
 	}
-	log.Infof("Setting client QPS to %f and Burst to %d.", qps, burst)
+	log.Debugf("Setting client QPS to %f and Burst to %d.", qps, burst)
 	return qps, burst
 }
 

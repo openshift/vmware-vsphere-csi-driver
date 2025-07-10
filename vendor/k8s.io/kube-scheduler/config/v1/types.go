@@ -64,7 +64,7 @@ type KubeSchedulerConfiguration struct {
 	// Example: if the cluster size is 500 nodes and the value of this flag is 30,
 	// then scheduler stops finding further feasible nodes once it finds 150 feasible ones.
 	// When the value is 0, default percentage (5%--50% based on the size of the cluster) of the
-	// nodes will be scored. It is overridden by profile level PercentageofNodesToScore.
+	// nodes will be scored. It is overridden by profile level PercentageOfNodesToScore.
 	PercentageOfNodesToScore *int32 `json:"percentageOfNodesToScore,omitempty"`
 
 	// PodInitialBackoffSeconds is the initial backoff for unschedulable pods.
@@ -89,6 +89,12 @@ type KubeSchedulerConfiguration struct {
 	// with the extender. These extenders are shared by all scheduler profiles.
 	// +listType=set
 	Extenders []Extender `json:"extenders,omitempty"`
+
+	// DelayCacheUntilActive specifies when to start caching. If this is true and leader election is enabled,
+	// the scheduler will wait to fill informer caches until it is the leader. Doing so will have slower
+	// failover with the benefit of lower memory overhead while waiting to become leader.
+	// Defaults to false.
+	DelayCacheUntilActive bool `json:"delayCacheUntilActive,omitempty"`
 }
 
 // DecodeNestedObjects decodes plugin args for known types.

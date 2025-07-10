@@ -19,6 +19,7 @@ package v1beta1
 import (
 	"fmt"
 	"os"
+	"time"
 
 	core "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
@@ -37,13 +38,13 @@ func (s *server) GetPluginHandler() cache.PluginHandler {
 	return s
 }
 
-func (s *server) RegisterPlugin(pluginName string, endpoint string, versions []string) error {
+func (s *server) RegisterPlugin(pluginName string, endpoint string, versions []string, pluginClientTimeout *time.Duration) error {
 	klog.V(2).InfoS("Registering plugin at endpoint", "plugin", pluginName, "endpoint", endpoint)
 	return s.connectClient(pluginName, endpoint)
 }
 
-func (s *server) DeRegisterPlugin(pluginName string) {
-	klog.V(2).InfoS("Deregistering plugin", "plugin", pluginName)
+func (s *server) DeRegisterPlugin(pluginName, endpoint string) {
+	klog.V(2).InfoS("Deregistering plugin", "plugin", pluginName, "endpoint", endpoint)
 	client := s.getClient(pluginName)
 	if client != nil {
 		s.disconnectClient(pluginName, client)
@@ -61,6 +62,7 @@ func (s *server) ValidatePlugin(pluginName string, endpoint string, versions []s
 		return fmt.Errorf("invalid name of device plugin socket: %s", fmt.Sprintf(errInvalidResourceName, pluginName))
 	}
 
+	klog.V(2).InfoS("Device plugin validated", "plugin", pluginName, "endpoint", endpoint, "versions", versions)
 	return nil
 }
 
@@ -74,6 +76,7 @@ func (s *server) connectClient(name string, socketPath string) error {
 		return err
 	}
 
+	klog.V(2).InfoS("Connected to new client", "resource", name)
 	go func() {
 		s.runClient(name, c)
 	}()
@@ -85,7 +88,6 @@ func (s *server) disconnectClient(name string, c Client) error {
 	s.deregisterClient(name)
 	return c.Disconnect()
 }
-
 func (s *server) registerClient(name string, c Client) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -111,7 +113,7 @@ func (s *server) runClient(name string, c Client) {
 	}
 
 	if err := s.disconnectClient(name, c); err != nil {
-		klog.V(2).InfoS("Unable to disconnect client", "resource", name, "client", c, "err", err)
+		klog.ErrorS(err, "Unable to disconnect client", "resource", name, "client", c)
 	}
 }
 

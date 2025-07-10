@@ -1,4 +1,5 @@
-// Copyright (c) 2019 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -55,8 +56,9 @@ type ClusterModuleStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:storageversion
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineSetResourcePolicy is the Schema for the virtualmachinesetresourcepolicies API.
 type VirtualMachineSetResourcePolicy struct {
@@ -72,6 +74,7 @@ func (res VirtualMachineSetResourcePolicy) NamespacedName() string {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineSetResourcePolicyList contains a list of VirtualMachineSetResourcePolicy.
 type VirtualMachineSetResourcePolicyList struct {
@@ -81,5 +84,5 @@ type VirtualMachineSetResourcePolicyList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachineSetResourcePolicy{}, &VirtualMachineSetResourcePolicyList{})
+	objectTypes = append(objectTypes, &VirtualMachineSetResourcePolicy{}, &VirtualMachineSetResourcePolicyList{})
 }

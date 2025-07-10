@@ -18,28 +18,50 @@ package syncer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"slices"
+
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+	"google.golang.org/grpc/codes"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	clientset "k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/prometheus"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
+	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	cnsvolumeinfov1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeinfo/v1alpha1"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
+	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/types"
+)
+
+const (
+	allowedRetriesToPatchCNSVolumeInfo    = 5
+	annCSIvSphereVolumeAccessibleTopology = "csi.vsphere.volume-accessible-topology"
 )
 
 // CsiFullSync reconciles volume metadata on a vanilla k8s cluster with volume
@@ -57,12 +79,39 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 			migrationFeatureStateForFullSync = true
 		}
 	}
-	// Attempt to patch StoragePolicyUsage CRs
+	// Attempt to create StoragePolicyUsage CRs.
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if IsPodVMOnStretchSupervisorFSSEnabled {
+			createStoragePolicyUsageCRS(ctx, metadataSyncer)
+		}
+	}
+	// Sync VolumeInfo CRs for the below conditions:
+	// Either it is a Vanilla k8s deployment with Multi-VC configuration or, it's a StretchSupervisor cluster
+	if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 ||
+		(metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && IsPodVMOnStretchSupervisorFSSEnabled) {
+		volumeInfoCRFullSync(ctx, metadataSyncer, vc)
+		cleanUpVolumeInfoCrDeletionMap(ctx, metadataSyncer, vc)
+	}
+	// Attempt to patch StoragePolicyUsage CRs. For storagePolicyUsageCRSync to work,
+	// we need CNSVolumeInfo CRs to be present for all existing volumes.
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 		if IsPodVMOnStretchSupervisorFSSEnabled {
 			storagePolicyUsageCRSync(ctx, metadataSyncer)
 		}
 	}
+
+	// On Supervisor cluster, if SVPVCSnapshotProtectionFinalizer FSS is enabled,
+	// Iterate over all PVCs & VolumeSnapshots and find ones with DeletionTimestamp set but
+	// CNS specific finalizer present.
+	// For all such PVCs/Snapshots, attempt to remove CNS finalizer if corresponding guest cluster does not exist.
+	// This code handles cases where namespace deletion causes guest cluster and its corresponding components
+	// to be deleted but associated objects on supervisor remain stuck in Terminating state.
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.SVPVCSnapshotProtectionFinalizer) {
+			cleanupUnusedPVCsAndSnapshotsFromGuestCluster(ctx)
+		}
+	}
+
 	defer func() {
 		fullSyncStatus := prometheus.PrometheusPassStatus
 		if err != nil {
@@ -122,133 +171,12 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 	}
 	log.Debugf("FullSync for VC %s: pvToPVCMap %v", vc, pvToPVCMap)
 	log.Debugf("FullSyncfor VC %s: pvcToPodMap %v", vc, pvcToPodMap)
-	// Call CNS QueryAll to get container volumes by cluster ID.
-	queryFilter := cnstypes.CnsQueryFilter{
-		ContainerClusterIds: []string{
-			metadataSyncer.configInfo.Cfg.Global.ClusterID,
-		},
-	}
 
 	volManager, err := getVolManagerForVcHost(ctx, vc, metadataSyncer)
 	if err != nil {
 		log.Errorf("FullSync for VC %s: Failed to get volume manager. Err: %v", vc, err)
 		return err
 	}
-
-	queryAllResult, err := volManager.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
-	if err != nil {
-		log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
-		return err
-	}
-
-	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
-		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
-		// Replace Volume Metadata using old cluster ID and replace with the new SupervisorID
-		if len(queryAllResult.Volumes) > 0 {
-			var updateMetadataSpecArray []cnstypes.CnsVolumeMetadataUpdateSpec
-			for _, volume := range queryAllResult.Volumes {
-				var updatedContainerClusterArray []cnstypes.CnsContainerCluster
-				var updatedContainerCluster cnstypes.CnsContainerCluster
-				for _, containercluster := range volume.Metadata.ContainerClusterArray {
-					if containercluster.ClusterId == metadataSyncer.configInfo.Cfg.Global.ClusterID {
-						containercluster.ClusterId = metadataSyncer.configInfo.Cfg.Global.SupervisorID
-						updatedContainerCluster = containercluster
-					}
-					updatedContainerClusterArray = append(updatedContainerClusterArray, containercluster)
-				}
-				updateSpecToDeleteMetadata := cnstypes.CnsVolumeMetadataUpdateSpec{
-					VolumeId: cnstypes.CnsVolumeId{
-						Id: volume.VolumeId.Id,
-					},
-					Metadata: cnstypes.CnsVolumeMetadata{
-						ContainerCluster:      volume.Metadata.ContainerCluster,
-						ContainerClusterArray: volume.Metadata.ContainerClusterArray,
-					},
-				}
-				updateSpecToAddMetadata := cnstypes.CnsVolumeMetadataUpdateSpec{
-					VolumeId: cnstypes.CnsVolumeId{
-						Id: volume.VolumeId.Id,
-					},
-					Metadata: cnstypes.CnsVolumeMetadata{
-						ContainerCluster:      updatedContainerCluster,
-						ContainerClusterArray: updatedContainerClusterArray,
-					},
-				}
-				for _, entityMetadata := range volume.Metadata.EntityMetadata {
-					if entityMetadata.GetCnsEntityMetadata().ClusterID ==
-						metadataSyncer.configInfo.Cfg.Global.ClusterID {
-						// Delete metadata for associated with old cluster ID
-						oldk8sEntityMetadata := *entityMetadata.(*cnstypes.CnsKubernetesEntityMetadata)
-						oldk8sEntityMetadata.Delete = true
-						// add metadata for new supervisor id
-						newk8sEntityMetadata := *entityMetadata.(*cnstypes.CnsKubernetesEntityMetadata)
-						newk8sEntityMetadata.ClusterID = metadataSyncer.configInfo.Cfg.Global.SupervisorID
-						for index, referredEntity := range newk8sEntityMetadata.ReferredEntity {
-							if referredEntity.ClusterID == metadataSyncer.configInfo.Cfg.Global.ClusterID {
-								referredEntity.ClusterID = metadataSyncer.configInfo.Cfg.Global.SupervisorID
-							}
-							newk8sEntityMetadata.ReferredEntity[index] = referredEntity
-						}
-						updateSpecToDeleteMetadata.Metadata.EntityMetadata =
-							append(updateSpecToDeleteMetadata.Metadata.EntityMetadata, &oldk8sEntityMetadata)
-						updateSpecToAddMetadata.Metadata.EntityMetadata =
-							append(updateSpecToAddMetadata.Metadata.EntityMetadata, &newk8sEntityMetadata)
-					}
-				}
-				if len(updateSpecToDeleteMetadata.Metadata.EntityMetadata) > 0 {
-					updateMetadataSpecArray = append(updateMetadataSpecArray, updateSpecToDeleteMetadata)
-				}
-				// TODO: Remove this check after CNS resolve issue regarding removal of old cluster-id
-				// from ContainerClusterArray. This will allow replacing cluster-id for volume which does not have any
-				// entity metadata.
-				if len(updateSpecToAddMetadata.Metadata.EntityMetadata) > 0 {
-					updateMetadataSpecArray = append(updateMetadataSpecArray, updateSpecToAddMetadata)
-				}
-			}
-			if len(updateMetadataSpecArray) > 0 {
-				log.Infof("FullSync for VC %s: Replacing ClusterID: %q with new SupervisorID: %q",
-					vc, metadataSyncer.configInfo.Cfg.Global.ClusterID,
-					metadataSyncer.configInfo.Cfg.Global.SupervisorID)
-			}
-			for _, updateSpec := range updateMetadataSpecArray {
-				log.Debugf("Calling UpdateVolumeMetadata for volume %s with updateSpec: %+v",
-					updateSpec.VolumeId.Id, spew.Sdump(updateSpec))
-				if err := volManager.UpdateVolumeMetadata(ctx, &updateSpec); err != nil {
-					log.Warnf("FullSync for VC %s: UpdateVolumeMetadata failed while replacing clusterID "+
-						"with supervisorID. Error: %+v", vc, err)
-				}
-			}
-		}
-		// Call CNS QueryAll to get container volumes by cluster ID.
-		queryFilter = cnstypes.CnsQueryFilter{
-			ContainerClusterIds: []string{
-				metadataSyncer.configInfo.Cfg.Global.SupervisorID,
-			},
-		}
-		// get queryAllResult using new Supervisor ID for rest of full sync operations
-		queryAllResult, err = volManager.QueryAllVolume(ctx, queryFilter, cnstypes.CnsQuerySelection{})
-		if err != nil {
-			log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
-			return err
-		}
-	}
-
-	vcHostObj, vcHostObjFound := metadataSyncer.configInfo.Cfg.VirtualCenter[vc]
-	if !vcHostObjFound {
-		log.Errorf("FullSync for VC %s: Failed to get VC host object.", vc)
-		return errors.New("failed to get VC host object")
-	}
-
-	volumeToCnsEntityMetadataMap, volumeToK8sEntityMetadataMap, volumeClusterDistributionMap, err :=
-		fullSyncConstructVolumeMaps(ctx, k8sPVs, queryAllResult.Volumes, pvToPVCMap,
-			pvcToPodMap, metadataSyncer, migrationFeatureStateForFullSync, volManager, vc)
-	if err != nil {
-		log.Errorf("FullSync for VC %s: fullSyncGetEntityMetadata failed with err %+v", vc, err)
-		return err
-	}
-	log.Debugf("FullSync for VC %s: pvToCnsEntityMetadataMap %+v \n pvToK8sEntityMetadataMap: %+v \n",
-		vc, spew.Sdump(volumeToCnsEntityMetadataMap), spew.Sdump(volumeToK8sEntityMetadataMap))
-	log.Debugf("FullSync for VC %s: volumes where clusterDistribution is set: %+v", vc, volumeClusterDistributionMap)
 
 	var vcenter *cnsvsphere.VirtualCenter
 	// Get VC instance.
@@ -265,6 +193,181 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 			return err
 		}
 	}
+
+	// Iterate through all the k8sPVs to find all PVs with node affinity missing and
+	// patch such PVs and their corresponding PVCs with topology discovered
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
+		IsWorkloadDomainIsolationSupported {
+		k8sClient, err := k8s.NewClient(ctx)
+		if err != nil {
+			log.Errorf("FullSync for VC %s: Failed to create kubernetes client. Err: %+v", vc, err)
+			return err
+		}
+		var pvWithMissingNodeAffinityList [](*v1.PersistentVolume)
+		for _, pv := range k8sPVs {
+			if pv.Spec.NodeAffinity == nil {
+				pvWithMissingNodeAffinityList = append(pvWithMissingNodeAffinityList, pv)
+			}
+		}
+		// For PVs missing node affinity info, discover and patch the topology information as node affinity.
+		// Also add "csi.vsphere.volume-accessible-topology" annotation to associated PVC(s)
+		if len(pvWithMissingNodeAffinityList) != 0 {
+			patchNodeAffinityToPVAndPVC(ctx, k8sClient, metadataSyncer, vcenter,
+				pvWithMissingNodeAffinityList, pvToPVCMap)
+		}
+		// Add "csi.vsphere.volume-accessible-topology" annotation to all PVCs,
+		// if missed to get patched in patchNodeAffinityToPVAndPVC()
+		for _, pvc := range pvToPVCMap {
+			if pvc.ObjectMeta.Annotations[annCSIvSphereVolumeAccessibleTopology] == "" {
+				err = setVolumeAccessibleTopologyForPVC(ctx, k8sClient, metadataSyncer, vcenter,
+					pvc.Namespace, pvc)
+				if err != nil {
+					log.Errorf("FullSync for VC %s: Failed to add %s annotation for PVC %s. Err: %v",
+						vc, annCSIvSphereVolumeAccessibleTopology, pvc.Name, err)
+					continue
+				}
+			}
+		}
+	}
+
+	queryAllResult, err := utils.QueryAllVolumesForCluster(ctx, volManager,
+		metadataSyncer.configInfo.Cfg.Global.ClusterID, cnstypes.CnsQuerySelection{})
+	if err != nil {
+		log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
+		return err
+	}
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
+		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+		// Replace Volume Metadata using old cluster ID and replace with the new SupervisorID
+		var volumeIDsWithOldClusterID []cnstypes.CnsVolumeId
+		if len(queryAllResult.Volumes) > 0 {
+			for _, volume := range queryAllResult.Volumes {
+				volumeIDsWithOldClusterID = append(volumeIDsWithOldClusterID, volume.VolumeId)
+			}
+			queryAllResult, err := fullSyncGetQueryResults(ctx, volumeIDsWithOldClusterID,
+				metadataSyncer.configInfo.Cfg.Global.ClusterID, volManager, metadataSyncer)
+			if err != nil {
+				log.Errorf("FullSync for VC %s: fullSyncGetQueryResults failed to query volume metadata from vc. Err: %v", vc, err)
+				return err
+			}
+			var updateMetadataSpecArray []cnstypes.CnsVolumeMetadataUpdateSpec
+			for _, queryResult := range queryAllResult {
+				for _, volume := range queryResult.Volumes {
+					log.Infof("observed volume %q with old cluster Id: %q", volume.VolumeId,
+						metadataSyncer.configInfo.Cfg.Global.ClusterID)
+					var containerClusterArrayToAdd []cnstypes.CnsContainerCluster
+					var containerClusterArrayToDelete []cnstypes.CnsContainerCluster
+					var updatedContainerCluster cnstypes.CnsContainerCluster
+					for _, containerCluster := range volume.Metadata.ContainerClusterArray {
+						if containerCluster.ClusterId == metadataSyncer.configInfo.Cfg.Global.ClusterID {
+							updatedContainerCluster = containerCluster
+							updatedContainerCluster.ClusterId = metadataSyncer.configInfo.Cfg.Global.SupervisorID
+							containerClusterArrayToAdd = append(containerClusterArrayToAdd, updatedContainerCluster)
+							containerCluster.Delete = true
+							containerClusterArrayToDelete = append(containerClusterArrayToDelete, containerCluster)
+						}
+					}
+					updateSpecToDeleteMetadata := cnstypes.CnsVolumeMetadataUpdateSpec{
+						VolumeId: cnstypes.CnsVolumeId{
+							Id: volume.VolumeId.Id,
+						},
+						Metadata: cnstypes.CnsVolumeMetadata{
+							ContainerCluster:      volume.Metadata.ContainerCluster,
+							ContainerClusterArray: containerClusterArrayToDelete,
+						},
+					}
+					updateSpecToDeleteMetadata.Metadata.ContainerCluster.Delete = true
+					updateSpecToAddMetadata := cnstypes.CnsVolumeMetadataUpdateSpec{
+						VolumeId: cnstypes.CnsVolumeId{
+							Id: volume.VolumeId.Id,
+						},
+						Metadata: cnstypes.CnsVolumeMetadata{
+							ContainerCluster:      updatedContainerCluster,
+							ContainerClusterArray: containerClusterArrayToAdd,
+						},
+					}
+					for _, entityMetadata := range volume.Metadata.EntityMetadata {
+						if entityMetadata.GetCnsEntityMetadata().ClusterID ==
+							metadataSyncer.configInfo.Cfg.Global.ClusterID {
+							// Delete metadata for associated with old cluster ID
+							oldk8sEntityMetadata := *entityMetadata.(*cnstypes.CnsKubernetesEntityMetadata)
+							oldk8sEntityMetadata.Delete = true
+							// add metadata for new supervisor id
+							newk8sEntityMetadata := *entityMetadata.(*cnstypes.CnsKubernetesEntityMetadata)
+							newk8sEntityMetadata.ClusterID = metadataSyncer.configInfo.Cfg.Global.SupervisorID
+							for index, referredEntity := range newk8sEntityMetadata.ReferredEntity {
+								if referredEntity.ClusterID == metadataSyncer.configInfo.Cfg.Global.ClusterID {
+									referredEntity.ClusterID = metadataSyncer.configInfo.Cfg.Global.SupervisorID
+								}
+								newk8sEntityMetadata.ReferredEntity[index] = referredEntity
+							}
+							updateSpecToDeleteMetadata.Metadata.EntityMetadata =
+								append(updateSpecToDeleteMetadata.Metadata.EntityMetadata, &oldk8sEntityMetadata)
+							updateSpecToAddMetadata.Metadata.EntityMetadata =
+								append(updateSpecToAddMetadata.Metadata.EntityMetadata, &newk8sEntityMetadata)
+						}
+					}
+					updateMetadataSpecArray = append(updateMetadataSpecArray, updateSpecToAddMetadata)
+					updateMetadataSpecArray = append(updateMetadataSpecArray, updateSpecToDeleteMetadata)
+				}
+				if len(updateMetadataSpecArray) > 0 {
+					log.Infof("FullSync for VC %s: Replacing ClusterID: %q with new SupervisorID: %q",
+						vc, metadataSyncer.configInfo.Cfg.Global.ClusterID,
+						metadataSyncer.configInfo.Cfg.Global.SupervisorID)
+				}
+				for _, updateSpec := range updateMetadataSpecArray {
+					log.Debugf("Calling UpdateVolumeMetadata for volume %s with updateSpec: %+v",
+						updateSpec.VolumeId.Id, spew.Sdump(updateSpec))
+					if err := volManager.UpdateVolumeMetadata(ctx, &updateSpec); err != nil {
+						log.Warnf("FullSync for VC %s: UpdateVolumeMetadata failed while replacing clusterID "+
+							"with supervisorID. Error: %+v", vc, err)
+					}
+				}
+			}
+		}
+		querySelection := cnstypes.CnsQuerySelection{
+			Names: []string{
+				string(cnstypes.QuerySelectionNameTypeVolumeType),
+				string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
+			},
+		}
+		// get queryAllResult using new Supervisor ID for rest of full sync operations
+		queryAllResult, err = utils.QueryAllVolumesForCluster(ctx, volManager,
+			metadataSyncer.configInfo.Cfg.Global.SupervisorID, querySelection)
+		if err != nil {
+			log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
+			return err
+		}
+	}
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && isStorageQuotaM2FSSEnabled {
+		cnsBlockVolumeMap := make(map[string]cnstypes.CnsVolume)
+		for _, vol := range queryAllResult.Volumes {
+			// We do not support file volume snapshot, filtering out block volume only.
+			// cnsvolumeinfo snapshot details will be validated for volumes in cnsBlockVolumeMap
+			if vol.VolumeType == common.BlockVolumeType {
+				cnsBlockVolumeMap[vol.VolumeId.Id] = vol
+			}
+		}
+		log.Infof("calling validateAndCorrectVolumeInfoSnapshotDetails with %d volumes",
+			len(cnsBlockVolumeMap))
+		validateAndCorrectVolumeInfoSnapshotDetails(ctx, cnsBlockVolumeMap)
+	}
+	vcHostObj, vcHostObjFound := metadataSyncer.configInfo.Cfg.VirtualCenter[vc]
+	if !vcHostObjFound {
+		log.Errorf("FullSync for VC %s: Failed to get VC host object.", vc)
+		return errors.New("failed to get VC host object")
+	}
+
+	volumeToCnsEntityMetadataMap, volumeToK8sEntityMetadataMap, volumeClusterDistributionMap, err :=
+		fullSyncConstructVolumeMaps(ctx, k8sPVs, queryAllResult.Volumes, pvToPVCMap,
+			pvcToPodMap, metadataSyncer, migrationFeatureStateForFullSync, volManager, vc)
+	if err != nil {
+		log.Errorf("FullSync for VC %s: fullSyncGetEntityMetadata failed with err %+v", vc, err)
+		return err
+	}
+	log.Debugf("FullSync for VC %s: pvToCnsEntityMetadataMap %+v \n pvToK8sEntityMetadataMap: %+v \n",
+		vc, spew.Sdump(volumeToCnsEntityMetadataMap), spew.Sdump(volumeToK8sEntityMetadataMap))
+	log.Debugf("FullSync for VC %s: volumes where clusterDistribution is set: %+v", vc, volumeClusterDistributionMap)
 
 	containerCluster := cnsvsphere.GetContainerCluster(clusterIDforVolumeMetadata,
 		vcHostObj.User, metadataSyncer.clusterFlavor,
@@ -287,18 +390,236 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 	go fullSyncDeleteVolumes(ctx, volToBeDeleted, metadataSyncer, &wg, migrationFeatureStateForFullSync, volManager, vc)
 	wg.Wait()
 
-	// Sync VolumeInfo CRs for the below conditions:
-	// Either it is a Vanilla k8s deployment with Multi-VC configuration or, it's a StretchSupervisor cluster
-	if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 ||
-		(metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && IsPodVMOnStretchSupervisorFSSEnabled) {
-		volumeInfoCRFullSync(ctx, metadataSyncer, vc)
-		cleanUpVolumeInfoCrDeletionMap(ctx, metadataSyncer, vc)
-	}
-
 	cleanupCnsMaps(k8sPVMap, vc)
 	log.Debugf("FullSync for VC %s: cnsDeletionMap at end of cycle: %v", vc, cnsDeletionMap)
 	log.Debugf("FullSync for VC %s: cnsCreationMap at end of cycle: %v", vc, cnsCreationMap)
 	log.Infof("FullSync for VC %s: end", vc)
+	return nil
+}
+
+// getPVNodeAffinity finds topology associated with given PV and returns the same
+func getPVNodeAffinity(ctx context.Context, metadataSyncer *metadataSyncInformer,
+	vc *cnsvsphere.VirtualCenter, pv *v1.PersistentVolume) ([]*csi.Topology, error) {
+	log := logger.GetLogger(ctx)
+	var pvTopology []*csi.Topology
+	var singleZoneTopologyToadd string
+
+	// Check availability zones present in supervisor to determine the node
+	// affinity information to be patched on pv
+	azClusterMap := volumeTopologyService.GetAZClustersMap(ctx)
+	if len(azClusterMap) == 1 {
+		// In case of only single zone present, return same zone as PV topology
+		for zoneName := range azClusterMap {
+			singleZoneTopologyToadd = zoneName
+			break
+		}
+		log.Infof("getPVNodeAffinity: Found single zone supervisor cluster with zone %+v",
+			singleZoneTopologyToadd)
+		pvTopology = append(pvTopology, &csi.Topology{
+			Segments: map[string]string{
+				v1.LabelTopologyZone: singleZoneTopologyToadd,
+			},
+		})
+	} else {
+		// Find zones associated with datastore on which volume is created
+		volManager, err := getVolManagerForVcHost(ctx, vc.Config.Host, metadataSyncer)
+		if err != nil {
+			log.Errorf("getPVNodeAffinity: Failed to get volume manager for VC %s. Err: %v", vc, err)
+			return nil, err
+		}
+		queryFilter := cnstypes.CnsQueryFilter{
+			VolumeIds: []cnstypes.CnsVolumeId{
+				{
+					Id: pv.Spec.CSI.VolumeHandle,
+				},
+			},
+		}
+		querySelection := cnstypes.CnsQuerySelection{
+			Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
+		}
+		queryResult, err := utils.QueryVolumeUtil(ctx, volManager, queryFilter, &querySelection,
+			true)
+		if err != nil || queryResult == nil || len(queryResult.Volumes) != 1 {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to find the datastore on which volume %q is provisioned. "+
+					"Error: %+v", pv.Spec.CSI.VolumeHandle, err)
+		}
+		selectedDatastore := queryResult.Volumes[0].DatastoreUrl
+		// Calculate accessible topology for the provisioned volume.
+		topoSegToDatastoresMap := make(map[string][]*cnsvsphere.DatastoreInfo)
+		datastoreAccessibleTopology, err := volumeTopologyService.GetTopologyInfoFromNodes(ctx,
+			commoncotypes.WCPRetrieveTopologyInfoParams{
+				DatastoreURL:           selectedDatastore,
+				StorageTopologyType:    "",
+				TopologyRequirement:    nil,
+				Vc:                     vc,
+				TopoSegToDatastoresMap: topoSegToDatastoresMap})
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get topology of datastore on which volume %q is provisioned."+
+					" Error: %+v", pv.Spec.CSI.VolumeHandle, err)
+		}
+		// Add topology segments to output.
+		for _, topoSegments := range datastoreAccessibleTopology {
+			volumeTopology := &csi.Topology{
+				Segments: topoSegments,
+			}
+			pvTopology = append(pvTopology, volumeTopology)
+		}
+		log.Infof("getPVNodeAffinity: Found multi zone supervisor cluster with datastore attached to "+
+			"zones %+v", pvTopology)
+	}
+	return pvTopology, nil
+}
+
+// generateVolumeAccessibleTopologyJSON returns JSON string from AccessibleTopology given as input.
+// This value will be set on the PVC for annotation - "csi.vsphere.volume-accessible-topology"
+func generateVolumeAccessibleTopologyJSON(topologies []*csi.Topology) (string, error) {
+	segmentsArray := make([]string, 0)
+	for _, topology := range topologies {
+		jsonSegment, err := json.Marshal(topology.Segments)
+		if err != nil {
+			return "", fmt.Errorf("failed to marshal topology segment: %v to json. Err: %v",
+				topology.Segments, err)
+		}
+		segmentsArray = append(segmentsArray, string(jsonSegment))
+	}
+	return "[" + strings.Join(segmentsArray, ",") + "]", nil
+}
+
+// patchNodeAffinityToPVAndPVC finds the topology associated with PV and patches that info as
+// node affinity to PV objects
+// This also adds "csi.vsphere.volume-accessible-topology" annotation to associated PVC, if any
+func patchNodeAffinityToPVAndPVC(ctx context.Context, k8sClient clientset.Interface,
+	metadataSyncer *metadataSyncInformer,
+	vc *cnsvsphere.VirtualCenter, pvWithoutNodeAffinity []*v1.PersistentVolume,
+	pvToPVCMap map[string]*v1.PersistentVolumeClaim) {
+	log := logger.GetLogger(ctx)
+	// Iterate over all PVs missing node affinity info, discover the topology and patch to both PV & PVC
+	for _, pv := range pvWithoutNodeAffinity {
+		log.Infof("patchNodeAffinityToPVAndPVC: Setting node affinity for pv: %q", pv.Name)
+		oldData, err := json.Marshal(pv)
+		if err != nil {
+			log.Errorf("patchNodeAffinityToPVAndPVC: Failed to marshal pv: %v, Error: %v", pv, err)
+			continue
+		}
+		pvCSITopology, err := getPVNodeAffinity(ctx, metadataSyncer, vc, pv)
+		if err != nil {
+			log.Errorf("patchNodeAffinityToPVAndPVC: Unable to get node affinity for PV %q. Error: %+v",
+				pv.Name, err)
+			continue
+		}
+		newPV := pv.DeepCopy()
+		newPV.Spec.NodeAffinity = GenerateVolumeNodeAffinity(pvCSITopology)
+		newData, err := json.Marshal(newPV)
+		if err != nil {
+			log.Errorf("patchNodeAffinityToPVAndPVC: Failed to marshal updated PV with "+
+				"node affinity rules: %v, Error: %v", newPV, err)
+			continue
+		}
+		patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, pv)
+		if err != nil {
+			log.Errorf("patchNodeAffinityToPVAndPVC: Error creating two way merge patch for PV %q"+
+				" with error : %v", pv.Name, err)
+			continue
+		}
+		// Patch node affinity to PV
+		_, err = k8sClient.CoreV1().PersistentVolumes().Patch(ctx, pv.Name, types.StrategicMergePatchType,
+			patchBytes, metav1.PatchOptions{})
+		if err != nil {
+			log.Errorf("patchNodeAffinityToPVAndPVC: Failed to patch the PV %q", pv.Name)
+			continue
+		}
+		log.Infof("patchNodeAffinityToPVAndPVC: Updated PV %s with node affinity details successfully "+
+			"for volume %q", pv.Name, pv.Spec.CSI.VolumeHandle)
+		// Add "csi.vsphere.volume-accessible-topology" annotation to associated PVC
+		if pvc, ok := pvToPVCMap[pv.Name]; ok {
+			log.Infof("patchNodeAffinityToPVAndPVC: Setting claim annotation: %q for pvc: %q, namespace: %q",
+				annCSIvSphereVolumeAccessibleTopology, pvc.Name, pvc.Namespace)
+			err = patchVolumeAccessibleTopologyToPVC(ctx, k8sClient, pvc, pvCSITopology)
+			if err != nil {
+				log.Warnf("patchNodeAffinityToPVAndPVC: Failed to generate VolumeAccessibleTopology Json."+
+					" Err: %v", err)
+				continue
+			}
+		}
+	}
+}
+
+// setVolumeAccessibleTopologyForPVC sets the "csi.vsphere.volume-accessible-topology" annotation on the PVC
+// for DevOps user to know which zone volume is provisioned in
+func setVolumeAccessibleTopologyForPVC(ctx context.Context, k8sClient clientset.Interface,
+	metadataSyncer *metadataSyncInformer, vc *cnsvsphere.VirtualCenter, namespace string,
+	pvc *v1.PersistentVolumeClaim) error {
+	log := logger.GetLogger(ctx)
+	log.Infof("setVolumeAccessibleTopologyForPVC: Setting claim annotation: %q for pvc: %q, namespace: %q",
+		annCSIvSphereVolumeAccessibleTopology, pvc.Name, namespace)
+	if pvc.ObjectMeta.Annotations[annCSIvSphereVolumeAccessibleTopology] == "" {
+		pv, err := k8sClient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+		if err != nil {
+			log.Warnf("setVolumeAccessibleTopologyForPVC: Failed to get PV: %q to fetch "+
+				"node topology %q annotation. Err: %v.",
+				pvc.Spec.VolumeName, annCSIvSphereVolumeAccessibleTopology, err)
+			return err
+		}
+		if pv.Spec.NodeAffinity != nil {
+			pvCSITopology, err := getPVNodeAffinity(ctx, metadataSyncer, vc, pv)
+			if err != nil {
+				log.Errorf("setVolumeAccessibleTopologyForPVC: Unable to get node affinity for PV %q. "+
+					"Error: %+v", pv.Name, err)
+				return err
+			}
+			err = patchVolumeAccessibleTopologyToPVC(ctx, k8sClient, pvc, pvCSITopology)
+			if err != nil {
+				log.Warnf("setVolumeAccessibleTopologyForPVC: Failed to generate VolumeAccessibleTopology Json."+
+					" Err: %v", err)
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// patchVolumeAccessibleTopologyToPVC sets the "csi.vsphere.volume-accessible-topology" annotation on the PVC
+// for DevOps user to know which zone volume is provisioned in
+func patchVolumeAccessibleTopologyToPVC(ctx context.Context, k8sClient clientset.Interface,
+	pvc *v1.PersistentVolumeClaim, accessibleTopology []*csi.Topology) error {
+	log := logger.GetLogger(ctx)
+	annCSIvSphereVolumeAccessibleTopologyValue, err := generateVolumeAccessibleTopologyJSON(accessibleTopology)
+	if err != nil {
+		log.Warnf("patchVolumeAccessibleTopologyToPVC: Failed to generate VolumeAccessibleTopology Json. "+
+			"Err: %v", err)
+		return err
+	}
+	oldData, err := json.Marshal(pvc)
+	if err != nil {
+		log.Errorf("patchVolumeAccessibleTopologyToPVC: Failed to marshal pvc: %v, Error: %v", pvc, err)
+		return err
+	}
+	newPVC := pvc.DeepCopy()
+	newPVC.Annotations[annCSIvSphereVolumeAccessibleTopology] = annCSIvSphereVolumeAccessibleTopologyValue
+	newData, err := json.Marshal(newPVC)
+	if err != nil {
+		log.Errorf("patchVolumeAccessibleTopologyToPVC: Failed to marshal updated PV with "+
+			"node affinity rules: %v, Error: %v", newPVC, err)
+		return err
+	}
+	patchBytes, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, pvc)
+	if err != nil {
+		log.Errorf("patchVolumeAccessibleTopologyToPVC: Error creating two way merge patch for PV %q"+
+			" with error : %v", pvc.Name, err)
+		return err
+	}
+	pvc, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Patch(ctx, pvc.Name,
+		types.StrategicMergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		log.Errorf("patchVolumeAccessibleTopologyToPVC: Failed to update PVC %q with %q annotation. Err: %v",
+			pvc.Name, annCSIvSphereVolumeAccessibleTopology, err)
+		return err
+
+	}
+	log.Infof("patchVolumeAccessibleTopologyToPVC: Added annotation %q successfully to PVC %q",
+		annCSIvSphereVolumeAccessibleTopology, pvc.Name)
 	return nil
 }
 
@@ -376,17 +697,17 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 		}
 		config, err := k8s.GetKubeConfig(ctx)
 		if err != nil {
-			log.Errorf("storagePolicyUsageCRSync: Failed to get KubeConfig. err: %v", err)
+			log.Errorf("volumeInfoCRFullSync: Failed to get KubeConfig. err: %v", err)
 			return
 		}
 		k8sClient, err := clientset.NewForConfig(config)
 		if err != nil {
-			log.Errorf("storagePolicyUsageCRSync: Failed to create kubernetes client. Err: %+v", err)
+			log.Errorf("volumeInfoCRFullSync: Failed to create kubernetes client. Err: %+v", err)
 			return
 		}
 		storageClassList, err := k8sClient.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
 		if err != nil {
-			log.Errorf("storagePolicyUsageCRSync: Failed to list storageclasses. Err: %+v", err)
+			log.Errorf("volumeInfoCRFullSync: Failed to list storageclasses. Err: %+v", err)
 			return
 		}
 		// Create scNameToPolicyIdMap map for easy lookup of PolicyIds for a given storageclass name
@@ -417,31 +738,37 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 			} else if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
 				IsPodVMOnStretchSupervisorFSSEnabled {
 				pv := volumeIdTok8sPVMap[volumeID]
-				pvc, err := metadataSyncer.pvcLister.PersistentVolumeClaims(
-					pv.Spec.ClaimRef.Namespace).Get(pv.Spec.ClaimRef.Name)
-				if err != nil {
-					log.Warnf("Failed to get pvc for namespace %s and name %s. err=%+v",
-						pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name, err)
+				// claimref will be nil when volume is static provisioned or any available/released pv
+				// which are not claimed by pvc. added a check to handle such cases.
+				if pv.Spec.ClaimRef == nil {
+					log.Warnf("Claimref is not available for pv %s", pv.Name)
 					continue
-				}
-				pvcCapacity := pvc.Status.Capacity[v1.ResourceStorage]
-				if pvc.Spec.StorageClassName != nil {
-					err = volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, pvc.Namespace,
-						scNameToPolicyIdMap[*pvc.Spec.StorageClassName], *pvc.Spec.StorageClassName, vc, &pvcCapacity)
+				} else {
+					pvc, err := metadataSyncer.pvcLister.PersistentVolumeClaims(
+						pv.Spec.ClaimRef.Namespace).Get(pv.Spec.ClaimRef.Name)
 					if err != nil {
-						log.Warnf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
-							"Error: %+v", vc, volumeID, err)
+						log.Warnf("Failed to get pvc for namespace %s and name %s. err=%+v",
+							pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name, err)
 						continue
 					}
-				} else {
-					log.Warnf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
-						"StorageClassName not found in the PVC spec %v.", vc, volumeID, pvc.Spec)
-					continue
+					pvcCapacity := pvc.Status.Capacity[v1.ResourceStorage]
+					if pvc.Spec.StorageClassName != nil {
+						err = volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, pvc.Namespace,
+							scNameToPolicyIdMap[*pvc.Spec.StorageClassName], *pvc.Spec.StorageClassName, vc, &pvcCapacity)
+						if err != nil {
+							log.Warnf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
+								"Error: %+v", vc, volumeID, err)
+							continue
+						}
+					} else {
+						log.Warnf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
+							"StorageClassName not found in the PVC spec %v.", vc, volumeID, pvc.Spec)
+						continue
+					}
 				}
 			}
 		}
 	}
-
 	volumeInfoCRList := volumeInfoService.ListAllVolumeInfos()
 	for _, volumeInfo := range volumeInfoCRList {
 		cnsvolumeinfo := &cnsvolumeinfov1alpha1.CNSVolumeInfo{}
@@ -451,7 +778,6 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 			log.Errorf("FullSync for VC %s: failed to parse cnsvolumeinfo object: %v, err: %v", vc, cnsvolumeinfo, err)
 			continue
 		}
-
 		if cnsvolumeinfo.Spec.VCenterServer == vc {
 			if _, exists := currentK8sPVMap[cnsvolumeinfo.Spec.VolumeID]; !exists {
 				// If a PV is not present in the cluster for two full sync cycles, delete its VolumeInfo CR.
@@ -473,9 +799,100 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 	log.Debugf("FullSync for VC %s: volumeInfoCrDeletionMap: %v", vc, volumeInfoCrDeletionMap)
 }
 
+// validateAndCorrectVolumeInfoSnapshotDetails sync cnsvolumeinfo snapshot details with by comparing
+// the aggregatedSnapshotSize of CNS volume.
+// validate aggregated snapshot size: compare aggregated snapshot size of individual volume
+// in cns with the size in cnsvolumeinfo. if found discrepancy in order to correct the values
+// update the cnsvolumeinfo.
+func validateAndCorrectVolumeInfoSnapshotDetails(ctx context.Context,
+	cnsBlockVolumeMap map[string]cnstypes.CnsVolume) {
+	log := logger.GetLogger(ctx)
+	volumeInfoCRList := volumeInfoService.ListAllVolumeInfos()
+	alreadySyncedVolumeCount := 0
+	outOfSyncVolumeCount := 0
+	for _, volumeInfo := range volumeInfoCRList {
+		cnsvolumeinfo := &cnsvolumeinfov1alpha1.CNSVolumeInfo{}
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(volumeInfo.(*unstructured.Unstructured).Object,
+			&cnsvolumeinfo)
+		if err != nil {
+			log.Errorf("Failed to parse cnsvolumeinfo object: %v, err: %v", cnsvolumeinfo, err)
+			continue
+		}
+		if cnsVol, ok := cnsBlockVolumeMap[cnsvolumeinfo.Spec.VolumeID]; ok {
+			log.Debugf("validate volume info for storage details for volume %s", cnsVol.VolumeId.Id)
+			var aggregatedSnapshotCapacityInMB int64
+			if cnsVol.BackingObjectDetails != nil &&
+				cnsVol.BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails) != nil {
+				val, ok := cnsVol.BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails)
+				if ok {
+					aggregatedSnapshotCapacityInMB = val.AggregatedSnapshotCapacityInMb
+				}
+				log.Debugf("Received aggregatedSnapshotCapacity %dMB for volume %s from CNS",
+					aggregatedSnapshotCapacityInMB, cnsVol.VolumeId.Id)
+				if cnsvolumeinfo.Spec.AggregatedSnapshotSize != nil && cnsvolumeinfo.Spec.ValidAggregatedSnapshotSize {
+					aggregatedSnapshotCapacity := resource.NewQuantity(aggregatedSnapshotCapacityInMB*common.MbInBytes,
+						resource.BinarySI)
+					if aggregatedSnapshotCapacity.Value() == cnsvolumeinfo.Spec.AggregatedSnapshotSize.Value() {
+						log.Debugf("volume %s Aggregated Snapshot capacity %s in CnsVolumeInfo is in sync with CNS",
+							cnsVol.VolumeId.Id, aggregatedSnapshotCapacity.String())
+						alreadySyncedVolumeCount++
+						continue
+					}
+					log.Infof("Aggregated Snapshot size mismatch for volume %s, %s in CnsVolumeInfo and %dMB in CNS",
+						cnsVol.VolumeId.Id, cnsvolumeinfo.Spec.AggregatedSnapshotSize.String(),
+						aggregatedSnapshotCapacityInMB)
+				}
+				// Nothing to do if it's invalid in CNS and CNSVolumeInfo
+				if !cnsvolumeinfo.Spec.ValidAggregatedSnapshotSize && aggregatedSnapshotCapacityInMB == -1 {
+					log.Infof("volume %s aggregated snapshot capacity not present in CNS and CNSVolumeInfo",
+						cnsVol.VolumeId.Id)
+					continue
+				}
+				// implies the cnsvolumeinfo has capacity mismatch with CNS queryVolume result OR
+				// existing cnsvolumeinfo aggregated snapshot is not set or invalid
+				log.Infof("Update aggregatedSnapshotCapacity for volume %s to %dMB",
+					cnsVol.VolumeId.Id, aggregatedSnapshotCapacityInMB)
+				// use current time as snapshot completion time is not available in fullsync.
+				currentTime := time.Now()
+				cnsSnapInfo := &volumes.CnsSnapshotInfo{
+					SourceVolumeID:                      cnsvolumeinfo.Spec.VolumeID,
+					SnapshotLatestOperationCompleteTime: time.Now(),
+					AggregatedSnapshotCapacityInMb:      aggregatedSnapshotCapacityInMB,
+				}
+				log.Infof("snapshot operation completion time unavailable for volumeID %s, will"+
+					" use current time %v instead", cnsvolumeinfo.Spec.VolumeID, currentTime.String())
+				patch, err := common.GetValidatedCNSVolumeInfoPatch(ctx, cnsSnapInfo)
+				if err != nil {
+					log.Errorf("unable to get VolumeInfo patch for %s. Error: %+v. Continuing..",
+						cnsvolumeinfo.Spec.VolumeID, err)
+					continue
+				}
+				patchBytes, err := json.Marshal(patch)
+				if err != nil {
+					log.Errorf("error while create VolumeInfo patch for volume %s. Error while marshaling: %+v. Continuing..",
+						cnsvolumeinfo.Spec.VolumeID, err)
+					continue
+				}
+				err = volumeInfoService.PatchVolumeInfo(ctx, cnsvolumeinfo.Spec.VolumeID, patchBytes,
+					allowedRetriesToPatchCNSVolumeInfo)
+				if err != nil {
+					log.Errorf("failed to patch CNSVolumeInfo instance to update snapshot details."+
+						"for volume %s. Error: %+v. Continuing..", cnsvolumeinfo.Spec.VolumeID, err)
+					continue
+				}
+				log.Infof("Updated CNSvolumeInfo with Snapshot details successfully for volume %s",
+					cnsvolumeinfo.Spec.VolumeID)
+				outOfSyncVolumeCount++
+			}
+		}
+	}
+	log.Infof("Number of volumes with synced aggregated snapshot size with CNS %d", alreadySyncedVolumeCount)
+	log.Infof("Number of volumes with out-of-sync aggregated snapshot size with CNS %d", outOfSyncVolumeCount)
+}
+
 // fullSyncCreateVolumes creates volumes with given array of createSpec.
 // Before creating a volume, all current K8s volumes are retrieved.
-// If the volume is successfully created, it is removed from cnsCreationMap.
+// If the volume is successfully created, it is removed from `cnsCreationMap`.
 func fullSyncCreateVolumes(ctx context.Context, createSpecArray []cnstypes.CnsVolumeCreateSpec,
 	metadataSyncer *metadataSyncInformer, wg *sync.WaitGroup, migrationFeatureStateForFullSync bool,
 	volManager volumes.Manager, vc string) {
@@ -788,21 +1205,15 @@ func fullSyncConstructVolumeMaps(ctx context.Context, pvList []*v1.PersistentVol
 			var cnsMetadata []cnstypes.BaseCnsEntityMetadata
 			allEntityMetadata := volume.Metadata.EntityMetadata
 			for _, metadata := range allEntityMetadata {
-				if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID ==
-					clusterIDforVolumeMetadata {
+				if metadata.(*cnstypes.CnsKubernetesEntityMetadata).ClusterID == clusterIDforVolumeMetadata {
 					cnsMetadata = append(cnsMetadata, metadata)
 				}
 			}
 			volumeToCnsEntityMetadataMap[volume.VolumeId.Id] = cnsMetadata
-			if len(volume.Metadata.ContainerClusterArray) == 1 &&
-				clusterIDforVolumeMetadata == volume.Metadata.ContainerClusterArray[0].ClusterId &&
-				metadataSyncer.configInfo.Cfg.Global.ClusterDistribution ==
-					volume.Metadata.ContainerClusterArray[0].ClusterDistribution {
-				log.Debugf("Volume %s has cluster distribution set to %s",
-					volume.Name, volume.Metadata.ContainerClusterArray[0].ClusterDistribution)
-				volumeClusterDistributionMap[volume.VolumeId.Id] = true
-			}
 
+			volumeClusterDistributionMap[volume.VolumeId.Id] =
+				hasClusterDistributionSet(ctx, volume, clusterIDforVolumeMetadata,
+					metadataSyncer.configInfo.Cfg.Global.ClusterDistribution)
 		}
 	}
 	return volumeToCnsEntityMetadataMap, volumeToK8sEntityMetadataMap, volumeClusterDistributionMap, nil
@@ -864,7 +1275,7 @@ func fullSyncGetVolumeSpecs(ctx context.Context, vCenterVersion string, pvList [
 				log.Infof("FullSync for VC %s: update is required for volume: %q", vc, volumeHandle)
 				operationType = "updateVolume"
 			} else {
-				log.Infof("FullSync for VC %s: update is not required for volume: %q", vc, volumeHandle)
+				log.Debugf("FullSync for VC %s: update is not required for volume: %q", vc, volumeHandle)
 			}
 		}
 		switch operationType {
@@ -1146,6 +1557,153 @@ func cleanupCnsMaps(k8sPVs map[string]string, vc string) {
 		if _, existsInK8s := k8sPVs[volID]; existsInK8s {
 			// Delete volume from cnsDeletionMap which is present in kubernetes.
 			delete(cnsDeletionMap[vc], volID)
+		}
+	}
+}
+
+// cleanupUnusedPVCsAndSnapshotsFromGuestCluster iterates over all PVCs and VolumeSnapshots and
+// filter ones with DeletionTimestamp set but CNS specific finalizer present. These finalizers are added to
+// PVCs and VolumeSnapshots from guest cluster during their creation.
+// If such objects found, remove the finalizer from those objects if corresponding guest cluster is not-running/deleted.
+// This code handles cases where namespace deletion causes guest cluster and its corresponding components
+// to be deleted but associated objects on supervisor remain stuck in Terminating state.
+func cleanupUnusedPVCsAndSnapshotsFromGuestCluster(ctx context.Context) {
+	log := logger.GetLogger(ctx)
+	// Create K8S client and snapshotter client
+	k8sClient, err := k8s.NewClient(ctx)
+	if err != nil {
+		log.Errorf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Failed to get kubernetes client. Err: %+v", err)
+		return
+	}
+	snapshotterClient, err := k8s.NewSnapshotterClient(ctx)
+	if err != nil {
+		log.Errorf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to get snapshotterClient. Err: %v", err)
+		return
+	}
+
+	// Create client to operator on Cluster object
+	restClientConfig, err := k8s.GetKubeConfig(ctx)
+	if err != nil {
+		msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Failed to initialize rest clientconfig. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+	ccClient, err := k8s.NewClientForGroup(ctx, restClientConfig, ccV1beta1.GroupVersion.Group)
+	if err != nil {
+		msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Failed to get vmOperatorClient. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+
+	// Get all VolumeSnapshots and check if any marked for deletion but has finalizer
+	// "cns.vmware.com/volumesnapshot-protection", set while creation from guest cluster.
+	// If found, remove the finalizer "cns.vmware.com/volumesnapshot-protection" from that snapshot.
+	vsList, err := snapshotterClient.SnapshotV1().VolumeSnapshots("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Errorf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to list VolumeSnapshot."+
+			" Err: %v", err)
+		return
+	}
+	for _, vs := range vsList.Items {
+		// Check if snapshot is being deleted and has "cns.vmware.com/volumesnapshot-protection" finalizer
+		if (vs.ObjectMeta.DeletionTimestamp != nil) &&
+			(len(vs.ObjectMeta.Finalizers) != 0) {
+			for i, finalizer := range vs.ObjectMeta.Finalizers {
+				if finalizer != cnsoperatortypes.CNSSnapshotFinalizer {
+					continue
+				}
+				// Fetch guest cluster name from snapshot label and check if that guest cluster,
+				// where associated snapshot was created, is running or not.
+				var tkcClusterName string
+				for key := range vs.ObjectMeta.Labels {
+					if strings.Contains(key, "TKGService") {
+						tkcDetails := strings.Split(key, "/")
+						tkcClusterName = tkcDetails[0]
+						break
+					}
+				}
+				cc := &ccV1beta1.Cluster{}
+				err := ccClient.Get(ctx, client.ObjectKey{
+					Namespace: vs.Namespace,
+					Name:      tkcClusterName,
+				}, cc)
+				if err != nil && !apierrors.IsNotFound(err) {
+					msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to get Cluster %q "+
+						"in %q namespace. Err: %+v", tkcClusterName, vs.Namespace, err)
+					log.Error(msg)
+				} else if ((err == nil) && (cc.Status.Phase != "Running")) || apierrors.IsNotFound(err) {
+					// Remove finalizer if associated guest cluster is not-running/deleted already
+					log.Infof("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Removing %q finalizer from VolumeSnapshot "+
+						"with name: %q on namespace: %q in Terminating state",
+						cnsoperatortypes.CNSSnapshotFinalizer, vs.Name, vs.Namespace)
+					vs.ObjectMeta.Finalizers = slices.Delete(vs.ObjectMeta.Finalizers, i,
+						i+1)
+					_, err = snapshotterClient.SnapshotV1().VolumeSnapshots(vs.Namespace).Update(ctx,
+						&vs, metav1.UpdateOptions{})
+					if err != nil {
+						msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to update "+
+							"supervisor VolumeSnapshot %q in %q namespace. Err: %+v", vs.Name, vs.Namespace, err)
+						log.Error(msg)
+					}
+				}
+			}
+		}
+	}
+
+	// Get all PVCs and check if any marked for deletion but have finalizer "cns.vmware.com/pvc-protection",
+	// set while creation from guest cluster.
+	// If found, remove the finalizer "cns.vmware.com/pvc-protection" from that PVC.
+	pvcList, err := k8sClient.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Errorf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to list PersistentVolumeClaims."+
+			" Err: %v", err)
+		return
+	}
+	for _, pvc := range pvcList.Items {
+		// Check if PVC is being deleted and has "cns.vmware.com/pvc-protection" finalizer
+		if (pvc.ObjectMeta.DeletionTimestamp != nil) &&
+			(len(pvc.ObjectMeta.Finalizers) != 0) {
+			for i, finalizer := range pvc.ObjectMeta.Finalizers {
+				if finalizer != cnsoperatortypes.CNSVolumeFinalizer {
+					continue
+				}
+				// Fetch guest cluster name from PVC label and check if that guest cluster,
+				// where associated PVC was created, is running or not.
+				var tkcClusterName string
+				for key := range pvc.ObjectMeta.Labels {
+					if strings.Contains(key, "TKGService") {
+						tkcDetails := strings.Split(key, "/")
+						tkcClusterName = tkcDetails[0]
+						break
+					}
+				}
+				cc := &ccV1beta1.Cluster{}
+				err := ccClient.Get(ctx, client.ObjectKey{
+					Namespace: pvc.Namespace,
+					Name:      tkcClusterName,
+				}, cc)
+				if err != nil && !apierrors.IsNotFound(err) {
+					msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to get Cluster %q "+
+						"in %q namespace. Err: %+v", tkcClusterName, pvc.Namespace, err)
+					log.Error(msg)
+				} else if ((err == nil) && (cc.Status.Phase != "Running")) || apierrors.IsNotFound(err) {
+					// Remove finalizer if associated guest cluster is not-running/deleted already
+					log.Infof("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Removing %q finalizer from PVC "+
+						"with name: %q on namespace: %q in Terminating state",
+						cnsoperatortypes.CNSVolumeFinalizer, pvc.Name, pvc.Namespace)
+					pvc.ObjectMeta.Finalizers = slices.Delete(pvc.ObjectMeta.Finalizers, i,
+						i+1)
+					_, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx,
+						&pvc, metav1.UpdateOptions{})
+					if err != nil {
+						msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to update "+
+							"supervisor PVC %q in %q namespace. Err: %+v", pvc.Name, pvc.Namespace, err)
+						log.Error(msg)
+					}
+				}
+			}
 		}
 	}
 }

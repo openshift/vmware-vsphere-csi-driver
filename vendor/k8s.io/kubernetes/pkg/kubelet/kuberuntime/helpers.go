@@ -18,6 +18,7 @@ package kuberuntime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -25,9 +26,13 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/features"
+	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/security/apparmor"
 )
 
 type podsByID []*kubecontainer.Pod
@@ -92,15 +97,22 @@ func (m *kubeGenericRuntimeManager) toKubeContainer(c *runtimeapi.Container) (*k
 		return nil, fmt.Errorf("unable to convert a nil pointer to a runtime container")
 	}
 
+	// Keep backwards compatibility to older runtimes, c.ImageId has been added in v1.30
+	imageID := c.ImageRef
+	if c.ImageId != "" {
+		imageID = c.ImageId
+	}
+
 	annotatedInfo := getContainerInfoFromAnnotations(c.Annotations)
 	return &kubecontainer.Container{
-		ID:                   kubecontainer.ContainerID{Type: m.runtimeName, ID: c.Id},
-		Name:                 c.GetMetadata().GetName(),
-		ImageID:              c.ImageRef,
-		Image:                c.Image.Image,
-		Hash:                 annotatedInfo.Hash,
-		HashWithoutResources: annotatedInfo.HashWithoutResources,
-		State:                toKubeContainerState(c.State),
+		ID:                  kubecontainer.ContainerID{Type: m.runtimeName, ID: c.Id},
+		Name:                c.GetMetadata().GetName(),
+		ImageID:             imageID,
+		ImageRef:            c.ImageRef,
+		ImageRuntimeHandler: c.Image.RuntimeHandler,
+		Image:               c.Image.Image,
+		Hash:                annotatedInfo.Hash,
+		State:               toKubeContainerState(c.State),
 	}, nil
 }
 
@@ -163,10 +175,10 @@ func isInitContainerFailed(status *kubecontainer.Status) bool {
 	return false
 }
 
-// getStableKey generates a key (string) to uniquely identify a
+// GetStableKey generates a key (string) to uniquely identify a
 // (pod, container) tuple. The key should include the content of the
 // container, so that any change to the container generates a new key.
-func getStableKey(pod *v1.Pod, container *v1.Container) string {
+func GetStableKey(pod *v1.Pod, container *v1.Container) string {
 	hash := strconv.FormatUint(kubecontainer.HashContainer(container), 16)
 	return fmt.Sprintf("%s_%s_%s_%s_%s", pod.Name, pod.Namespace, string(pod.UID), container.Name, hash)
 }
@@ -180,13 +192,13 @@ func buildContainerLogsPath(containerName string, restartCount int) string {
 }
 
 // BuildContainerLogsDirectory builds absolute log directory path for a container in pod.
-func BuildContainerLogsDirectory(podNamespace, podName string, podUID types.UID, containerName string) string {
-	return filepath.Join(BuildPodLogsDirectory(podNamespace, podName, podUID), containerName)
+func BuildContainerLogsDirectory(podLogsDir, podNamespace, podName string, podUID types.UID, containerName string) string {
+	return filepath.Join(BuildPodLogsDirectory(podLogsDir, podNamespace, podName, podUID), containerName)
 }
 
 // BuildPodLogsDirectory builds absolute log directory path for a pod sandbox.
-func BuildPodLogsDirectory(podNamespace, podName string, podUID types.UID) string {
-	return filepath.Join(podLogsRootDirectory, strings.Join([]string{podNamespace, podName,
+func BuildPodLogsDirectory(podLogsDir, podNamespace, podName string, podUID types.UID) string {
+	return filepath.Join(podLogsDir, strings.Join([]string{podNamespace, podName,
 		string(podUID)}, logPathDelimiter))
 }
 
@@ -199,7 +211,7 @@ func parsePodUIDFromLogsDirectory(name string) types.UID {
 }
 
 // toKubeRuntimeStatus converts the runtimeapi.RuntimeStatus to kubecontainer.RuntimeStatus.
-func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus) *kubecontainer.RuntimeStatus {
+func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus, handlers []*runtimeapi.RuntimeHandler, features *runtimeapi.RuntimeFeatures) *kubecontainer.RuntimeStatus {
 	conditions := []kubecontainer.RuntimeCondition{}
 	for _, c := range status.GetConditions() {
 		conditions = append(conditions, kubecontainer.RuntimeCondition{
@@ -209,54 +221,27 @@ func toKubeRuntimeStatus(status *runtimeapi.RuntimeStatus) *kubecontainer.Runtim
 			Message: c.Message,
 		})
 	}
-	return &kubecontainer.RuntimeStatus{Conditions: conditions}
-}
-
-func fieldProfile(scmp *v1.SeccompProfile, profileRootPath string, fallbackToRuntimeDefault bool) (string, error) {
-	if scmp == nil {
-		if fallbackToRuntimeDefault {
-			return v1.SeccompProfileRuntimeDefault, nil
+	retHandlers := make([]kubecontainer.RuntimeHandler, len(handlers))
+	for i, h := range handlers {
+		supportsRRO := false
+		supportsUserns := false
+		if h.Features != nil {
+			supportsRRO = h.Features.RecursiveReadOnlyMounts
+			supportsUserns = h.Features.UserNamespaces
 		}
-		return "", nil
-	}
-	if scmp.Type == v1.SeccompProfileTypeRuntimeDefault {
-		return v1.SeccompProfileRuntimeDefault, nil
-	}
-	if scmp.Type == v1.SeccompProfileTypeLocalhost {
-		if scmp.LocalhostProfile != nil && len(*scmp.LocalhostProfile) > 0 {
-			fname := filepath.Join(profileRootPath, *scmp.LocalhostProfile)
-			return v1.SeccompLocalhostProfileNamePrefix + fname, nil
-		} else {
-			return "", fmt.Errorf("localhostProfile must be set if seccompProfile type is Localhost.")
+		retHandlers[i] = kubecontainer.RuntimeHandler{
+			Name:                            h.Name,
+			SupportsRecursiveReadOnlyMounts: supportsRRO,
+			SupportsUserNamespaces:          supportsUserns,
 		}
 	}
-	if scmp.Type == v1.SeccompProfileTypeUnconfined {
-		return v1.SeccompProfileNameUnconfined, nil
+	var retFeatures *kubecontainer.RuntimeFeatures
+	if features != nil {
+		retFeatures = &kubecontainer.RuntimeFeatures{
+			SupplementalGroupsPolicy: features.SupplementalGroupsPolicy,
+		}
 	}
-
-	if fallbackToRuntimeDefault {
-		return v1.SeccompProfileRuntimeDefault, nil
-	}
-	return "", nil
-}
-
-func (m *kubeGenericRuntimeManager) getSeccompProfilePath(annotations map[string]string, containerName string,
-	podSecContext *v1.PodSecurityContext, containerSecContext *v1.SecurityContext, fallbackToRuntimeDefault bool) (string, error) {
-	// container fields are applied first
-	if containerSecContext != nil && containerSecContext.SeccompProfile != nil {
-		return fieldProfile(containerSecContext.SeccompProfile, m.seccompProfileRoot, fallbackToRuntimeDefault)
-	}
-
-	// when container seccomp is not defined, try to apply from pod field
-	if podSecContext != nil && podSecContext.SeccompProfile != nil {
-		return fieldProfile(podSecContext.SeccompProfile, m.seccompProfileRoot, fallbackToRuntimeDefault)
-	}
-
-	if fallbackToRuntimeDefault {
-		return v1.SeccompProfileRuntimeDefault, nil
-	}
-
-	return "", nil
+	return &kubecontainer.RuntimeStatus{Conditions: conditions, Handlers: retHandlers, Features: retFeatures}
 }
 
 func fieldSeccompProfile(scmp *v1.SeccompProfile, profileRootPath string, fallbackToRuntimeDefault bool) (*runtimeapi.SecurityProfile, error) {
@@ -312,4 +297,223 @@ func (m *kubeGenericRuntimeManager) getSeccompProfile(annotations map[string]str
 	return &runtimeapi.SecurityProfile{
 		ProfileType: runtimeapi.SecurityProfile_Unconfined,
 	}, nil
+}
+
+func getAppArmorProfile(pod *v1.Pod, container *v1.Container) (*runtimeapi.SecurityProfile, string, error) {
+	profile := apparmor.GetProfile(pod, container)
+	if profile == nil {
+		return nil, "", nil
+	}
+
+	var (
+		securityProfile   *runtimeapi.SecurityProfile
+		deprecatedProfile string // Deprecated apparmor profile format, still provided for backwards compatibility with older runtimes.
+	)
+
+	switch profile.Type {
+	case v1.AppArmorProfileTypeRuntimeDefault:
+		securityProfile = &runtimeapi.SecurityProfile{
+			ProfileType: runtimeapi.SecurityProfile_RuntimeDefault,
+		}
+		deprecatedProfile = v1.DeprecatedAppArmorBetaProfileRuntimeDefault
+
+	case v1.AppArmorProfileTypeUnconfined:
+		securityProfile = &runtimeapi.SecurityProfile{
+			ProfileType: runtimeapi.SecurityProfile_Unconfined,
+		}
+		deprecatedProfile = v1.DeprecatedAppArmorBetaProfileNameUnconfined
+
+	case v1.AppArmorProfileTypeLocalhost:
+		if profile.LocalhostProfile == nil {
+			return nil, "", errors.New("missing localhost apparmor profile name")
+		}
+		securityProfile = &runtimeapi.SecurityProfile{
+			ProfileType:  runtimeapi.SecurityProfile_Localhost,
+			LocalhostRef: *profile.LocalhostProfile,
+		}
+		deprecatedProfile = v1.DeprecatedAppArmorBetaProfileNamePrefix + *profile.LocalhostProfile
+
+	default:
+		// Shouldn't happen.
+		return nil, "", fmt.Errorf("unknown apparmor profile type: %q", profile.Type)
+	}
+
+	return securityProfile, deprecatedProfile, nil
+}
+
+func mergeResourceConfig(source, update *cm.ResourceConfig) *cm.ResourceConfig {
+	if source == nil {
+		return update
+	}
+	if update == nil {
+		return source
+	}
+
+	merged := *source
+
+	if update.Memory != nil {
+		merged.Memory = update.Memory
+	}
+	if update.CPUSet.Size() > 0 {
+		merged.CPUSet = update.CPUSet
+	}
+	if update.CPUShares != nil {
+		merged.CPUShares = update.CPUShares
+	}
+	if update.CPUQuota != nil {
+		merged.CPUQuota = update.CPUQuota
+	}
+	if update.CPUPeriod != nil {
+		merged.CPUPeriod = update.CPUPeriod
+	}
+	if update.PidsLimit != nil {
+		merged.PidsLimit = update.PidsLimit
+	}
+
+	if update.HugePageLimit != nil {
+		if merged.HugePageLimit == nil {
+			merged.HugePageLimit = make(map[int64]int64)
+		}
+		for k, v := range update.HugePageLimit {
+			merged.HugePageLimit[k] = v
+		}
+	}
+
+	if update.Unified != nil {
+		if merged.Unified == nil {
+			merged.Unified = make(map[string]string)
+		}
+		for k, v := range update.Unified {
+			merged.Unified[k] = v
+		}
+	}
+
+	return &merged
+}
+
+func convertResourceConfigToLinuxContainerResources(rc *cm.ResourceConfig) *runtimeapi.LinuxContainerResources {
+	if rc == nil {
+		return nil
+	}
+
+	lcr := &runtimeapi.LinuxContainerResources{}
+
+	if rc.CPUPeriod != nil {
+		lcr.CpuPeriod = int64(*rc.CPUPeriod)
+	}
+	if rc.CPUQuota != nil {
+		lcr.CpuQuota = *rc.CPUQuota
+	}
+	if rc.CPUShares != nil {
+		lcr.CpuShares = int64(*rc.CPUShares)
+	}
+	if rc.Memory != nil {
+		lcr.MemoryLimitInBytes = *rc.Memory
+	}
+	if rc.CPUSet.Size() > 0 {
+		lcr.CpusetCpus = rc.CPUSet.String()
+	}
+
+	if rc.Unified != nil {
+		lcr.Unified = make(map[string]string, len(rc.Unified))
+		for k, v := range rc.Unified {
+			lcr.Unified[k] = v
+		}
+	}
+
+	return lcr
+}
+
+var signalNameToRuntimeEnum = map[string]runtimeapi.Signal{
+	"SIGABRT":     runtimeapi.Signal_SIGABRT,
+	"SIGALRM":     runtimeapi.Signal_SIGALRM,
+	"SIGBUS":      runtimeapi.Signal_SIGBUS,
+	"SIGCHLD":     runtimeapi.Signal_SIGCHLD,
+	"SIGCLD":      runtimeapi.Signal_SIGCLD,
+	"SIGCONT":     runtimeapi.Signal_SIGCONT,
+	"SIGFPE":      runtimeapi.Signal_SIGFPE,
+	"SIGHUP":      runtimeapi.Signal_SIGHUP,
+	"SIGILL":      runtimeapi.Signal_SIGILL,
+	"SIGINT":      runtimeapi.Signal_SIGINT,
+	"SIGIO":       runtimeapi.Signal_SIGIO,
+	"SIGIOT":      runtimeapi.Signal_SIGIOT,
+	"SIGKILL":     runtimeapi.Signal_SIGKILL,
+	"SIGPIPE":     runtimeapi.Signal_SIGPIPE,
+	"SIGPOLL":     runtimeapi.Signal_SIGPOLL,
+	"SIGPROF":     runtimeapi.Signal_SIGPROF,
+	"SIGPWR":      runtimeapi.Signal_SIGPWR,
+	"SIGQUIT":     runtimeapi.Signal_SIGQUIT,
+	"SIGSEGV":     runtimeapi.Signal_SIGSEGV,
+	"SIGSTKFLT":   runtimeapi.Signal_SIGSTKFLT,
+	"SIGSTOP":     runtimeapi.Signal_SIGSTOP,
+	"SIGSYS":      runtimeapi.Signal_SIGSYS,
+	"SIGTERM":     runtimeapi.Signal_SIGTERM,
+	"SIGTRAP":     runtimeapi.Signal_SIGTRAP,
+	"SIGTSTP":     runtimeapi.Signal_SIGTSTP,
+	"SIGTTIN":     runtimeapi.Signal_SIGTTIN,
+	"SIGTTOU":     runtimeapi.Signal_SIGTTOU,
+	"SIGURG":      runtimeapi.Signal_SIGURG,
+	"SIGUSR1":     runtimeapi.Signal_SIGUSR1,
+	"SIGUSR2":     runtimeapi.Signal_SIGUSR2,
+	"SIGVTALRM":   runtimeapi.Signal_SIGVTALRM,
+	"SIGWINCH":    runtimeapi.Signal_SIGWINCH,
+	"SIGXCPU":     runtimeapi.Signal_SIGXCPU,
+	"SIGXFSZ":     runtimeapi.Signal_SIGXFSZ,
+	"SIGRTMIN":    runtimeapi.Signal_SIGRTMIN,
+	"SIGRTMIN+1":  runtimeapi.Signal_SIGRTMINPLUS1,
+	"SIGRTMIN+2":  runtimeapi.Signal_SIGRTMINPLUS2,
+	"SIGRTMIN+3":  runtimeapi.Signal_SIGRTMINPLUS3,
+	"SIGRTMIN+4":  runtimeapi.Signal_SIGRTMINPLUS4,
+	"SIGRTMIN+5":  runtimeapi.Signal_SIGRTMINPLUS5,
+	"SIGRTMIN+6":  runtimeapi.Signal_SIGRTMINPLUS6,
+	"SIGRTMIN+7":  runtimeapi.Signal_SIGRTMINPLUS7,
+	"SIGRTMIN+8":  runtimeapi.Signal_SIGRTMINPLUS8,
+	"SIGRTMIN+9":  runtimeapi.Signal_SIGRTMINPLUS9,
+	"SIGRTMIN+10": runtimeapi.Signal_SIGRTMINPLUS10,
+	"SIGRTMIN+11": runtimeapi.Signal_SIGRTMINPLUS11,
+	"SIGRTMIN+12": runtimeapi.Signal_SIGRTMINPLUS12,
+	"SIGRTMIN+13": runtimeapi.Signal_SIGRTMINPLUS13,
+	"SIGRTMIN+14": runtimeapi.Signal_SIGRTMINPLUS14,
+	"SIGRTMIN+15": runtimeapi.Signal_SIGRTMINPLUS15,
+	"SIGRTMAX-14": runtimeapi.Signal_SIGRTMAXMINUS14,
+	"SIGRTMAX-13": runtimeapi.Signal_SIGRTMAXMINUS13,
+	"SIGRTMAX-12": runtimeapi.Signal_SIGRTMAXMINUS12,
+	"SIGRTMAX-11": runtimeapi.Signal_SIGRTMAXMINUS11,
+	"SIGRTMAX-10": runtimeapi.Signal_SIGRTMAXMINUS10,
+	"SIGRTMAX-9":  runtimeapi.Signal_SIGRTMAXMINUS9,
+	"SIGRTMAX-8":  runtimeapi.Signal_SIGRTMAXMINUS8,
+	"SIGRTMAX-7":  runtimeapi.Signal_SIGRTMAXMINUS7,
+	"SIGRTMAX-6":  runtimeapi.Signal_SIGRTMAXMINUS6,
+	"SIGRTMAX-5":  runtimeapi.Signal_SIGRTMAXMINUS5,
+	"SIGRTMAX-4":  runtimeapi.Signal_SIGRTMAXMINUS4,
+	"SIGRTMAX-3":  runtimeapi.Signal_SIGRTMAXMINUS3,
+	"SIGRTMAX-2":  runtimeapi.Signal_SIGRTMAXMINUS2,
+	"SIGRTMAX-1":  runtimeapi.Signal_SIGRTMAXMINUS1,
+	"SIGRTMAX":    runtimeapi.Signal_SIGRTMAX,
+}
+
+func getContainerConfigStopSignal(container *v1.Container) (stopsignal *runtimeapi.Signal) {
+	if utilfeature.DefaultFeatureGate.Enabled(features.ContainerStopSignals) {
+		if container.Lifecycle != nil && container.Lifecycle.StopSignal != nil {
+			var signalValue runtimeapi.Signal
+			signalStr := string(*container.Lifecycle.StopSignal)
+			signalValue = signalNameToRuntimeEnum[signalStr]
+			return &signalValue
+		} else {
+			return nil
+		}
+	}
+
+	return nil
+}
+
+func runtimeSignalToString(signal runtimeapi.Signal) *v1.Signal {
+	var convertedSignal v1.Signal
+	for key, value := range signalNameToRuntimeEnum {
+		if value == signal {
+			convertedSignal = v1.Signal(key)
+		}
+	}
+
+	return &convertedSignal
 }

@@ -1,4 +1,5 @@
-// Copyright (c) 2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha2
@@ -11,6 +12,9 @@ import (
 // is in a ready state. All probe actions are mutually exclusive.
 type VirtualMachineReadinessProbeSpec struct {
 	// TCPSocket specifies an action involving a TCP port.
+	//
+	// Deprecated: The TCPSocket action requires network connectivity that is not supported in all environments.
+	// This field will be removed in a later API version.
 	// +optional
 	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
 
@@ -75,7 +79,7 @@ type TCPSocketAction struct {
 // GuestHeartbeatStatus is the guest heartbeat status.
 type GuestHeartbeatStatus string
 
-// See govmomi.vim25.types.ManagedEntityStatus
+// See govmomi.vim25.types.ManagedEntityStatus.
 const (
 	// GrayHeartbeatStatus means VMware Tools are not installed or not running.
 	GrayHeartbeatStatus GuestHeartbeatStatus = "gray"
@@ -104,7 +108,7 @@ type GuestHeartbeatAction struct {
 type GuestInfoAction struct {
 	// Key is the name of the GuestInfo key.
 	//
-	// Values are automatically prefixed with "guestinfo." before being
+	// The key is automatically prefixed with "guestinfo." before being
 	// evaluated. Thus if the key "guestinfo.mykey" is provided, it will be
 	// evaluated as "guestinfo.guestinfo.mykey".
 	Key string `json:"key"`
@@ -121,11 +125,4 @@ type GuestInfoAction struct {
 	//
 	// +optional
 	Value string `json:"value,omitempty"`
-}
-
-// VirtualMachineReadinessGate contains the reference to a VM condition.
-type VirtualMachineReadinessGate struct {
-	// ConditionType refers to a condition in the VM's condition list with
-	// matching type.
-	ConditionType string `json:"conditionType"`
 }

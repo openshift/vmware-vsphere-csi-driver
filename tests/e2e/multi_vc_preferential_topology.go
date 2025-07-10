@@ -21,7 +21,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -39,11 +38,11 @@ import (
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	admissionapi "k8s.io/pod-security-admission/api"
 
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferential-Topology", func() {
-	f := framework.NewDefaultFramework("multi-vc-preferential-topology")
+var _ = ginkgo.Describe("[multivc-preferential] MultiVc-Preferential", func() {
+	f := framework.NewDefaultFramework("multivc-preferential")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -116,8 +115,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 		verifyTopologyAffinity = true
 		scParameters = make(map[string]string)
 		storagePolicyInVc1Vc2 = GetAndExpectStringEnvVar(envStoragePolicyNameInVC1VC2)
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 
 		//Get snapshot client using the rest config
 		restConfig = getRestConfigClient()
@@ -203,7 +202,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 	    10. Clear the data
 	*/
 	ginkgo.It("Tag one datastore as preferred each in VC1 and VC2 and verify it is honored", ginkgo.Label(p0,
-		block, vanilla, multiVc, newTest, preferential), func() {
+		block, vanilla, multiVc, vc70, preferential), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -361,7 +360,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 	*/
 
 	ginkgo.It("Create SC with storage policy available in VC1 and VC2 and set the "+
-		"preference in VC1 datastore only", ginkgo.Label(p0, block, vanilla, multiVc, newTest,
+		"preference in VC1 datastore only", ginkgo.Label(p0, block, vanilla, multiVc, vc70,
 		preferential), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -454,12 +453,10 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Rebooting VC")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		err = invokeVCenterReboot(ctx, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = waitForHostToBeUp(vCenterHostname[0])
+		err = waitForHostToBeUp(vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By("Done with reboot")
 
@@ -509,7 +506,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 	*/
 
 	ginkgo.It("Assign preferred datatsore to any one VC and verify create restore snapshot", ginkgo.Label(p0,
-		block, vanilla, multiVc, newTest, snapshot, preferential), func() {
+		block, vanilla, multiVc, vc70, snapshot, preferential), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -630,7 +627,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
-			namespace, allowedTopologies)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -656,7 +653,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-preferential-topology] Multi-VC-Preferent
 
 	ginkgo.It("Assign preferred datatsore to any one VC and verify create restore snapshot "+
 		"and later change datastore preference", ginkgo.Label(p1, block, vanilla, multiVc,
-		newTest, snapshot, negative, preferential), func() {
+		vc70, snapshot, negative, preferential), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()

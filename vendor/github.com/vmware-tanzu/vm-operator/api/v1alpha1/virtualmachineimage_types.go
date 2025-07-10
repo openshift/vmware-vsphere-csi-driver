@@ -1,4 +1,5 @@
-// Copyright (c) 2018-2021 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -114,7 +115,7 @@ type VirtualMachineImageStatus struct {
 	// Deprecated
 	PowerState string `json:"powerState,omitempty"`
 
-	// ImageName describes the display name of this VirtualMachineImage.
+	// ImageName describes the display name of this image.
 	// +optional
 	ImageName string `json:"imageName,omitempty"`
 
@@ -130,6 +131,11 @@ type VirtualMachineImageStatus struct {
 	Conditions []Condition `json:"conditions,omitempty" patchStrategy:"merge" patchMergeKey:"type"`
 
 	// ContentLibraryRef is a reference to the source ContentLibrary/ClusterContentLibrary resource.
+	//
+	// Deprecated: This field is provider specific but the VirtualMachineImage types are intended to be provider generic.
+	// This field does not exist in later API versions. Instead, the Spec.ProviderRef field should be used to look up the
+	// provider. For images provided by a Content Library, the ProviderRef will point to either a ContentLibraryItem or
+	// ClusterContentLibraryItem that contains a reference to the Content Library.
 	// +optional
 	ContentLibraryRef *corev1.TypedLocalObjectReference `json:"contentLibraryRef,omitempty"`
 
@@ -153,17 +159,16 @@ func (vmImage *VirtualMachineImage) SetConditions(conditions Conditions) {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=vmi;vmimage
-// +kubebuilder:storageversion
+// +kubebuilder:resource:scope=Namespaced,shortName=vmi;vmimage
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Provider-Name",type="string",JSONPath=".spec.providerRef.name"
-// +kubebuilder:printcolumn:name="Content-Library-Name",type="string",JSONPath=".status.contentLibraryRef.name"
-// +kubebuilder:printcolumn:name="Image-Name",type="string",JSONPath=".status.imageName"
+// +kubebuilder:printcolumn:name="Display-Name",type="string",JSONPath=".status.imageName"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.productInfo.version"
 // +kubebuilder:printcolumn:name="Os-Type",type="string",JSONPath=".spec.osInfo.type"
 // +kubebuilder:printcolumn:name="Format",type="string",JSONPath=".spec.type"
 // +kubebuilder:printcolumn:name="Image-Supported",type="boolean",priority=1,JSONPath=".status.imageSupported"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineImage is the Schema for the virtualmachineimages API
 // A VirtualMachineImage represents a VirtualMachine image (e.g. VM template) that can be used as the base image
@@ -178,6 +183,7 @@ type VirtualMachineImage struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineImageList contains a list of VirtualMachineImage.
 type VirtualMachineImageList struct {
@@ -196,16 +202,15 @@ func (clusterVirtualMachineImage *ClusterVirtualMachineImage) SetConditions(cond
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=cvmi;cvmimage;clustervmi;clustervmimage
-// +kubebuilder:storageversion
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Provider-Name",type="string",JSONPath=".spec.providerRef.name"
-// +kubebuilder:printcolumn:name="Content-Library-Name",type="string",JSONPath=".status.contentLibraryRef.name"
-// +kubebuilder:printcolumn:name="Image-Name",type="string",JSONPath=".status.imageName"
+// +kubebuilder:printcolumn:name="Display-Name",type="string",JSONPath=".status.imageName"
 // +kubebuilder:printcolumn:name="Version",type="string",JSONPath=".spec.productInfo.version"
 // +kubebuilder:printcolumn:name="Os-Type",type="string",JSONPath=".spec.osInfo.type"
 // +kubebuilder:printcolumn:name="Format",type="string",JSONPath=".spec.type"
 // +kubebuilder:printcolumn:name="Image-Supported",type="boolean",priority=1,JSONPath=".status.imageSupported"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:deprecatedversion
 
 // ClusterVirtualMachineImage is the schema for the clustervirtualmachineimage API
 // A ClusterVirtualMachineImage represents the desired specification and the observed status of a
@@ -219,6 +224,7 @@ type ClusterVirtualMachineImage struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // ClusterVirtualMachineImageList contains a list of ClusterVirtualMachineImage.
 type ClusterVirtualMachineImageList struct {
@@ -228,7 +234,7 @@ type ClusterVirtualMachineImageList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(
+	objectTypes = append(objectTypes,
 		&VirtualMachineImage{},
 		&VirtualMachineImageList{},
 		&ClusterVirtualMachineImage{},

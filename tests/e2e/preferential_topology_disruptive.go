@@ -38,8 +38,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topology-Disruptive-Provisioning", func() {
-	f := framework.NewDefaultFramework("preferential-topology-aware-provisioning")
+var _ = ginkgo.Describe("[preferential-disruptive] Preferential-Topology-Disruptive", func() {
+	f := framework.NewDefaultFramework("preferential-disruptive")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                         clientset.Interface
@@ -119,10 +119,9 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		// creating level-5 allowed topology map
 		topologyLength, leafNode, leafNodeTag0, leafNodeTag1, _ = 5, 4, 0, 1, 2
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap,
-			topologyLength)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 
 		csiNamespace = GetAndExpectStringEnvVar(envCSINamespace)
 		csiDeployment, err := client.AppsV1().Deployments(csiNamespace).Get(
@@ -131,9 +130,9 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		csiReplicas = *csiDeployment.Spec.Replicas
 
 		clusterWorkerMap := GetAndExpectStringEnvVar(workerClusterMap)
-		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap, topologyLength)
+		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap)
 		datastoreClusterMap := GetAndExpectStringEnvVar(datastoreClusterMap)
-		_, dsNameToPerformNimbusOps = createTopologyMapLevel5(datastoreClusterMap, topologyLength)
+		_, dsNameToPerformNimbusOps = createTopologyMapLevel5(datastoreClusterMap)
 
 		// fetching list of datatstores shared between vm's
 		shareddatastoreListMap, err = getListOfSharedDatastoresBetweenVMs(masterIp, sshClientConfig, dataCenters)
@@ -298,7 +297,8 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -366,12 +366,13 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}()
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods := fss.GetPodList(ctx, client, statefulset)
+		ssPods, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, pod := range ssPods.Items {
 			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -430,13 +431,14 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		}
 
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		// Verify all the workload Pods are in up and running state
 		ginkgo.By("Verify all the workload Pods are in up and running state")
-		ssPods = fss.GetPodList(ctx, client, statefulset)
+		ssPods, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		for _, pod := range ssPods.Items {
 			err := fpod.WaitForPodRunningInNamespace(ctx, client, &pod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -561,7 +563,8 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -635,7 +638,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologyForRack2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -787,7 +790,8 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -868,7 +872,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologyForRack1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1024,7 +1028,8 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -1099,7 +1104,7 @@ var _ = ginkgo.Describe("[Disruptive-Preferential-Topology] Preferential-Topolog
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologyForRack2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 

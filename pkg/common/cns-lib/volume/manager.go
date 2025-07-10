@@ -98,6 +98,8 @@ type Manager interface {
 	DeleteVolume(ctx context.Context, volumeID string, deleteDisk bool) (string, error)
 	// UpdateVolumeMetadata updates a volume metadata given its spec.
 	UpdateVolumeMetadata(ctx context.Context, spec *cnstypes.CnsVolumeMetadataUpdateSpec) error
+	// UpdateVolumeCrypto encrypts a volume given its spec.
+	UpdateVolumeCrypto(ctx context.Context, spec *cnstypes.CnsVolumeCryptoUpdateSpec) error
 	// QueryVolumeInfo calls the CNS QueryVolumeInfo API and return a task, from
 	// which CnsQueryVolumeInfoResult is extracted.
 	QueryVolumeInfo(ctx context.Context, volumeIDList []cnstypes.CnsVolumeId) (*cnstypes.CnsQueryVolumeInfoResult, error)
@@ -130,9 +132,10 @@ type Manager interface {
 	// ProtectVolumeFromVMDeletion sets keepAfterDeleteVm control flag on migrated volume
 	ProtectVolumeFromVMDeletion(ctx context.Context, volumeID string) error
 	// CreateSnapshot helps create a snapshot for a block volume
-	CreateSnapshot(ctx context.Context, volumeID string, desc string) (*CnsSnapshotInfo, error)
+	CreateSnapshot(ctx context.Context, volumeID string, desc string, extraParams interface{}) (*CnsSnapshotInfo, error)
 	// DeleteSnapshot helps delete a snapshot for a block volume
-	DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string) error
+	DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string,
+		extraParams interface{}) (*CnsSnapshotInfo, error)
 	// QuerySnapshots retrieves the list of snapshots based on the query filter.
 	QuerySnapshots(ctx context.Context, snapshotQueryFilter cnstypes.CnsSnapshotQueryFilter) (
 		*cnstypes.CnsSnapshotQueryResult, error)
@@ -144,6 +147,11 @@ type Manager interface {
 		string, error)
 	// GetOperationStore returns the VolumeOperationRequest interface
 	GetOperationStore() cnsvolumeoperationrequest.VolumeOperationRequest
+	// IsListViewReady returns the status of the listview + property collector mechanism
+	IsListViewReady() bool
+	// SetListViewNotReady explicitly states the listview state as not ready
+	// use case: unit tests
+	SetListViewNotReady(ctx context.Context)
 }
 
 // CnsVolumeInfo hold information related to volume created by CNS.
@@ -153,10 +161,11 @@ type CnsVolumeInfo struct {
 }
 
 type CnsSnapshotInfo struct {
-	SnapshotID                string
-	SourceVolumeID            string
-	SnapshotDescription       string
-	SnapshotCreationTimestamp time.Time
+	SnapshotID                          string
+	SourceVolumeID                      string
+	SnapshotDescription                 string
+	AggregatedSnapshotCapacityInMb      int64
+	SnapshotLatestOperationCompleteTime time.Time
 }
 
 // CreateVolumeExtraParams consist of values required by the CreateVolume interface and
@@ -166,6 +175,26 @@ type CreateVolumeExtraParams struct {
 	StorageClassName                     string
 	Namespace                            string
 	IsPodVMOnStretchSupervisorFSSEnabled bool
+}
+
+// CreateSnapshotExtraParams consist of values required by the CreateSnapshot interface and
+// are not present in the CNS CreateSnapshot spec.
+type CreateSnapshotExtraParams struct {
+	StorageClassName           string
+	StoragePolicyID            string
+	Namespace                  string
+	Capacity                   *resource.Quantity
+	IsStorageQuotaM2FSSEnabled bool
+}
+
+// DeleteSnapshotExtraParams consist of values required by the DeleteSnapshot interface and
+// are not present in the CNS DeleteSnapshot spec.
+type DeletesnapshotExtraParams struct {
+	IsStorageQuotaM2FSSEnabled bool
+	StorageClassName           string
+	StoragePolicyID            string
+	Namespace                  string
+	Capacity                   *resource.Quantity
 }
 
 // ExpandVolumeExtraParams consist of values required by the ExpandVolume interface and
@@ -246,7 +275,6 @@ func GetManager(ctx context.Context, vc *cnsvsphere.VirtualCenter,
 		}
 		managerInstanceMap[vc.Config.Host] = managerInstance
 	}
-
 	err := managerInstance.initListView(ctx)
 	if err != nil {
 		return nil, err
@@ -1461,6 +1489,71 @@ func (m *defaultManager) UpdateVolumeMetadata(ctx context.Context, spec *cnstype
 	return err
 }
 
+// UpdateVolumeCrypto updates a volume given its spec.
+func (m *defaultManager) UpdateVolumeCrypto(ctx context.Context, spec *cnstypes.CnsVolumeCryptoUpdateSpec) error {
+	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
+	defer cancelFunc()
+	internalUpdateVolumeCrypto := func() error {
+		log := logger.GetLogger(ctx)
+		err := validateManager(ctx, m)
+		if err != nil {
+			return err
+		}
+		// Set up the VC connection.
+		err = m.virtualCenter.ConnectCns(ctx)
+		if err != nil {
+			log.Errorf("ConnectCns failed with err: %+v", err)
+			return err
+		}
+
+		cnsUpdateSpecList := []cnstypes.CnsVolumeCryptoUpdateSpec{*spec}
+		task, err := m.virtualCenter.CnsClient.UpdateVolumeCrypto(ctx, cnsUpdateSpecList)
+		if err != nil {
+			log.Errorf("CNS UpdateVolumeCrypto failed from vCenter %q with err: %v", m.virtualCenter.Config.Host, err)
+			return err
+		}
+		// Get the taskInfo.
+		var taskInfo *vim25types.TaskInfo
+		taskInfo, err = m.waitOnTask(ctx, task.Reference())
+
+		if err != nil || taskInfo == nil {
+			log.Errorf("failed to get UpdateVolumeCrypto taskInfo from vCenter %q with err: %v",
+				m.virtualCenter.Config.Host, err)
+			return err
+		}
+		log.Infof("UpdateVolumeCrypto: volumeID: %q, opId: %q", spec.VolumeId.Id, taskInfo.ActivationId)
+		// Get the task results for the given task.
+		taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+		if err != nil {
+			log.Errorf("unable to find UpdateVolumeCrypto result from vCenter %q: taskID %q, opId %q and updateResults %+v",
+				m.virtualCenter.Config.Host, taskInfo.Task.Value, taskInfo.ActivationId, taskResult)
+			return err
+		}
+		if taskResult == nil {
+			return logger.LogNewErrorf(log, "taskResult is empty for UpdateVolumeCrypto task: %q, opId: %q",
+				taskInfo.Task.Value, taskInfo.ActivationId)
+		}
+		volumeOperationRes := taskResult.GetCnsVolumeOperationResult()
+		if volumeOperationRes.Fault != nil {
+			return logger.LogNewErrorf(log, "failed to update volume. updateSpec: %q, fault: %q, opID: %q",
+				spew.Sdump(spec), spew.Sdump(volumeOperationRes.Fault), taskInfo.ActivationId)
+		}
+		log.Infof("UpdateVolumeCrypto: Volume crypto updated successfully. volumeID: %q, opId: %q",
+			spec.VolumeId.Id, taskInfo.ActivationId)
+		return nil
+	}
+	start := time.Now()
+	err := internalUpdateVolumeCrypto()
+	if err != nil {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsUpdateVolumeCryptoOpType,
+			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
+	} else {
+		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsUpdateVolumeCryptoOpType,
+			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
+	}
+	return err
+}
+
 // ExpandVolume expands a volume given its spec.
 func (m *defaultManager) ExpandVolume(ctx context.Context, volumeID string, size int64,
 	extraParams interface{}) (string, error) {
@@ -2230,7 +2323,7 @@ func (m *defaultManager) QuerySnapshots(ctx context.Context, snapshotQueryFilter
 // Helper function for create snapshot with different behaviors in the idempotency handling
 // depends on whether the improved idempotency FSS is enabled.
 func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.Context, volumeID string,
-	snapshotName string) (*CnsSnapshotInfo, error) {
+	snapshotName string, extraParams interface{}) (*CnsSnapshotInfo, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Reference to the CreateSnapshot task on CNS.
@@ -2240,9 +2333,28 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 		// Local instance of CreateSnapshot details that needs to be persisted.
 		volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails
 		// error
-		err error
+		err                        error
+		quotaInfo                  *cnsvolumeoperationrequest.QuotaDetails
+		isStorageQuotaM2FSSEnabled bool
 	)
+	if extraParams != nil {
+		createSnapParams, ok := extraParams.(*CreateSnapshotExtraParams)
+		if !ok {
+			return nil, logger.LogNewErrorf(log, "unrecognised type for CreateSnapshot params: %+v", extraParams)
+		}
+		log.Debugf("Received CreateSnapshot extraParams: %+v", *createSnapParams)
 
+		isStorageQuotaM2FSSEnabled = createSnapParams.IsStorageQuotaM2FSSEnabled
+		if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+			quotaInfo = &cnsvolumeoperationrequest.QuotaDetails{
+				Reserved:         createSnapParams.Capacity,
+				StoragePolicyId:  createSnapParams.StoragePolicyID,
+				StorageClassName: createSnapParams.StorageClassName,
+				Namespace:        createSnapParams.Namespace,
+			}
+			log.Infof("QuotaInfo during CreateSnapshot call: %+v", *quotaInfo)
+		}
+	}
 	if m.idempotencyHandlingEnabled {
 		if m.operationStore == nil {
 			return nil, logger.LogNewError(log, "operation store cannot be nil")
@@ -2257,13 +2369,22 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 				log.Infof("Snapshot with name %q and id %q on Volume %q is already created on CNS with opId: %q.",
 					instanceName, volumeOperationDetails.SnapshotID, volumeOperationDetails.VolumeID,
 					volumeOperationDetails.OperationDetails.OpID)
-
-				return &CnsSnapshotInfo{
-					SnapshotID:                volumeOperationDetails.SnapshotID,
-					SourceVolumeID:            volumeOperationDetails.VolumeID,
-					SnapshotDescription:       volumeOperationDetails.Name,
-					SnapshotCreationTimestamp: volumeOperationDetails.OperationDetails.TaskInvocationTimestamp.Time,
-				}, nil
+				cnsSnapshotInfo := &CnsSnapshotInfo{
+					SnapshotID:          volumeOperationDetails.SnapshotID,
+					SourceVolumeID:      volumeOperationDetails.VolumeID,
+					SnapshotDescription: volumeOperationDetails.Name,
+				}
+				if volumeOperationDetails.QuotaDetails != nil {
+					if volumeOperationDetails.QuotaDetails.AggregatedSnapshotSize != nil {
+						cnsSnapshotInfo.AggregatedSnapshotCapacityInMb =
+							volumeOperationDetails.QuotaDetails.AggregatedSnapshotSize.Value()
+					}
+					if !volumeOperationDetails.QuotaDetails.SnapshotLatestOperationCompleteTime.IsZero() {
+						cnsSnapshotInfo.SnapshotLatestOperationCompleteTime =
+							volumeOperationDetails.QuotaDetails.SnapshotLatestOperationCompleteTime.Time
+					}
+				}
+				return cnsSnapshotInfo, nil
 			}
 			// Validate if previous operation was PartiallyFailed. If yes, return error from here itself instead
 			// of making a CNS call. If we don't return from here, then orphan snapshot gets created in each CNS call
@@ -2289,7 +2410,7 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 		case apierrors.IsNotFound(err):
 			// Instance doesn't exist. This is likely the first attempt to create the snapshot.
 			volumeOperationDetails = createRequestDetails(
-				instanceName, volumeID, "", 0, nil, metav1.Now(), "", "", "",
+				instanceName, volumeID, "", 0, quotaInfo, metav1.Now(), "", "", "",
 				taskInvocationStatusInProgress, "")
 		default:
 			return nil, err
@@ -2305,6 +2426,16 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 		if m.idempotencyHandlingEnabled &&
 			volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
 			volumeOperationDetails.OperationDetails.TaskStatus != taskInvocationStatusInProgress {
+			taskStatus := volumeOperationDetails.OperationDetails.TaskStatus
+			if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+				if (taskStatus == taskInvocationStatusSuccess || taskStatus == taskInvocationStatusError) &&
+					volumeOperationDetails.QuotaDetails != nil {
+					volumeOperationDetails.QuotaDetails.Reserved = resource.NewQuantity(0,
+						resource.BinarySI)
+					log.Infof("Setting the reserved field for VolumeOperationDetails instance %s to 0",
+						volumeOperationDetails.Name)
+				}
+			}
 			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
 				log.Warnf("failed to store CreateSnapshot details with error: %v", err)
 			}
@@ -2315,7 +2446,7 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 		createSnapshotsTask, err = invokeCNSCreateSnapshot(ctx, m.virtualCenter, volumeID, instanceName)
 		if err != nil {
 			if m.idempotencyHandlingEnabled {
-				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, nil,
+				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, quotaInfo,
 					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, "", "", "",
 					taskInvocationStatusError, err.Error())
 			}
@@ -2324,7 +2455,7 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 
 		if m.idempotencyHandlingEnabled {
 			// Persist the volume operation details.
-			volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, nil,
+			volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, quotaInfo,
 				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
 				createSnapshotsTask.Reference().Value, "", "", taskInvocationStatusInProgress, "")
 			if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
@@ -2359,26 +2490,45 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 				createSnapshotsTask.Reference().Value, instanceName)
 			queriedCnsSnapshot, ok := queryCreatedSnapshotByName(ctx, m, volumeID, instanceName)
 			if ok {
+				log.Infof("CreateSnapshot: Snapshot with name %s on volume %q is confirmed to be created "+
+					"successfully with SnapshotID %q", instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id)
+				cnsSnapshotInfo := &CnsSnapshotInfo{
+					SnapshotID:                          queriedCnsSnapshot.SnapshotId.Id,
+					SourceVolumeID:                      volumeID,
+					SnapshotDescription:                 snapshotName,
+					SnapshotLatestOperationCompleteTime: queriedCnsSnapshot.CreateTime,
+				}
+				if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+					log.Infof("get aggregated Snapshot Capacity for volume with volumeID %q", volumeID)
+					aggregatedSnapshotCapacityInMb, err := m.getAggregatedSnapshotSize(ctx, volumeID)
+					if err != nil {
+						return nil, logger.LogNewErrorf(log, "Failed to get aggregated snapshot size for volume %q with"+
+							" error %v", volumeID, err)
+					}
+					log.Infof("Fetched aggregated Snapshot Capacity is %d for volume with volumeID %q",
+						aggregatedSnapshotCapacityInMb, volumeID)
+					cnsSnapshotInfo.AggregatedSnapshotCapacityInMb = aggregatedSnapshotCapacityInMb
+					aggregatedSnapshotCapacity := resource.NewQuantity(aggregatedSnapshotCapacityInMb*MbInBytes, resource.BinarySI)
+					quotaInfo.AggregatedSnapshotSize = aggregatedSnapshotCapacity
+					quotaInfo.SnapshotLatestOperationCompleteTime.Time = queriedCnsSnapshot.CreateTime
+					log.Infof("Snapshot %q for volume %q confirmed to be created, update quotainfo: %+v",
+						queriedCnsSnapshot.SnapshotId.Id, volumeID, *quotaInfo)
+				}
+
 				// Create the volumeOperationDetails object for persistence
 				volumeOperationDetails = createRequestDetails(
-					instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id, 0, nil,
+					instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id, 0, quotaInfo,
 					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
 					createSnapshotsTask.Reference().Value, "",
 					"", taskInvocationStatusSuccess, "")
-
-				log.Infof("CreateSnapshot: Snapshot with name %s on volume %q is confirmed to be created "+
-					"successfully with SnapshotID %q", instanceName, volumeID, queriedCnsSnapshot.SnapshotId.Id)
-
-				return &CnsSnapshotInfo{
-					SnapshotID:                queriedCnsSnapshot.SnapshotId.Id,
-					SourceVolumeID:            volumeID,
-					SnapshotDescription:       snapshotName,
-					SnapshotCreationTimestamp: queriedCnsSnapshot.CreateTime,
-				}, nil
+				log.Warnf("Using create snapshot timestamp %q instead of create snapshot task"+
+					" completion time for snapshot %q and volumeID %q",
+					queriedCnsSnapshot.CreateTime, volumeOperationDetails.SnapshotID, volumeID)
+				return cnsSnapshotInfo, nil
 			} else {
 				errMsg := fmt.Sprintf("Snapshot with name %s on volume %q is not present in CNS. "+
 					"Marking task %s as failed.", snapshotName, volumeID, createSnapshotsTask.Reference().Value)
-				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, nil,
+				volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, quotaInfo,
 					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
 					createSnapshotsTask.Reference().Value, "", "", taskInvocationStatusError, errMsg)
 				return nil, logger.LogNewError(log, errMsg)
@@ -2404,7 +2554,6 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 		errMsg := fmt.Sprintf("failed to create snapshot %q on volume %q with fault: %q, opID: %q",
 			instanceName, volumeID, spew.Sdump(createSnapshotsOperationRes.Fault),
 			createSnapshotsTaskInfo.ActivationId)
-
 		if m.idempotencyHandlingEnabled {
 			// If we get CnsSnapshotCreatedFault, then it means that snapshot creation is successful, but something in
 			// post-processing failed. Persist this task as PartiallyFailed status along with relevant details.
@@ -2413,14 +2562,12 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 				errMsg = fmt.Sprintf("snapshot %q on volume %q got created, but post-processing failed. "+
 					"Fault: %q, opID: %q", instanceName, volumeID, spew.Sdump(createSnapshotsOperationRes.Fault),
 					createSnapshotsTaskInfo.ActivationId)
-
 				snapshotId := createSnapshotsOperationRes.Fault.Fault.(cnstypes.CnsSnapshotCreatedFault).SnapshotId.Id
 				volumeOperationDetails = createRequestDetails(instanceName, volumeID, snapshotId, 0, nil,
 					volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
 					"", createSnapshotsTaskInfo.ActivationId, taskInvocationStatusPartiallyFailed, errMsg)
 				return nil, logger.LogNewError(log, errMsg)
 			}
-
 			volumeOperationDetails = createRequestDetails(instanceName, volumeID, "", 0, nil,
 				volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
 				"", createSnapshotsTaskInfo.ActivationId, taskInvocationStatusError, errMsg)
@@ -2444,25 +2591,34 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 	}
 
 	snapshotCreateResult := interface{}(createSnapshotsTaskResult).(*cnstypes.CnsSnapshotCreateResult)
-
 	cnsSnapshotInfo := &CnsSnapshotInfo{
-		SnapshotID:                snapshotCreateResult.Snapshot.SnapshotId.Id,
-		SourceVolumeID:            snapshotCreateResult.Snapshot.VolumeId.Id,
-		SnapshotDescription:       snapshotCreateResult.Snapshot.Description,
-		SnapshotCreationTimestamp: snapshotCreateResult.Snapshot.CreateTime,
+		SnapshotID:                          snapshotCreateResult.Snapshot.SnapshotId.Id,
+		SourceVolumeID:                      snapshotCreateResult.Snapshot.VolumeId.Id,
+		SnapshotDescription:                 snapshotCreateResult.Snapshot.Description,
+		SnapshotLatestOperationCompleteTime: *createSnapshotsTaskInfo.CompleteTime,
 	}
-
+	if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		log.Infof("For volumeID %q new AggregatedSnapshotSize is %d and SnapshotLatestOperationCompleteTime is %q",
+			volumeID, snapshotCreateResult.AggregatedSnapshotCapacityInMb, *createSnapshotsTaskInfo.CompleteTime)
+		cnsSnapshotInfo.AggregatedSnapshotCapacityInMb = snapshotCreateResult.AggregatedSnapshotCapacityInMb
+		aggregatedSnapshotCapacity := resource.NewQuantity(snapshotCreateResult.AggregatedSnapshotCapacityInMb*MbInBytes,
+			resource.BinarySI)
+		quotaInfo.AggregatedSnapshotSize = aggregatedSnapshotCapacity
+		quotaInfo.SnapshotLatestOperationCompleteTime.Time = *createSnapshotsTaskInfo.CompleteTime
+		log.Infof("Update quotainfo on successful snapshot %q creation for volume %q: %+v",
+			cnsSnapshotInfo.SnapshotID, volumeID, *quotaInfo)
+	}
 	if m.idempotencyHandlingEnabled {
 		// create the volumeOperationDetails object for persistence
 		volumeOperationDetails = createRequestDetails(
-			instanceName, cnsSnapshotInfo.SourceVolumeID, cnsSnapshotInfo.SnapshotID, 0, nil,
+			instanceName, cnsSnapshotInfo.SourceVolumeID, cnsSnapshotInfo.SnapshotID, 0, quotaInfo,
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, createSnapshotsTask.Reference().Value,
 			"", createSnapshotsTaskInfo.ActivationId, taskInvocationStatusSuccess, "")
 	}
 
 	log.Infof("CreateSnapshot: Snapshot created successfully. VolumeID: %q, SnapshotID: %q, "+
 		"SnapshotCreateTime: %q, opId: %q", cnsSnapshotInfo.SourceVolumeID, cnsSnapshotInfo.SnapshotID,
-		cnsSnapshotInfo.SnapshotCreationTimestamp, createSnapshotsTaskInfo.ActivationId)
+		cnsSnapshotInfo.SnapshotLatestOperationCompleteTime, createSnapshotsTaskInfo.ActivationId)
 
 	return cnsSnapshotInfo, nil
 }
@@ -2471,7 +2627,7 @@ func (m *defaultManager) createSnapshotWithImprovedIdempotencyCheck(ctx context.
 // This parameter is expected to be filled with the CSI CreateSnapshotRequest Name,
 // which is generated by the CSI snapshotter sidecar.
 func (m *defaultManager) CreateSnapshot(
-	ctx context.Context, volumeID string, snapshotName string) (*CnsSnapshotInfo, error) {
+	ctx context.Context, volumeID string, snapshotName string, extraParams interface{}) (*CnsSnapshotInfo, error) {
 	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
 	defer cancelFunc()
 	internalCreateSnapshot := func() (*CnsSnapshotInfo, error) {
@@ -2486,7 +2642,7 @@ func (m *defaultManager) CreateSnapshot(
 			return nil, logger.LogNewErrorf(log, "ConnectCns failed with err: %+v", err)
 		}
 
-		return m.createSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotName)
+		return m.createSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotName, extraParams)
 	}
 
 	start := time.Now()
@@ -2504,22 +2660,47 @@ func (m *defaultManager) CreateSnapshot(
 // Helper function for create snapshot with different behaviors in the idempotency handling
 // depends on whether the improved idempotency FSS is enabled.
 func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
-	ctx context.Context, volumeID string, snapshotID string) error {
+	ctx context.Context, volumeID string, snapshotID string, extraParams interface{}) (*CnsSnapshotInfo, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		// Reference to the DeleteVolume task on CNS.
 		deleteSnapshotTask *object.Task
 		// Name of the CnsVolumeOperationRequest instance.
 		instanceName = "deletesnapshot-" + volumeID + "-" + snapshotID
+		// quotaInfo consists of values required to populate QuotaDetails in CnsVolumeOperationRequest CR.
+		quotaInfo *cnsvolumeoperationrequest.QuotaDetails
 		// Local instance of DeleteSnapshot details that needs to be persisted.
 		volumeOperationDetails *cnsvolumeoperationrequest.VolumeOperationRequestDetails
 		// error
 		err error
+		// StorageQuotaM2
+		isStorageQuotaM2FSSEnabled bool
+		// cnsSnapshotInfo
+		cnsSnapshotInfo *CnsSnapshotInfo
 	)
 
+	if extraParams != nil {
+		deleteSnapParams, ok := extraParams.(*DeletesnapshotExtraParams)
+		if !ok {
+			return nil, logger.LogNewErrorf(log, "unrecognised type for Deletesnapshot params: %+v", extraParams)
+		}
+		log.Infof("Received Deletesnapshot extraParams: %+v", *deleteSnapParams)
+		isStorageQuotaM2FSSEnabled = deleteSnapParams.IsStorageQuotaM2FSSEnabled
+		if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+			quotaInfo = &cnsvolumeoperationrequest.QuotaDetails{
+				Reserved:         deleteSnapParams.Capacity,
+				StoragePolicyId:  deleteSnapParams.StoragePolicyID,
+				StorageClassName: deleteSnapParams.StorageClassName,
+				Namespace:        deleteSnapParams.Namespace,
+			}
+			log.Infof("QuotaInfo during DeleteSnapshot call: %+v", *quotaInfo)
+		}
+	}
+	// Get the taskInfo
+	var deleteSnapshotsTaskInfo *vim25types.TaskInfo
 	if m.idempotencyHandlingEnabled {
 		if m.operationStore == nil {
-			return logger.LogNewError(log, "operation store cannot be nil")
+			return nil, logger.LogNewError(log, "operation store cannot be nil")
 		}
 
 		volumeOperationDetails, err = m.operationStore.GetRequestDetails(ctx, instanceName)
@@ -2530,7 +2711,24 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 				if volumeOperationDetails.OperationDetails.TaskStatus == taskInvocationStatusSuccess {
 					log.Infof("Snapshot id %q on Volume %q is already deleted on CNS with opId: %q.",
 						snapshotID, volumeID, volumeOperationDetails.OperationDetails.OpID)
-					return nil
+					cnsSnapshotInfo = &CnsSnapshotInfo{
+						SnapshotID:     volumeOperationDetails.SnapshotID,
+						SourceVolumeID: volumeOperationDetails.VolumeID,
+					}
+					if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+						if volumeOperationDetails.QuotaDetails != nil {
+							if volumeOperationDetails.QuotaDetails.AggregatedSnapshotSize != nil {
+								cnsSnapshotInfo.AggregatedSnapshotCapacityInMb =
+									volumeOperationDetails.QuotaDetails.AggregatedSnapshotSize.Value()
+
+							}
+							if !volumeOperationDetails.QuotaDetails.SnapshotLatestOperationCompleteTime.IsZero() {
+								cnsSnapshotInfo.SnapshotLatestOperationCompleteTime =
+									volumeOperationDetails.QuotaDetails.SnapshotLatestOperationCompleteTime.Time
+							}
+						}
+					}
+					return cnsSnapshotInfo, nil
 				}
 				// Validate if previous operation is pending.
 				if IsTaskPending(volumeOperationDetails) {
@@ -2545,7 +2743,7 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, nil, metav1.Now(),
 				"", "", "", taskInvocationStatusInProgress, "")
 		default:
-			return err
+			return nil, err
 		}
 	}
 
@@ -2563,19 +2761,41 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 	}()
 
 	if deleteSnapshotTask == nil {
+
 		deleteSnapshotTask, err = invokeCNSDeleteSnapshot(ctx, m.virtualCenter, volumeID, snapshotID)
 		if err != nil {
 			if cnsvsphere.IsNotFoundError(err) {
 				log.Infof("SnapshotID: %q on volume with volumeID: %q, not found, thus returning success",
 					snapshotID, volumeID)
+				if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+					//  return updated cnssnapshotinfo
+					aggregatedSnapshotCapacityInMb, err := m.getAggregatedSnapshotSize(ctx, volumeID)
+					if err != nil {
+						return nil, logger.LogNewErrorf(log,
+							"Failed to get aggregated snapshot size for volume %q with error %v", volumeID, err)
+					}
+					currentTime := time.Now()
+					log.Infof("unable to get operation completion time for snapshot %d "+
+						"will use current time %v instead", snapshotID, currentTime)
+					cnsSnapshotInfo = &CnsSnapshotInfo{
+						SnapshotID:                          snapshotID,
+						SourceVolumeID:                      volumeID,
+						AggregatedSnapshotCapacityInMb:      aggregatedSnapshotCapacityInMb,
+						SnapshotLatestOperationCompleteTime: currentTime,
+					}
+					aggregatedSnapshotCapacity := resource.NewQuantity(aggregatedSnapshotCapacityInMb*MbInBytes, resource.BinarySI)
+					quotaInfo.AggregatedSnapshotSize = aggregatedSnapshotCapacity
+					quotaInfo.SnapshotLatestOperationCompleteTime.Time = currentTime
+				}
+
 				if m.idempotencyHandlingEnabled {
-					volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, nil,
+					volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, quotaInfo,
 						metav1.Now(), "", "", "", taskInvocationStatusSuccess, "")
 					if err := m.operationStore.StoreRequestDetails(ctx, volumeOperationDetails); err != nil {
 						log.Warnf("failed to store DeleteSnapshot operation details with error: %v", err)
 					}
 				}
-				return nil
+				return cnsSnapshotInfo, nil
 			}
 
 			if m.idempotencyHandlingEnabled {
@@ -2586,10 +2806,9 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 					log.Warnf("failed to store DeleteSnapshot operation details with error: %v", err)
 				}
 			}
-			return logger.LogNewErrorf(log, "CNS DeleteSnapshot failed from the vCenter %q with err: %v",
+			return nil, logger.LogNewErrorf(log, "CNS DeleteSnapshot failed from the vCenter %q with err: %v",
 				m.virtualCenter.Config.Host, err)
 		}
-
 		if m.idempotencyHandlingEnabled {
 			volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, nil,
 				metav1.Now(), deleteSnapshotTask.Reference().Value, "", "", taskInvocationStatusInProgress, "")
@@ -2599,27 +2818,46 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 		}
 	}
 
-	// Get the taskInfo
-	var deleteSnapshotsTaskInfo *vim25types.TaskInfo
 	deleteSnapshotsTaskInfo, err = m.waitOnTask(ctx, deleteSnapshotTask.Reference())
-
 	if err != nil {
 		if cnsvsphere.IsManagedObjectNotFound(err, deleteSnapshotTask.Reference()) {
 			log.Infof("Snapshot %q on volume %q might have already been deleted "+
 				"with the error %v. Calling CNS QuerySnapshots API to confirm it", snapshotID, volumeID, err)
 			if validateSnapshotDeleted(ctx, m, volumeID, snapshotID) {
+				if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+					log.Infof("get aggregated Snapshot Capacity for volume with volumeID %q", volumeID)
+					aggregatedSnapshotCapacityInMb, err := m.getAggregatedSnapshotSize(ctx, volumeID)
+					if err != nil {
+						return nil, logger.LogNewErrorf(log, "Failed to get aggregated snapshot size for volume %q with"+
+							" error %v", volumeID, err)
+					}
+					currentTime := time.Now()
+					log.Infof("unable to get operation completion time for snapshot %d "+
+						"will use current time %v instead", snapshotID, currentTime)
+					cnsSnapshotInfo = &CnsSnapshotInfo{
+						SnapshotID:                          snapshotID,
+						SourceVolumeID:                      volumeID,
+						AggregatedSnapshotCapacityInMb:      aggregatedSnapshotCapacityInMb,
+						SnapshotLatestOperationCompleteTime: currentTime,
+					}
+					log.Infof("Fetched aggregated Snapshot Capacity is %d for volume with volumeID %q",
+						aggregatedSnapshotCapacityInMb, volumeID)
+					aggregatedSnapshotCapacity := resource.NewQuantity(aggregatedSnapshotCapacityInMb*MbInBytes, resource.BinarySI)
+					quotaInfo.AggregatedSnapshotSize = aggregatedSnapshotCapacity
+					quotaInfo.SnapshotLatestOperationCompleteTime.Time = currentTime
+					log.Infof("Snapshot %q for volume %q confirmed to be deleted, update quotainfo: %+v",
+						snapshotID, volumeID, *quotaInfo)
+				}
 				if m.idempotencyHandlingEnabled {
 					// Create the volumeOperationDetails object for persistence
-					volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, nil,
+					volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, quotaInfo,
 						volumeOperationDetails.OperationDetails.TaskInvocationTimestamp,
 						deleteSnapshotTask.Reference().Value, "", volumeOperationDetails.OperationDetails.OpID,
 						taskInvocationStatusSuccess, "")
 				}
-
 				log.Infof("DeleteSnapshot: Snapshot %q on volume %q is confirmed to be deleted successfully",
 					snapshotID, volumeID)
-
-				return nil
+				return cnsSnapshotInfo, nil
 			}
 		}
 
@@ -2627,7 +2865,7 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, deleteSnapshotTask.Reference().Value, "",
 			volumeOperationDetails.OperationDetails.TaskID, taskInvocationStatusError, err.Error())
 
-		return logger.LogNewErrorf(log, "Failed to get taskInfo for DeleteSnapshots task from vCenter %q with err: %v",
+		return nil, logger.LogNewErrorf(log, "Failed to get taskInfo for DeleteSnapshots task from vCenter %q with err: %v",
 			m.virtualCenter.Config.Host, err)
 	}
 
@@ -2637,12 +2875,12 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 	// Get the taskResult
 	deleteSnapshotsTaskResult, err := getTaskResultFromTaskInfo(ctx, deleteSnapshotsTaskInfo)
 	if err != nil {
-		return logger.LogNewErrorf(log, "failed to get the task result for DeleteSnapshots task "+
+		return nil, logger.LogNewErrorf(log, "failed to get the task result for DeleteSnapshots task "+
 			"from vCenter %q. taskID: %q, opId: %q createResults: %+v", m.virtualCenter.Config.Host,
 			deleteSnapshotsTaskInfo.Task.Value, deleteSnapshotsTaskInfo.ActivationId, deleteSnapshotsTaskResult)
 	}
 	if deleteSnapshotsTaskResult == nil {
-		return logger.LogNewErrorf(log, "task result is empty for DeleteSnapshot task: %q, opID: %q",
+		return nil, logger.LogNewErrorf(log, "task result is empty for DeleteSnapshot task: %q, opID: %q",
 			deleteSnapshotsTaskInfo.Task.Value, deleteSnapshotsTaskInfo.ActivationId)
 	}
 
@@ -2676,44 +2914,58 @@ func (m *defaultManager) deleteSnapshotWithImprovedIdempotencyCheck(
 					"", deleteSnapshotsTaskInfo.ActivationId, taskInvocationStatusError, errMsg)
 			}
 
-			return logger.LogNewError(log, errMsg)
+			return nil, logger.LogNewError(log, errMsg)
 		}
 	}
-
+	if isStorageQuotaM2FSSEnabled && m.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		snapshotDeleteResult := interface{}(deleteSnapshotsTaskResult).(*cnstypes.CnsSnapshotDeleteResult)
+		cnsSnapshotInfo = &CnsSnapshotInfo{
+			SnapshotID:                          snapshotDeleteResult.SnapshotId.Id,
+			SourceVolumeID:                      snapshotDeleteResult.VolumeId.Id,
+			SnapshotLatestOperationCompleteTime: *deleteSnapshotsTaskInfo.CompleteTime,
+			AggregatedSnapshotCapacityInMb:      snapshotDeleteResult.AggregatedSnapshotCapacityInMb,
+		}
+		aggregatedSnapshotCapacity := resource.NewQuantity(snapshotDeleteResult.AggregatedSnapshotCapacityInMb*MbInBytes,
+			resource.BinarySI)
+		quotaInfo.AggregatedSnapshotSize = aggregatedSnapshotCapacity
+		quotaInfo.SnapshotLatestOperationCompleteTime.Time = *deleteSnapshotsTaskInfo.CompleteTime
+		log.Infof("Snapshot %q for volume %q is deleted successfully, update quotainfo: %+v",
+			snapshotID, volumeID, *quotaInfo)
+	}
 	if m.idempotencyHandlingEnabled {
 		// create the volumeOperationDetails object for persistence
-		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, nil,
+		volumeOperationDetails = createRequestDetails(instanceName, "", "", 0, quotaInfo,
 			volumeOperationDetails.OperationDetails.TaskInvocationTimestamp, deleteSnapshotTask.Reference().Value, "",
 			deleteSnapshotsTaskInfo.ActivationId, taskInvocationStatusSuccess, "")
 	}
-
 	log.Infof("DeleteSnapshot: Snapshot %q on volume %q is deleted successfully. opId: %q", snapshotID,
 		volumeID, deleteSnapshotsTaskInfo.ActivationId)
 
-	return nil
+	return cnsSnapshotInfo, nil
 }
 
-func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string) error {
+func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, snapshotID string,
+	extraParams interface{}) (*CnsSnapshotInfo, error) {
 	ctx, cancelFunc := ensureOperationContextHasATimeout(ctx)
 	defer cancelFunc()
-	internalDeleteSnapshot := func() error {
+	internalDeleteSnapshot := func() (*CnsSnapshotInfo, error) {
 		log := logger.GetLogger(ctx)
 		err := validateManager(ctx, m)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		// Set up the VC connection
 		err = m.virtualCenter.ConnectCns(ctx)
 		if err != nil {
 			log.Errorf("ConnectCns failed with err: %+v", err)
-			return err
+			return nil, err
 		}
 
-		return m.deleteSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotID)
+		return m.deleteSnapshotWithImprovedIdempotencyCheck(ctx, volumeID, snapshotID, extraParams)
 	}
 
 	start := time.Now()
-	err := internalDeleteSnapshot()
+	cnsSnapshotInfo, err := internalDeleteSnapshot()
 	if err != nil {
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteSnapshotOpType,
 			prometheus.PrometheusFailStatus).Observe(time.Since(start).Seconds())
@@ -2721,7 +2973,7 @@ func (m *defaultManager) DeleteSnapshot(ctx context.Context, volumeID string, sn
 		prometheus.CnsControlOpsHistVec.WithLabelValues(prometheus.PrometheusCnsDeleteSnapshotOpType,
 			prometheus.PrometheusPassStatus).Observe(time.Since(start).Seconds())
 	}
-	return err
+	return cnsSnapshotInfo, err
 }
 
 // ProtectVolumeFromVMDeletion helps set keepAfterDeleteVm control flag for given volumeID
@@ -2809,4 +3061,47 @@ func GetAllManagerInstances(ctx context.Context) map[string]*defaultManager {
 		newManagerInstanceMap[managerInstance.virtualCenter.Config.Host] = managerInstance
 	}
 	return newManagerInstanceMap
+}
+
+func (m *defaultManager) getAggregatedSnapshotSize(ctx context.Context, volumeID string) (int64, error) {
+	log := logger.GetLogger(ctx)
+	var aggregatedSnapshotCapacity int64
+	log.Infof("getAggregatedSnapshotSize: Query Volume to fetch aggregatedsnapshotsize for volumeID %q", volumeID)
+	queryFilter := cnstypes.CnsQueryFilter{
+		VolumeIds: []cnstypes.CnsVolumeId{{Id: volumeID}},
+	}
+	queryResult, err := m.QueryVolume(ctx, queryFilter)
+	if err != nil {
+		log.Errorf("QueryVolume failed for volumeID %q with err: %v.", volumeID, err)
+		return aggregatedSnapshotCapacity, err
+	}
+	if len(queryResult.Volumes) == 0 {
+		return aggregatedSnapshotCapacity,
+			logger.LogNewErrorf(log, "for volumeID %q QueryVolume did not return volume.", volumeID)
+	}
+	if queryResult != nil && len(queryResult.Volumes) > 0 {
+		val, ok := queryResult.Volumes[0].BackingObjectDetails.(*cnstypes.CnsBlockBackingDetails)
+		if ok {
+			log.Infof("getAggregatedSnapshotSize: received aggregatedsnapshotsize %d for volumeID %q",
+				val.AggregatedSnapshotCapacityInMb, volumeID)
+			aggregatedSnapshotCapacity = val.AggregatedSnapshotCapacityInMb
+		} else {
+			return aggregatedSnapshotCapacity,
+				logger.LogNewErrorf(log, "Unable to retrieve CnsBlockBackingDetails for volumeID %q", volumeID)
+		}
+	}
+	return aggregatedSnapshotCapacity, nil
+}
+
+func (m *defaultManager) IsListViewReady() bool {
+	if m.listViewIf == nil {
+		return false
+	}
+	return m.listViewIf.IsListViewReady()
+}
+
+func (m *defaultManager) SetListViewNotReady(ctx context.Context) {
+	if m.listViewIf != nil {
+		m.listViewIf.SetListViewNotReady(ctx)
+	}
 }

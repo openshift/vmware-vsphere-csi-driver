@@ -1,4 +1,5 @@
-// Copyright (c) 2020-2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -29,7 +30,7 @@ const (
 )
 
 // VirtualMachinePowerOpMode represents the various power operation modes when
-// when powering off or suspending a VM.
+// powering off or suspending a VM.
 // +kubebuilder:validation:Enum=hard;soft;trySoft
 type VirtualMachinePowerOpMode string
 
@@ -80,7 +81,7 @@ const (
 
 const (
 	// PauseAnnotation is an annotation that can be applied to any VirtualMachine object to prevent VM Operator from
-	// reconciling the object with the vSphere infrastructure.  VM Operator checks the presence of this annotation to
+	// reconciling the object with the vSphere infrastructure. VM Operator checks the presence of this annotation to
 	// skip the reconcile of a VirtualMachine.
 	//
 	// This can be used when a Virtual Machine needs to be modified out-of-band of VM Operator on the infrastructure
@@ -96,6 +97,28 @@ const (
 	// this annotation to skip adding a default nic. VM Operator won't add default NIC to any existing VMs or new VMs
 	// with VirtualMachineNetworkInterfaces specified. This annotation is not required for such VMs.
 	NoDefaultNicAnnotation = GroupName + "/no-default-nic"
+
+	// InstanceIDAnnotation is an annotation that can be applied to set Cloud-Init metadata Instance ID.
+	//
+	// This cannot be set by users. It is for VM Operator to handle corner cases.
+	//
+	// In a corner case where a VM first boot failed to bootstrap with Cloud-Init, VM Operator sets Instance ID
+	// the same with the first boot Instance ID to prevent Cloud-Init from treating this VM as first boot
+	// due to different Instance ID. This annotation is used in upgrade script.
+	InstanceIDAnnotation = GroupName + "/cloud-init-instance-id"
+
+	// FirstBootDoneAnnotation is an annotation that indicates the VM has been
+	// booted at least once. This annotation cannot be set by users and will not
+	// be removed once set until the VM is deleted.
+	FirstBootDoneAnnotation = "virtualmachine." + GroupName + "/first-boot-done"
+)
+
+const (
+	// ManagedByExtensionKey and ManagedByExtensionType represent the ManagedBy
+	// field on the VM. They are used to differentiate VM Service managed VMs
+	// from traditional vSphere VMs.
+	ManagedByExtensionKey  = "com.vmware.vcenter.wcp"
+	ManagedByExtensionType = "VirtualMachine"
 )
 
 // VirtualMachinePort is unused and can be considered deprecated.
@@ -120,12 +143,12 @@ type NetworkInterfaceProviderReference struct {
 
 // VirtualMachineNetworkInterface defines the properties of a network interface to attach to a VirtualMachine
 // instance.  A VirtualMachineNetworkInterface describes network interface configuration that is used by the
-// VirtualMachine controller when integrating the VirtualMachine into a VirtualNetwork.  Currently, only NSX-T
+// VirtualMachine controller when integrating the VirtualMachine into a VirtualNetwork. Currently, only NSX-T
 // and vSphere Distributed Switch (VDS) type network integrations are supported using this VirtualMachineNetworkInterface
 // structure.
 type VirtualMachineNetworkInterface struct {
-	// NetworkType describes the type of VirtualNetwork that is referenced by the NetworkName.  Currently, the only
-	// supported NetworkTypes are "nsx-t" and "vsphere-distributed".
+	// NetworkType describes the type of VirtualNetwork that is referenced by the NetworkName. Currently, the supported
+	// NetworkTypes are "nsx-t", "nsx-t-subnet", "nsx-t-subnetset" and "vsphere-distributed".
 	// +optional
 	NetworkType string `json:"networkType,omitempty"`
 
@@ -285,6 +308,9 @@ type VsphereVolumeSource struct {
 // alive or ready to receive traffic. Only one probe action can be specified.
 type Probe struct {
 	// TCPSocket specifies an action involving a TCP port.
+	//
+	// Deprecated: The TCPSocket action requires network connectivity that is not supported in all environments.
+	// This field will be removed in a later API version.
 	// +optional
 	TCPSocket *TCPSocketAction `json:"tcpSocket,omitempty"`
 
@@ -345,9 +371,24 @@ type GuestHeartbeatAction struct {
 
 // VirtualMachineSpec defines the desired state of a VirtualMachine.
 type VirtualMachineSpec struct {
-	// ImageName describes the name of a VirtualMachineImage that is to be used as the base Operating System image of
-	// the desired VirtualMachine instances.  The VirtualMachineImage resources can be introspected to discover identifying
-	// attributes that may help users to identify the desired image to use.
+	// ImageName describes the name of the image resource used to deploy this
+	// VM.
+	//
+	// This field may be used to specify the name of a VirtualMachineImage
+	// or ClusterVirtualMachineImage resource. The resolver first checks to see
+	// if there is a VirtualMachineImage with the specified name in the
+	// same namespace as the VM being deployed. If no such resource exists, the
+	// resolver then checks to see if there is a ClusterVirtualMachineImage
+	// resource with the specified name.
+	//
+	// This field may also be used to specify the display name (vSphere name) of
+	// a VirtualMachineImage or ClusterVirtualMachineImage resource. If the
+	// display name unambiguously resolves to a distinct VM image (among all
+	// existing VirtualMachineImages in the VM's namespace and all existing
+	// ClusterVirtualMachineImages), then a mutation webhook updates this field
+	// with the VM image resource name. If the display name resolves to multiple
+	// or no VM images, then the mutation webhook denies the request and outputs
+	// an error message accordingly.
 	ImageName string `json:"imageName"`
 
 	// ClassName describes the name of a VirtualMachineClass that is to be used as the overlaid resource configuration
@@ -449,7 +490,11 @@ type VirtualMachineSpec struct {
 	// NetworkInterfaces describes a list of VirtualMachineNetworkInterfaces to be configured on the VirtualMachine instance.
 	// Each of these VirtualMachineNetworkInterfaces describes external network integration configurations that are to be
 	// used by the VirtualMachine controller when integrating the VirtualMachine into one or more external networks.
+	//
+	// The maximum number of network interface allowed is 10 because of the limit built into vSphere.
+	//
 	// +optional
+	// +kubebuilder:validation:MaxItems=10
 	NetworkInterfaces []VirtualMachineNetworkInterface `json:"networkInterfaces,omitempty"`
 
 	// ResourcePolicyName describes the name of a VirtualMachineSetResourcePolicy to be used when creating the
@@ -472,6 +517,44 @@ type VirtualMachineSpec struct {
 
 	// AdvancedOptions describes a set of optional, advanced options for configuring a VirtualMachine
 	AdvancedOptions *VirtualMachineAdvancedOptions `json:"advancedOptions,omitempty"`
+
+	// MinHardwareVersion specifies the desired minimum hardware version
+	// for this VM.
+	//
+	// Usually the VM's hardware version is derived from:
+	// 1. the VirtualMachineClass used to deploy the VM provided by the ClassName field
+	// 2. the datacenter/cluster/host default hardware version
+	// Setting this field will ensure that the hardware version of the VM
+	// is at least set to the specified value. To enforce this, it will override
+	// the value from the VirtualMachineClass.
+	//
+	// This field is never updated to reflect the derived hardware version.
+	// Instead, VirtualMachineStatus.HardwareVersion surfaces
+	// the observed hardware version.
+	//
+	// Please note, setting this field's value to N ensures a VM's hardware
+	// version is equal to or greater than N. For example, if a VM's observed
+	// hardware version is 10 and this field's value is 13, then the VM will be
+	// upgraded to hardware version 13. However, if the observed hardware
+	// version is 17 and this field's value is 13, no change will occur.
+	//
+	// Several features are hardware version dependent, for example:
+	//
+	// * NVMe Controllers                >= 14
+	// * Dynamic Direct Path I/O devices >= 17
+	//
+	// Please refer to https://kb.vmware.com/s/article/1003746 for a list of VM
+	// hardware versions.
+	//
+	// It is important to remember that a VM's hardware version may not be
+	// downgraded and upgrading a VM deployed from an image based on an older
+	// hardware version to a more recent one may result in unpredictable
+	// behavior. In other words, please be careful when choosing to upgrade a
+	// VM to a newer hardware version.
+	//
+	// +optional
+	// +kubebuilder:validation:Minimum=13
+	MinHardwareVersion int32 `json:"minHardwareVersion,omitempty"`
 }
 
 // VirtualMachineAdvancedOptions describes a set of optional, advanced options for configuring a VirtualMachine.
@@ -588,6 +671,15 @@ type VirtualMachineStatus struct {
 	// LastRestartTime describes the last time the VM was restarted.
 	// +optional
 	LastRestartTime *metav1.Time `json:"lastRestartTime,omitempty"`
+
+	// HardwareVersion describes the VirtualMachine resource's observed
+	// hardware version.
+	//
+	// Please refer to VirtualMachineSpec.MinHardwareVersion for more
+	// information on the topic of a VM's hardware version.
+	//
+	// +optional
+	HardwareVersion int32 `json:"hardwareVersion,omitempty"`
 }
 
 func (vm *VirtualMachine) GetConditions() Conditions {
@@ -600,13 +692,14 @@ func (vm *VirtualMachine) SetConditions(conditions Conditions) {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vm
-// +kubebuilder:storageversion
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Power-State",type="string",JSONPath=".status.powerState"
 // +kubebuilder:printcolumn:name="Class",type="string",priority=1,JSONPath=".spec.className"
 // +kubebuilder:printcolumn:name="Image",type="string",priority=1,JSONPath=".spec.imageName"
 // +kubebuilder:printcolumn:name="Primary-IP",type="string",priority=1,JSONPath=".status.vmIp"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:deprecatedversion
 
 // VirtualMachine is the Schema for the virtualmachines API.
 // A VirtualMachine represents the desired specification and the observed status of a VirtualMachine instance.  A
@@ -624,9 +717,10 @@ func (vm VirtualMachine) NamespacedName() string {
 	return vm.Namespace + "/" + vm.Name
 }
 
-// VirtualMachineList contains a list of VirtualMachine.
-//
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
+
+// VirtualMachineList contains a list of VirtualMachine.
 type VirtualMachineList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
@@ -634,5 +728,5 @@ type VirtualMachineList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachine{}, &VirtualMachineList{})
+	objectTypes = append(objectTypes, &VirtualMachine{}, &VirtualMachineList{})
 }

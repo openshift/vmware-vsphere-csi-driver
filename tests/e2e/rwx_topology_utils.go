@@ -21,10 +21,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	ginkgo "github.com/onsi/ginkgo/v2"
+	"github.com/onsi/gomega"
+	"github.com/vmware/govmomi/cns"
+	cnsmethods "github.com/vmware/govmomi/cns/methods"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
+	vimtypes "github.com/vmware/govmomi/vim25/types"
+	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 	"golang.org/x/crypto/ssh"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
@@ -38,6 +45,8 @@ import (
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2eoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
+	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
+	"k8s.io/pod-security-admission/api"
 )
 
 /*
@@ -190,7 +199,7 @@ func createStandalonePodsForRWXVolume(client clientset.Interface, ctx context.Co
 	command string, no_pods_to_deploy int) ([]*v1.Pod, error) {
 	var podList []*v1.Pod
 
-	for i := 0; i <= no_pods_to_deploy; i++ {
+	for i := 0; i < no_pods_to_deploy; i++ {
 		var pod *v1.Pod
 		var err error
 
@@ -223,7 +232,8 @@ func createStandalonePodsForRWXVolume(client clientset.Interface, ctx context.Co
 
 		// here we are creating Pod3 with read-only permissions
 		if i == 2 {
-			pod = fpod.MakePod(namespace, nodeSelector, pvclaims, isPrivileged, command)
+			pod = fpod.MakePod(namespace, nodeSelector, pvclaims,
+				api.LevelBaseline, "")
 			pod.Spec.Containers[0].Image = busyBoxImageOnGcr
 			createdPod, err := client.CoreV1().Pods(namespace).Create(context.TODO(), pod, metav1.CreateOptions{})
 			if err != nil {
@@ -243,6 +253,7 @@ func createStandalonePodsForRWXVolume(client clientset.Interface, ctx context.Co
 				framework.Logf("error executing write command on pod %s due to readonly permissions: %v", pod.Name, err)
 			}
 
+			podList = append(podList, pod)
 		}
 
 		framework.Logf("Now creating and accessing files from different pods having read/write permissions")
@@ -385,19 +396,19 @@ func createVerifyAndScaleDeploymentPods(ctx context.Context, client clientset.In
 			deployment, err := createDeployment(ctx, client, int32(replica), labelsMap, nodeSelectorTerms, namespace,
 				[]*v1.PersistentVolumeClaim{pvclaim}, podCmd, false, podImage)
 			if err != nil {
-				return deploymentList, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
+				return []*appsv1.Deployment{deployment}, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
 			}
 
 			// checking replica pod running status
 			framework.Logf("Wait for deployment pods to be up and running")
 			pods, err = fdep.GetPodsForDeployment(ctx, client, deployment)
 			if err != nil {
-				return deploymentList, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
+				return []*appsv1.Deployment{deployment}, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
 			}
 			pod := pods.Items[0]
 			err = fpod.WaitForPodNameRunningInNamespace(ctx, client, pod.Name, namespace)
 			if err != nil {
-				return deploymentList, pods, fmt.Errorf("failed to wait for pod running: %w", err)
+				return []*appsv1.Deployment{deployment}, pods, fmt.Errorf("failed to wait for pod running: %w", err)
 			}
 			deploymentList = append(deploymentList, deployment)
 		}
@@ -407,7 +418,7 @@ func createVerifyAndScaleDeploymentPods(ctx context.Context, client clientset.In
 	if scaleDeploymentPod {
 		deploymentToScale, err = client.AppsV1().Deployments(namespace).Get(ctx, deploymentToScale.Name, metav1.GetOptions{})
 		if err != nil {
-			return deploymentList, nil, fmt.Errorf("failed to get pods for deployment: %w", err)
+			return []*appsv1.Deployment{deploymentToScale}, nil, fmt.Errorf("failed to get pods for deployment: %w", err)
 		}
 		pods, err = fdep.GetPodsForDeployment(ctx, client, deploymentToScale)
 		if err != nil {
@@ -419,12 +430,12 @@ func createVerifyAndScaleDeploymentPods(ctx context.Context, client clientset.In
 		deploymentToScale.Spec.Replicas = rep
 		_, err = client.AppsV1().Deployments(namespace).Update(ctx, deploymentToScale, metav1.UpdateOptions{})
 		if err != nil {
-			return deploymentList, pods, fmt.Errorf("failed to update deployment: %w", err)
+			return []*appsv1.Deployment{deploymentToScale}, pods, fmt.Errorf("failed to update deployment: %w", err)
 		}
 
 		pods, err = fdep.GetPodsForDeployment(ctx, client, deploymentToScale)
 		if err != nil {
-			return deploymentList, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
+			return []*appsv1.Deployment{deploymentToScale}, pods, fmt.Errorf("failed to get pods for deployment: %w", err)
 		}
 		pod = pods.Items[0]
 		rep = deploymentToScale.Spec.Replicas
@@ -432,14 +443,14 @@ func createVerifyAndScaleDeploymentPods(ctx context.Context, client clientset.In
 			// this check is when we scale down deployment pods
 			err = fpod.WaitForPodNotFoundInNamespace(ctx, client, pod.Name, namespace, pollTimeout)
 			if err != nil {
-				return deploymentList, pods, fmt.Errorf("failed to wait for pod not found: %w", err)
+				return []*appsv1.Deployment{deploymentToScale}, pods, fmt.Errorf("failed to wait for pod not found: %w", err)
 			}
 		} else {
 			// this check is when we scale up deployment pods, all new replica pod should come to running states
 			ginkgo.By("Wait for deployment pods to be up and running")
 			err = fpod.WaitForPodRunningInNamespaceSlow(ctx, client, pod.Name, namespace)
 			if err != nil {
-				return deploymentList, pods, fmt.Errorf("failed to wait for pod running: %w", err)
+				return []*appsv1.Deployment{deploymentToScale}, pods, fmt.Errorf("failed to wait for pod running: %w", err)
 			}
 		}
 		deploymentList = append(deploymentList, deploymentToScale)
@@ -454,12 +465,13 @@ it returns an error appropriately.
 */
 func fetchDatastoreListMap(ctx context.Context,
 	client clientset.Interface) ([]string, []string, []string, []string, error) {
-
-	var datastoreUrlsRack1, datastoreUrlsRack2, datastoreUrlsRack3, datastoreUrls []string
-	nimbusGeneratedK8sVmPwd := GetAndExpectStringEnvVar(nimbusK8sVmPwd)
-	var dataCenters []*object.Datacenter
-	var err error
-	var rack2DatastoreListMap, rack3DatastoreListMap map[string]string
+	var (
+		datastoreUrlsRack1, datastoreUrlsRack2, datastoreUrlsRack3, datastoreUrls []string
+		nimbusGeneratedK8sVmPwd                                                   = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
+		dataCenters                                                               []*object.Datacenter
+		err                                                                       error
+		rack2DatastoreListMap, rack3DatastoreListMap                              map[string]string
+	)
 
 	sshClientConfig := &ssh.ClientConfig{
 		User: "root",
@@ -472,7 +484,7 @@ func fetchDatastoreListMap(ctx context.Context,
 	allMasterIps := getK8sMasterIPs(ctx, client)
 	masterIp := allMasterIps[0]
 
-	// fetching datacenter details
+	// Fetching datacenter details
 	if !multivc {
 		dataCenters, err = e2eVSphere.getAllDatacenters(ctx)
 	} else {
@@ -482,49 +494,42 @@ func fetchDatastoreListMap(ctx context.Context,
 		return nil, nil, nil, nil, err
 	}
 
-	// fetching cluster details
-	// // here clientIndex=1 means VC-1 list of datastores we are fetching
+	// Fetching cluster details
 	clientIndex := 0
 	clusters, err := getTopologyLevel5ClusterGroupNames(masterIp, sshClientConfig, dataCenters, clientIndex)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
-	// fetching list of datastores available in different racks
+	// Fetching list of datastores for Rack 1
 	rack1DatastoreListMap, err := getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0], clientIndex)
 	if err != nil {
 		return nil, nil, nil, nil, err
 	}
 
+	// Fetching list of datastores for Rack 2
 	if !multivc {
 		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[1], clientIndex)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
 	} else {
-		// here clientIndex=1 means VC-2 list of datastores we are fetching
-		clientIndex := 1
+		clientIndex = 1
 		rack2DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0], clientIndex)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
+	}
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 
+	// Fetching list of datastores for Rack 3
 	if !multivc {
 		rack3DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[2], clientIndex)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
 	} else {
-		// here clientIndex=1 means VC-3 list of datastores we are fetching
-		clientIndex := 2
+		clientIndex = 2
 		rack3DatastoreListMap, err = getListOfDatastoresByClusterName(masterIp, sshClientConfig, clusters[0], clientIndex)
-		if err != nil {
-			return nil, nil, nil, nil, err
-		}
+	}
+	if err != nil {
+		return nil, nil, nil, nil, err
 	}
 
-	// create datastore map for each cluster
+	// Populate datastore URLs for each rack
 	for _, value := range rack1DatastoreListMap {
 		datastoreUrlsRack1 = append(datastoreUrlsRack1, value)
 	}
@@ -537,10 +542,12 @@ func fetchDatastoreListMap(ctx context.Context,
 		datastoreUrlsRack3 = append(datastoreUrlsRack3, value)
 	}
 
+	// Combine all datastore URLs
 	datastoreUrls = append(datastoreUrls, datastoreUrlsRack1...)
 	datastoreUrls = append(datastoreUrls, datastoreUrlsRack2...)
 	datastoreUrls = append(datastoreUrls, datastoreUrlsRack3...)
 
+	// Return results
 	return datastoreUrlsRack1, datastoreUrlsRack2, datastoreUrlsRack3, datastoreUrls, nil
 }
 
@@ -618,4 +625,520 @@ func volumePlacementVerificationForSts(ctx context.Context, client clientset.Int
 		}
 	}
 	return nil
+}
+
+/*
+createFileShareForSingleVc utility creates a file share volume for a single vCenter setup
+*/
+func creatFileShareForSingleVc(datastoreUrl string) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// variable declaration
+	var err error
+	var defaultDatastore *object.Datastore
+	var datacenters []string
+	var defaultDatacenter *object.Datacenter
+
+	// connect to vc cns
+	err = connectCns(ctx, &e2eVSphere)
+	if err != nil {
+		return "", err
+	}
+
+	// find the datacenter details
+	finder := find.NewFinder(e2eVSphere.Client.Client, false)
+	cfg, err := getConfig()
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	dcList := strings.Split(cfg.Global.Datacenters, ",")
+	for _, dc := range dcList {
+		dcName := strings.TrimSpace(dc)
+		if dcName != "" {
+			datacenters = append(datacenters, dcName)
+		}
+	}
+
+	// find datastore details based on passed datastore url
+	for _, dc := range datacenters {
+		defaultDatacenter, err = finder.Datacenter(ctx, dc)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		finder.SetDatacenter(defaultDatacenter)
+		defaultDatastore, err = getDatastoreByURL(ctx, datastoreUrl, defaultDatacenter)
+		if err == nil {
+			break
+		}
+	}
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Datastore is not found in the datacenter list")
+
+	ginkgo.By("Creating file share")
+	cnsCreateReq := cnstypes.CnsCreateVolume{
+		This:        cnsVolumeManagerInstance,
+		CreateSpecs: []cnstypes.CnsVolumeCreateSpec{*getFileShareCreateSpec(defaultDatastore.Reference())},
+	}
+	cnsCreateRes, err := cnsmethods.CnsCreateVolume(ctx, e2eVSphere.CnsClient.Client, &cnsCreateReq)
+	if err != nil {
+		return "", err
+	}
+	task := object.NewTask(e2eVSphere.Client.Client, cnsCreateRes.Returnval)
+
+	taskInfo, err := cns.GetTaskInfo(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return "", err
+	}
+	fileShareVolumeID := taskResult.GetCnsVolumeOperationResult().VolumeId.Id
+
+	// Deleting the volume with deleteDisk set to false.
+	ginkgo.By("Deleting the fileshare with deleteDisk set to false")
+	cnsDeleteReq := cnstypes.CnsDeleteVolume{
+		This:       cnsVolumeManagerInstance,
+		VolumeIds:  []cnstypes.CnsVolumeId{{Id: fileShareVolumeID}},
+		DeleteDisk: false,
+	}
+	cnsDeleteRes, err := cnsmethods.CnsDeleteVolume(ctx, e2eVSphere.CnsClient.Client, &cnsDeleteReq)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	task = object.NewTask(e2eVSphere.Client.Client, cnsDeleteRes.Returnval)
+
+	taskInfo, err = cns.GetTaskInfo(ctx, task)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	_, err = cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	return fileShareVolumeID, nil
+}
+
+/*
+writeConfigToSecretForFileVolume utility creates a new config secret that includes vCenter credentials
+and sets network permissions for file volumes.
+*/
+func writeConfigToSecretForFileVolume(cfg e2eTestConfig, netPerm NetPermissionConfig) (string, error) {
+	result := fmt.Sprintf("[Global]\ninsecure-flag = \"%t\"\ncluster-id = \"%s\"\ncluster-distribution = \"%s\"\n"+
+		"csi-fetch-preferred-datastores-intervalinmin = %d\n"+"query-limit = \"%d\"\n"+
+		"list-volume-threshold = \"%d\"\n\n"+
+		"[NetPermissions \"A\"]\nips = \"%s\"\npermissions = \"%s\"\nrootsquash = %t \n\n"+
+		"[VirtualCenter \"%s\"]\nuser = \"%s\"\npassword = \"%s\"\ndatacenters = \"%s\"\nport = \"%s\"\n\n"+
+		"[Labels]\ntopology-categories = \"%s\"",
+		cfg.Global.InsecureFlag, cfg.Global.ClusterID, cfg.Global.ClusterDistribution,
+		cfg.Global.CSIFetchPreferredDatastoresIntervalInMin, cfg.Global.QueryLimit, cfg.Global.ListVolumeThreshold,
+		netPerm.Ips, netPerm.Permissions, netPerm.RootSquash,
+		cfg.Global.VCenterHostname, cfg.Global.User, cfg.Global.Password,
+		cfg.Global.Datacenters, cfg.Global.VCenterPort,
+		cfg.Labels.TopologyCategories)
+
+	return result, nil
+}
+
+/*
+setNetPermissionsInVsphereConfSecret utility configures network permissions with varying
+levels of read and write access
+*/
+func setNetPermissionsInVsphereConfSecret(client clientset.Interface, ctx context.Context,
+	csiNamespace string, netPermissionIps string,
+	permissions vsanfstypes.VsanFileShareAccessType, rootSquash bool) error {
+
+	var modifiedConf string
+	var vsphereCfg e2eTestConfig
+	var netPerm NetPermissionConfig
+
+	// read current secret
+	currentSecret, err := client.CoreV1().Secrets(csiNamespace).Get(ctx, configSecret, metav1.GetOptions{})
+	if err != nil {
+		return fmt.Errorf("failed to get current secret: %v", err)
+	}
+
+	// read original conf
+	originalConf := string(currentSecret.Data[vSphereCSIConf])
+
+	if !multivc {
+		vsphereCfg, err = readConfigFromSecretString(originalConf)
+		if err != nil {
+			return fmt.Errorf("failed to read config from secret string: %v", err)
+		}
+	} else {
+		vsphereCfg, err = readVsphereConfCredentialsInMultiVcSetup(originalConf)
+		if err != nil {
+			return fmt.Errorf("failed to read vsphere conf credentials in multi vc setup: %v", err)
+		}
+	}
+
+	netPerm.Ips = netPermissionIps
+	netPerm.Permissions = permissions
+	netPerm.RootSquash = rootSquash
+	if !multivc {
+		modifiedConf, err = writeConfigToSecretForFileVolume(vsphereCfg, netPerm)
+		if err != nil {
+			return fmt.Errorf("failed to write config to secret for file volume: %v", err)
+		}
+		ginkgo.By("Updating the secret to reflect new changes")
+		currentSecret.Data[vSphereCSIConf] = []byte(modifiedConf)
+		_, err = client.CoreV1().Secrets(csiNamespace).Update(ctx, currentSecret, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update secret: %v", err)
+		}
+	} else {
+		err = updateVsphereConfSecretForFileVolumes(client, ctx, csiNamespace, vsphereCfg, netPerm)
+		if err != nil {
+			return fmt.Errorf("failed to write new data and update vsphere conf secret: %v", err)
+		}
+	}
+
+	return nil
+}
+
+// KeyValue struct to represent key-value pairs
+type KeyValue struct {
+	KeyIndex   int
+	ValueIndex int // Use -1 to fetch all values for a specific key
+}
+
+/*
+getAllowedTopologyForLevel2 utility generates an allowed topology based on a
+user-specific index value and returns the created topology for level 2.
+*/
+func getAllowedTopologyForLevel2(allowedTopologies []v1.TopologySelectorLabelRequirement,
+	keyValues []KeyValue) ([]v1.TopologySelectorLabelRequirement, error) {
+	resultMap := make(map[string][]string)
+
+	for _, kv := range keyValues {
+		keyIndex, valueIndex := kv.KeyIndex, kv.ValueIndex
+
+		// Check if keyIndex is within bounds
+		if keyIndex < 0 || keyIndex >= len(allowedTopologies) {
+			return nil, errors.New("key index out of range")
+		}
+
+		keyRequirement := allowedTopologies[keyIndex]
+
+		// Check if valueIndex is within bounds
+		if valueIndex < 0 || valueIndex >= len(keyRequirement.Values) {
+			return nil, errors.New("value index out of range")
+		}
+
+		// Append the value to the result map for the corresponding key
+		resultMap[keyRequirement.Key] = append(resultMap[keyRequirement.Key], keyRequirement.Values[valueIndex])
+	}
+
+	var result []v1.TopologySelectorLabelRequirement
+	for key, values := range resultMap {
+		result = append(result, v1.TopologySelectorLabelRequirement{
+			Key:    key,
+			Values: values,
+		})
+	}
+	return result, nil
+}
+
+/*
+verifyK8sNodeStatusAfterSiteRecovery verifies that all k8s nodes be in up and
+running state post site recovery
+*/
+func verifyK8sNodeStatusAfterSiteRecovery(client clientset.Interface, ctx context.Context,
+	sshClientConfig *ssh.ClientConfig, nodeList *v1.NodeList) error {
+	k8sMasterIPs := getK8sMasterIPs(ctx, client)
+	checkNodesStatus := "kubectl get nodes | grep NotReady |  awk '{print $1}'"
+	framework.Logf("Invoking command '%v' on host %v", checkNodesStatus, k8sMasterIPs[0])
+	result, err := sshExec(sshClientConfig, k8sMasterIPs[0], checkNodesStatus)
+	nodeNames := strings.Split(result.Stdout, "\n")
+	if err != nil || result.Code != 0 {
+		fssh.LogResult(result)
+		return fmt.Errorf("command failed/couldn't execute command: %s "+
+			"on host: %v, error: %w", checkNodesStatus, k8sMasterIPs[0], err)
+	}
+
+	for _, nodeName := range nodeNames {
+		if nodeName != "" {
+			framework.Logf("Node which is disconnected and needs to be powered on: %s", nodeName)
+			vmUUID := getNodeUUID(ctx, client, nodeName)
+			if vmUUID == "" {
+				return fmt.Errorf("VM UUID is empty for node: %s", nodeName)
+			}
+			framework.Logf("VM uuid is: %s for node: %s", vmUUID, nodeName)
+			vmRef, err := e2eVSphere.getVMByUUID(ctx, vmUUID)
+			if err != nil {
+				return fmt.Errorf("failed to get VM by UUID %s: %w", vmUUID, err)
+			}
+			framework.Logf("vmRef: %v for the VM uuid: %s", vmRef, vmUUID)
+			if vmRef == nil {
+				return fmt.Errorf("vmRef is nil for VM uuid: %s", vmUUID)
+			}
+			vm := object.NewVirtualMachine(e2eVSphere.Client.Client, vmRef.Reference())
+			_, err = vm.PowerOn(ctx)
+			if err != nil {
+				return fmt.Errorf("failed to power on VM %s: %w", vmUUID, err)
+			}
+
+			err = vm.WaitForPowerState(ctx, vimtypes.VirtualMachinePowerStatePoweredOn)
+			if err != nil {
+				return fmt.Errorf("error waiting for VM %s to power on: %w", vmUUID, err)
+			}
+		}
+	}
+
+	// Wait for testbed to be back to normal
+	time.Sleep(pollTimeoutShort)
+
+	ginkgo.By("Wait for k8s cluster to be healthy")
+	wait4AllK8sNodesToBeUp(nodeList)
+	err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
+	if err != nil {
+		return fmt.Errorf("error waiting for all nodes to be ready: %w", err)
+	}
+	return nil
+}
+
+/* This util will perform psod operation on a host */
+func psodHost(hostIP string, psodTimeOut string) error {
+	ginkgo.By("PSOD")
+	var timeout string
+	if psodTimeOut != "" {
+		timeout = psodTimeOut
+	} else {
+		timeout = psodTime
+	}
+	sshCmd := fmt.Sprintf("vsish -e set /config/Misc/intOpts/BlueScreenTimeout %s", timeout)
+	op, err := runCommandOnESX(rootUser, hostIP, sshCmd)
+	framework.Logf("%q", op)
+	if err != nil {
+		return fmt.Errorf("failed to set BlueScreenTimeout: %w", err)
+	}
+
+	ginkgo.By("Injecting PSOD")
+	psodCmd := "vsish -e set /reliability/crashMe/Panic 1; exit"
+	op, err = runCommandOnESX(rootUser, hostIP, psodCmd)
+	framework.Logf("%q", op)
+	if err != nil {
+		return fmt.Errorf("failed to inject PSOD: %w", err)
+	}
+	return nil
+}
+
+/*
+This utility fetches a list of hosts in a specified cluster and returns them as a list of strings.
+*/
+func fetchListofHostsInCluster(ctx context.Context, clusterName string) []string {
+	var hostList []string
+	var hostsInCluster []*object.HostSystem
+	clusterComputeResource, _, err := getClusterName(ctx, &e2eVSphere)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	hostsInCluster = getHostsByClusterName(ctx, clusterComputeResource, clusterName)
+	for i := 0; i < len(hostsInCluster); i++ {
+		for _, esxInfo := range tbinfo.esxHosts {
+			host := hostsInCluster[i].Common.InventoryPath
+			hostIp := strings.Split(host, "/")
+			if hostIp[len(hostIp)-1] == esxInfo["ip"] {
+				esxHostIP := esxInfo["ip"]
+				hostList = append(hostList, esxHostIP)
+			}
+		}
+	}
+	return hostList
+}
+
+/*
+writeNewDataAndUpdateVsphereConfSecret uitl edit the vsphere conf and returns the updated
+vsphere config sceret
+*/
+func updateVsphereConfSecretForFileVolumes(client clientset.Interface, ctx context.Context,
+	csiNamespace string, cfg e2eTestConfig, netPerm NetPermissionConfig) error {
+	var result string
+
+	// fetch current secret
+	currentSecret, err := client.CoreV1().Secrets(csiNamespace).Get(ctx, configSecret, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+
+	// modify vshere conf file
+	vCenterHostnames := strings.Split(cfg.Global.VCenterHostname, ",")
+	users := strings.Split(cfg.Global.User, ",")
+	passwords := strings.Split(cfg.Global.Password, ",")
+	dataCenters := strings.Split(cfg.Global.Datacenters, ",")
+	ports := strings.Split(cfg.Global.VCenterPort, ",")
+
+	result += fmt.Sprintf("[Global]\ncluster-distribution = \"%s\"\n"+
+		"csi-fetch-preferred-datastores-intervalinmin = %d\n"+
+		"query-limit = %d\nlist-volume-threshold = %d\n\n"+
+		"[NetPermissions \"A\"]\nips = \"%s\"\npermissions = \"%s\"\nrootsquash = %t \n\n",
+		cfg.Global.ClusterDistribution, cfg.Global.CSIFetchPreferredDatastoresIntervalInMin, cfg.Global.QueryLimit,
+		cfg.Global.ListVolumeThreshold, netPerm.Ips, netPerm.Permissions, netPerm.RootSquash)
+	for i := 0; i < len(vCenterHostnames); i++ {
+		result += fmt.Sprintf("[VirtualCenter \"%s\"]\ninsecure-flag = \"%t\"\nuser = \"%s\"\npassword = \"%s\"\n"+
+			"port = \"%s\"\ndatacenters = \"%s\"\n\n",
+			vCenterHostnames[i], cfg.Global.InsecureFlag, users[i], passwords[i], ports[i], dataCenters[i])
+	}
+
+	result += fmt.Sprintf("[Labels]\ntopology-categories = \"%s\"\n", cfg.Labels.TopologyCategories)
+
+	framework.Logf("%q", result)
+
+	// update config secret with newly updated vshere conf file
+	framework.Logf("Updating the secret to reflect new conf credentials")
+	currentSecret.Data[vSphereCSIConf] = []byte(result)
+	_, err = client.CoreV1().Secrets(csiNamespace).Update(ctx, currentSecret, metav1.UpdateOptions{})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+/* createFileShareForMultiVc created file share for multivc setup */
+func (vs *multiVCvSphere) createFileShareForMultiVc(datastoreUrl string, clientIndex int) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// variable declaration
+	var err error
+	var defaultDatastore *object.Datastore
+	var datacenters []string
+	var defaultDatacenter *object.Datacenter
+
+	// connect to vc cns
+	connectMultiVC(ctx, &multiVCe2eVSphere)
+	if err != nil {
+		return "", err
+	}
+
+	// Check if clientIndex is valid
+	if clientIndex < 0 || clientIndex >= len(multiVCe2eVSphere.multiVcClient) {
+		return "", fmt.Errorf("clientIndex %d is out of range", clientIndex)
+	}
+	client := multiVCe2eVSphere.multiVcClient[clientIndex]
+
+	// find the datacenter details
+	finder := find.NewFinder(client.Client, false)
+	cfg, err := getConfig()
+	if err != nil {
+		return "", err
+	}
+	dcList := strings.Split(cfg.Global.Datacenters, ",")
+	for _, dc := range dcList {
+		dcName := strings.TrimSpace(dc)
+		if dcName != "" {
+			datacenters = append(datacenters, dcName)
+		}
+	}
+
+	// find datastore details based on passed datastore url
+	for _, dc := range datacenters {
+		defaultDatacenter, err = finder.Datacenter(ctx, dc)
+		if err != nil {
+			continue
+		}
+		finder.SetDatacenter(defaultDatacenter)
+		defaultDatastore, err = getDatastoreByURL(ctx, datastoreUrl, defaultDatacenter)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return "", fmt.Errorf("datastore is not found in the datacenter list: %v", err)
+	}
+
+	ginkgo.By("Creating file share")
+	cnsCreateReq := cnstypes.CnsCreateVolume{
+		This: cnsVolumeManagerInstance,
+		CreateSpecs: []cnstypes.CnsVolumeCreateSpec{*createFileShareSpecForMultiVc(defaultDatastore.Reference(),
+			clientIndex)},
+	}
+	// Connects to multiple CNS clients
+	err = connectMultiVcCns(ctx, vs)
+	if err != nil {
+		return "", err
+	}
+
+	clientM := multiVCe2eVSphere.multiVcCnsClient[clientIndex].Client
+	cnsCreateRes, err := cnsmethods.CnsCreateVolume(ctx, clientM, &cnsCreateReq)
+	if err != nil {
+		return "", err
+	}
+	task := object.NewTask(client.Client, cnsCreateRes.Returnval)
+
+	taskInfo, err := cns.GetTaskInfo(ctx, task)
+	if err != nil {
+		return "", err
+	}
+	taskResult, err := cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return "", err
+	}
+	fileShareVolumeID := taskResult.GetCnsVolumeOperationResult().VolumeId.Id
+
+	// Deleting the volume with deleteDisk set to false.
+	ginkgo.By("Deleting the fileshare with deleteDisk set to false")
+	cnsDeleteReq := cnstypes.CnsDeleteVolume{
+		This:       cnsVolumeManagerInstance,
+		VolumeIds:  []cnstypes.CnsVolumeId{{Id: fileShareVolumeID}},
+		DeleteDisk: false,
+	}
+	cnsDeleteRes, err := cnsmethods.CnsDeleteVolume(ctx, multiVCe2eVSphere.multiVcCnsClient[clientIndex].Client,
+		&cnsDeleteReq)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	task = object.NewTask(client.Client, cnsDeleteRes.Returnval)
+
+	taskInfo, err = cns.GetTaskInfo(ctx, task)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	_, err = cns.GetTaskResult(ctx, taskInfo)
+	if err != nil {
+		return fileShareVolumeID, err
+	}
+	return fileShareVolumeID, nil
+}
+
+/*
+createFileShareSpecForMultiVc util will crete file share spec
+for anyone of the VC which is passed
+*/
+func createFileShareSpecForMultiVc(datastore vimtypes.ManagedObjectReference,
+	clientIndex int) *cnstypes.CnsVolumeCreateSpec {
+	netPermissions := vsanfstypes.VsanFileShareNetPermission{
+		Ips:         "*",
+		Permissions: vsanfstypes.VsanFileShareAccessTypeREAD_WRITE,
+		AllowRoot:   true,
+	}
+	configUser := []string{multiVCe2eVSphere.multivcConfig.Global.User}
+	if strings.Contains(multiVCe2eVSphere.multivcConfig.Global.User, ",") {
+		configUser = strings.Split(multiVCe2eVSphere.multivcConfig.Global.User, ",")
+	}
+
+	containerCluster := &cnstypes.CnsContainerCluster{
+		ClusterType:   string(cnstypes.CnsClusterTypeKubernetes),
+		ClusterId:     multiVCe2eVSphere.multivcConfig.Global.ClusterID,
+		VSphereUser:   configUser[clientIndex],
+		ClusterFlavor: string(cnstypes.CnsClusterFlavorVanilla),
+	}
+	var containerClusterArray []cnstypes.CnsContainerCluster
+	containerClusterArray = append(containerClusterArray, *containerCluster)
+	createSpec := &cnstypes.CnsVolumeCreateSpec{
+		Name:       "testFileSharex",
+		VolumeType: "FILE",
+		Datastores: []vimtypes.ManagedObjectReference{datastore},
+		BackingObjectDetails: &cnstypes.CnsVsanFileShareBackingDetails{
+			CnsFileBackingDetails: cnstypes.CnsFileBackingDetails{
+				CnsBackingObjectDetails: cnstypes.CnsBackingObjectDetails{
+					CapacityInMb: fileSizeInMb,
+				},
+			},
+		},
+		Metadata: cnstypes.CnsVolumeMetadata{
+			ContainerCluster:      *containerCluster,
+			ContainerClusterArray: containerClusterArray,
+		},
+		CreateSpec: &cnstypes.CnsVSANFileCreateSpec{
+			SoftQuotaInMb: fileSizeInMb,
+			Permission:    []vsanfstypes.VsanFileShareNetPermission{netPermissions},
+		},
+	}
+	return createSpec
 }

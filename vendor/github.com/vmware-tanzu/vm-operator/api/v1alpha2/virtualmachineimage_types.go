@@ -1,4 +1,5 @@
-// Copyright (c) 2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha2
@@ -6,7 +7,7 @@ package v1alpha2
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
+	vmopv1a2common "github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
 )
 
 const (
@@ -31,17 +32,16 @@ const (
 	VirtualMachineImageCapabilityLabel = "capability.image." + GroupName + "/"
 )
 
-// Condition types for VirtualMachineImages.
 const (
-	// VirtualMachineImageSyncedCondition documents that the image is synced with the vSphere content library item
-	// that contains the source of this image's information.
-	VirtualMachineImageSyncedCondition = "VirtualMachineImageSynced"
+	// VMIContentLibRefAnnotation is the key for the annotation that stores the content library
+	// reference for VMI and CVMI down conversion.
+	VMIContentLibRefAnnotation = "vmoperator.vmware.com/conversion-content-lib-ref"
+)
 
-	// VirtualMachineImageProviderReadyCondition denotes readiness of the VirtualMachineImage provider.
-	VirtualMachineImageProviderReadyCondition = "VirtualMachineImageProviderReady"
-
-	// VirtualMachineImageProviderSecurityComplianceCondition denotes security compliance of the library item provider.
-	VirtualMachineImageProviderSecurityComplianceCondition = "VirtualMachineImageProviderSecurityCompliance"
+const (
+	// VirtualMachineImageV1Alpha1CompatibleCondition denotes that an image was prepared by
+	// VMware specifically for compatibility with VMService.
+	VirtualMachineImageV1Alpha1CompatibleCondition = "VirtualMachineImageV1Alpha1Compatible"
 )
 
 // Condition reasons for VirtualMachineImages.
@@ -126,13 +126,13 @@ type VirtualMachineImageSpec struct {
 	// this image's information.
 	//
 	// +optional
-	ProviderRef common.LocalObjectRef `json:"providerRef,omitempty"`
+	ProviderRef *vmopv1a2common.LocalObjectRef `json:"providerRef,omitempty"`
 }
 
 // VirtualMachineImageStatus defines the observed state of VirtualMachineImage.
 type VirtualMachineImageStatus struct {
 
-	// Name describes the observed, "friendly" name for this image.
+	// Name describes the display name of this image.
 	//
 	// +optional
 	Name string `json:"name,omitempty"`
@@ -177,11 +177,17 @@ type VirtualMachineImageStatus struct {
 	// +optional
 	OSInfo VirtualMachineImageOSInfo `json:"osInfo,omitempty"`
 
-	// OVFProperties describes the observed OVF properties defined for this
+	// OVFProperties describes the observed user configurable OVF properties defined for this
 	// image.
 	//
 	// +optional
 	OVFProperties []OVFProperty `json:"ovfProperties,omitempty"`
+
+	// VMwareSystemProperties describes the observed VMware system properties defined for
+	// this image.
+	//
+	// +optional
+	VMwareSystemProperties []vmopv1a2common.KeyValuePair `json:"vmwareSystemProperties,omitempty"`
 
 	// ProductInfo describes the observed product information for this image.
 	// +optional
@@ -193,6 +199,12 @@ type VirtualMachineImageStatus struct {
 	// +optional
 	ProviderContentVersion string `json:"providerContentVersion,omitempty"`
 
+	// ProviderItemID describes the ID of the provider item that this image corresponds to.
+	// If the provider of this image is a Content Library, this ID will be that of the
+	// corresponding Content Library item.
+	// +optional
+	ProviderItemID string `json:"providerItemID,omitempty"`
+
 	// Conditions describes the observed conditions for this image.
 	//
 	// +optional
@@ -202,10 +214,9 @@ type VirtualMachineImageStatus struct {
 }
 
 // +kubebuilder:object:root=true
-// +kubebuilder:resource:scope=Cluster,shortName=vmi;vmimage
-// +kubebuilder:storageversion:false
+// +kubebuilder:resource:scope=Namespaced,shortName=vmi;vmimage
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Image Name",type="string",JSONPath=".status.name"
+// +kubebuilder:printcolumn:name="Display Name",type="string",JSONPath=".status.name"
 // +kubebuilder:printcolumn:name="Image Version",type="string",JSONPath=".status.productInfo.version"
 // +kubebuilder:printcolumn:name="OS Name",type="string",JSONPath=".status.osInfo.type"
 // +kubebuilder:printcolumn:name="OS Version",type="string",JSONPath=".status.osInfo.version"
@@ -221,6 +232,14 @@ type VirtualMachineImage struct {
 	Status VirtualMachineImageStatus `json:"status,omitempty"`
 }
 
+func (i *VirtualMachineImage) GetConditions() []metav1.Condition {
+	return i.Status.Conditions
+}
+
+func (i *VirtualMachineImage) SetConditions(conditions []metav1.Condition) {
+	i.Status.Conditions = conditions
+}
+
 // +kubebuilder:object:root=true
 
 // VirtualMachineImageList contains a list of VirtualMachineImage.
@@ -232,9 +251,8 @@ type VirtualMachineImageList struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=cvmi;cvmimage;clustervmi;clustervmimage
-// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
-// +kubebuilder:printcolumn:name="Image Name",type="string",JSONPath=".status.name"
+// +kubebuilder:printcolumn:name="Display Name",type="string",JSONPath=".status.name"
 // +kubebuilder:printcolumn:name="Image Version",type="string",JSONPath=".status.productInfo.version"
 // +kubebuilder:printcolumn:name="OS Name",type="string",JSONPath=".status.osInfo.type"
 // +kubebuilder:printcolumn:name="OS Version",type="string",JSONPath=".status.osInfo.version"
@@ -250,6 +268,14 @@ type ClusterVirtualMachineImage struct {
 	Status VirtualMachineImageStatus `json:"status,omitempty"`
 }
 
+func (i *ClusterVirtualMachineImage) GetConditions() []metav1.Condition {
+	return i.Status.Conditions
+}
+
+func (i *ClusterVirtualMachineImage) SetConditions(conditions []metav1.Condition) {
+	i.Status.Conditions = conditions
+}
+
 // +kubebuilder:object:root=true
 
 // ClusterVirtualMachineImageList contains a list of ClusterVirtualMachineImage.
@@ -260,10 +286,9 @@ type ClusterVirtualMachineImageList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(
+	objectTypes = append(objectTypes,
 		&VirtualMachineImage{},
 		&VirtualMachineImageList{},
 		&ClusterVirtualMachineImage{},
-		&ClusterVirtualMachineImageList{},
-	)
+		&ClusterVirtualMachineImageList{})
 }

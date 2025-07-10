@@ -26,19 +26,11 @@ set -x
 DO_WINDOWS_BUILD=${DO_WINDOWS_BUILD_ENV:-true}
 
 # BASE_REPO is the root path of the image repository
-readonly BASE_IMAGE_REPO=gcr.io/cloud-provider-vsphere
-
-# Release images
-readonly CSI_IMAGE_RELEASE=${BASE_IMAGE_REPO}/csi/release/driver
-readonly SYNCER_IMAGE_RELEASE=${BASE_IMAGE_REPO}/csi/release/syncer
-
-# PR images
-readonly CSI_IMAGE_PR=${BASE_IMAGE_REPO}/csi/pr/driver
-readonly SYNCER_IMAGE_PR=${BASE_IMAGE_REPO}/csi/pr/syncer
+readonly BASE_IMAGE_REPO=us-central1-docker.pkg.dev/k8s-staging-images/csi-vsphere
 
 # CI images
-readonly CSI_IMAGE_CI=${BASE_IMAGE_REPO}/csi/ci/driver
-readonly SYNCER_IMAGE_CI=${BASE_IMAGE_REPO}/csi/ci/syncer
+readonly CSI_IMAGE_CI=${BASE_IMAGE_REPO}/driver
+readonly SYNCER_IMAGE_CI=${BASE_IMAGE_REPO}/syncer
 
 PUSH=
 LATEST=
@@ -57,7 +49,7 @@ BUILD_RELEASE_TYPE="${BUILD_RELEASE_TYPE:-}"
 # CUSTOM_REPO_FOR_GOLANG can be used to pass custom repository for golang builder image.
 # Please ensure it ends with a '/'.
 # Example: CUSTOM_REPO_FOR_GOLANG=<docker-registry>/dockerhub-proxy-cache/library/
-GOLANG_IMAGE=${CUSTOM_REPO_FOR_GOLANG:-}golang:1.21
+GOLANG_IMAGE=${CUSTOM_REPO_FOR_GOLANG:-}golang:1.24
 
 ARCH=amd64
 OSVERSION=1809
@@ -70,18 +62,11 @@ LINUX_IMAGE_OUTPUT="type=docker"
 
 REGISTRY=
 
+# set base image if not given already
+BASE_IMAGE="${BASE_IMAGE:=photon:5.0}"
+
 # The manifest command is still experimental as of Docker 18.09.3
 export DOCKER_CLI_EXPERIMENTAL=enabled
-
-# If BUILD_RELEASE_TYPE is not set then check to see if this is a PR
-# or release build. This may still be overridden below with the "-t" flag.
-if [ -z "${BUILD_RELEASE_TYPE}" ]; then
-  if hack/match-release-tag.sh >/dev/null 2>&1; then
-    BUILD_RELEASE_TYPE=release
-  else
-    BUILD_RELEASE_TYPE=ci
-  fi
-fi
 
 USAGE="
 usage: ${0} [FLAGS]
@@ -90,7 +75,6 @@ usage: ${0} [FLAGS]
   Honored environment variables:
   GCR_KEY_FILE
   GOPROXY
-  BUILD_RELEASE_TYPE
 
 FLAGS
   -h    show this help and exit
@@ -99,8 +83,6 @@ FLAGS
   -l    tag the images as \"latest\" in addition to their version
         when used with -p, both tags will be pushed
   -p    push the images to the public container registry
-  -t    the build/release type (defaults to: ${BUILD_RELEASE_TYPE})
-        one of [ci,pr,release]
   -r    push the image to custom registry, specify the registry to be used
 "
 
@@ -129,7 +111,7 @@ function build_driver_images_windows() {
   docker buildx use vsphere-csi-builder-win || docker buildx create --driver-opt image=moby/buildkit:v0.10.6 --name vsphere-csi-builder-win --platform windows/amd64 --use
   echo "building ${CSI_IMAGE_NAME}:${VERSION} for windows"
   # some registry do not allow uppercase tags
-  osv=$(lcase ${OSVERSION})
+  osv=$(lcase "${OSVERSION}")
   tag="${CSI_IMAGE_NAME}-windows-${osv}-${ARCH}:${VERSION}"
   docker buildx build \
    --platform "windows" \
@@ -159,6 +141,7 @@ function build_driver_images_linux() {
    --build-arg "GOPROXY=${GOPROXY}" \
    --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
    --build-arg "GOLANG_IMAGE=${GOLANG_IMAGE}" \
+   --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
    .
 }
 
@@ -171,7 +154,8 @@ function build_syncer_image_linux() {
       --build-arg "GOPROXY=${GOPROXY}" \
       --build-arg "GIT_COMMIT=${GIT_COMMIT}" \
       --build-arg "GOLANG_IMAGE=${GOLANG_IMAGE}" \
-  .
+      --build-arg "BASE_IMAGE=${BASE_IMAGE}" \
+      .
 
   if [ "${LATEST}" ]; then
     echo "tagging image ${SYNCER_IMAGE_NAME}:${VERSION} as latest"
@@ -180,24 +164,9 @@ function build_syncer_image_linux() {
 }
 
 function build_images() {
-  case "${BUILD_RELEASE_TYPE}" in
-    ci)
-      # A non-PR, non-release build. This is usually a build off of master
-      CSI_IMAGE_NAME=${CSI_IMAGE_CI}
-      SYNCER_IMAGE_NAME=${SYNCER_IMAGE_CI}
-      LATEST="latest"
-      ;;
-    pr)
-      # A PR build
-      CSI_IMAGE_NAME=${CSI_IMAGE_PR}
-      SYNCER_IMAGE_NAME=${SYNCER_IMAGE_PR}
-      ;;
-    release)
-      # On an annotated tag
-      CSI_IMAGE_NAME=${CSI_IMAGE_RELEASE}
-      SYNCER_IMAGE_NAME=${SYNCER_IMAGE_RELEASE}
-      ;;
-  esac
+  CSI_IMAGE_NAME=${CSI_IMAGE_CI}
+  SYNCER_IMAGE_NAME=${SYNCER_IMAGE_CI}
+  LATEST="latest"
 
   # build images for linux platform
   build_driver_images_linux
@@ -229,7 +198,7 @@ function push_manifest_driver() {
   do 
     osv=$(lcase "${OSVERSION}")
     BASEIMAGE=mcr.microsoft.com/windows/nanoserver:${OSVERSION}; 
-    full_version=$(docker manifest inspect "${BASEIMAGE}" | jq -r '.manifests[0].platform["os.version"]'); 
+    full_version=$(docker manifest inspect "${BASEIMAGE}" | grep '"os.version"' | sed 's/.*"os.version": "\(.*\)".*/\1/')
     echo "fullversion for ${BASEIMAGE} : ${full_version}"
     echo "annotating ${IMAGE_TAG} for ${OSVERSION}"
     docker manifest annotate --os windows --arch "$ARCH" --os-version "${full_version}" "${IMAGE_TAG}" "${CSI_IMAGE_NAME}-windows-${osv}-${ARCH}:${VERSION}";
@@ -246,7 +215,7 @@ function push_manifest_driver() {
     do 
       osv=$(lcase "${OSVERSION}")
       BASEIMAGE=mcr.microsoft.com/windows/nanoserver:${OSVERSION}; 
-      full_version=$(docker manifest inspect "${BASEIMAGE}" | jq -r '.manifests[0].platform["os.version"]'); 
+      full_version=$(docker manifest inspect "${BASEIMAGE}" | grep '"os.version"' | sed 's/.*"os.version": "\(.*\)".*/\1/')
       echo "fullversion for ${BASEIMAGE} : ${full_version}"      
       echo "annotating ${IMAGE_TAG_LATEST} for ${OSVERSION}"
       docker manifest annotate --os windows --arch "$ARCH" --os-version "${full_version}" "${IMAGE_TAG_LATEST}" "${CSI_IMAGE_NAME}-windows-${osv}-${ARCH}:${VERSION}";
@@ -289,7 +258,7 @@ function push_syncer_images() {
 }
 
 # Start of main script
-while getopts ":hk:lptr:" opt; do
+while getopts ":hk:lpr:" opt; do
   case ${opt} in
     h)
       error "${USAGE}" && exit 1
@@ -302,9 +271,6 @@ while getopts ":hk:lptr:" opt; do
       ;;
     p)
       PUSH=1
-      ;;
-    t)
-      BUILD_RELEASE_TYPE="${OPTARG}"
       ;;
     r)
       REGISTRY="${OPTARG}"

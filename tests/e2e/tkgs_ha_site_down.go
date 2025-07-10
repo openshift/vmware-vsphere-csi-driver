@@ -58,8 +58,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		bootstrap()
 		scParameters = make(map[string]string)
 		topologyHaMap := GetAndExpectStringEnvVar(topologyHaMap)
-		_, categories = createTopologyMapLevel5(topologyHaMap, tkgshaTopologyLevels)
-		allowedTopologies := createAllowedTopolgies(topologyHaMap, tkgshaTopologyLevels)
+		_, categories = createTopologyMapLevel5(topologyHaMap)
+		allowedTopologies := createAllowedTopolgies(topologyHaMap)
 		allowedTopologyHAMap = createAllowedTopologiesMap(allowedTopologies)
 		framework.Logf("Topology map: %v, categories: %v", allowedTopologyHAMap, categories)
 		zonalPolicy = GetAndExpectStringEnvVar(envZonalStoragePolicyName)
@@ -199,7 +199,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -343,7 +344,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -514,7 +516,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -643,7 +646,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -764,7 +768,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -893,7 +898,8 @@ var _ = ginkgo.Describe("[csi-tkgs-ha] Tkgs-HA-SiteDownTests", func() {
 		for _, statefulset := range stsList {
 			fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 			gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-			ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+			ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 				fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 			gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),

@@ -35,6 +35,7 @@ import (
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	"golang.org/x/crypto/ssh"
 
+	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -80,7 +81,7 @@ func createCustomisedStatefulSets(ctx context.Context, client clientset.Interfac
 				Spec.StorageClassName = &storagePolicy
 		} else {
 			statefulset.Spec.VolumeClaimTemplates[len(statefulset.Spec.VolumeClaimTemplates)-1].
-				Annotations["volume.beta.kubernetes.io/storage-class"] = sc.Name
+				Spec.StorageClassName = &sc.Name
 		}
 
 		if stsName != "" {
@@ -127,7 +128,8 @@ func createCustomisedStatefulSets(ctx context.Context, client clientset.Interfac
 	framework.Logf("Wait for StatefulSet pods to be in up and running state")
 	fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 	gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-	ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+	ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 		fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 	gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -329,7 +331,7 @@ func govcLoginCmdForMultiVC(i int) string {
 	return loginCmd
 }
 
-/*deletes storage profile deletes the storage profile*/
+// deleteStorageProfile util deletes the storage policy from vcenter
 func deleteStorageProfile(masterIp string, sshClientConfig *ssh.ClientConfig,
 	storagePolicyName string, clientIndex int) error {
 	removeStoragePolicy := govcLoginCmdForMultiVC(clientIndex) +
@@ -347,6 +349,16 @@ func deleteStorageProfile(masterIp string, sshClientConfig *ssh.ClientConfig,
 /*deletes storage profile deletes the storage profile*/
 func createStorageProfile(masterIp string, sshClientConfig *ssh.ClientConfig,
 	storagePolicyName string, clientIndex int) error {
+	attachTagCat := govcLoginCmdForMultiVC(clientIndex) +
+		"govc tags.attach -c " + "shared-cat-todelete1" + " " + "shared-tag-todelete1" +
+		" " + "'" + "/VSAN-DC/datastore/vsanDatastore" + "'"
+	framework.Logf("cmd to attach tag to preferred datastore: %s ", attachTagCat)
+	attachTagCatRes, err := sshExec(sshClientConfig, masterIp, attachTagCat)
+	if err != nil && attachTagCatRes.Code != 0 {
+		fssh.LogResult(attachTagCatRes)
+		return fmt.Errorf("couldn't execute command: %s on host: %v , error: %s",
+			attachTagCat, masterIp, err)
+	}
 	createStoragePolicy := govcLoginCmdForMultiVC(clientIndex) +
 		"govc storage.policy.create -category=shared-cat-todelete1 -tag=shared-tag-todelete1 " + storagePolicyName
 	framework.Logf("Create storage policy: %s ", createStoragePolicy)
@@ -508,7 +520,7 @@ func performOnlineVolumeExpansion(f *framework.Framework, client clientset.Inter
 	if err != nil {
 		return fmt.Errorf("error getting file system size: %v", err)
 	}
-	framework.Logf("File system size after expansion : %s", fsSize)
+	framework.Logf("File system size after expansion : %d", fsSize)
 
 	if fsSize < diskSizeInMb {
 		return fmt.Errorf("error updating filesystem size for %q. Resulting filesystem size is %d", expandedPVC.Name, fsSize)
@@ -690,6 +702,10 @@ func readVsphereConfCredentialsInMultiVcSetup(cfg string) (e2eTestConfig, error)
 	dataCenterList := make([]string, 0)
 
 	key, value := "", ""
+	var netPerm NetPermissionConfig
+	var permissions vsanfstypes.VsanFileShareAccessType
+	var rootSquash bool
+
 	lines := strings.Split(cfg, "\n")
 	for index, line := range lines {
 		if index == 0 {
@@ -771,6 +787,12 @@ func readVsphereConfCredentialsInMultiVcSetup(cfg string) (e2eTestConfig, error)
 			if strconvErr != nil {
 				return config, fmt.Errorf("invalid value for list-volume-threshold: %s", value)
 			}
+		case "ips":
+			netPerm.Ips = value
+		case "permissions":
+			netPerm.Permissions = permissions
+		case "rootsquash":
+			netPerm.RootSquash = rootSquash
 		default:
 			return config, fmt.Errorf("unknown key %s in the input string", key)
 		}
@@ -821,7 +843,7 @@ func writeNewDataAndUpdateVsphereConfSecret(client clientset.Interface, ctx cont
 		cfg.Snapshot.GlobalMaxSnapshotsPerBlockVolume)
 	result += fmt.Sprintf("[Labels]\ntopology-categories = \"%s\"\n", cfg.Labels.TopologyCategories)
 
-	framework.Logf(result)
+	framework.Logf("%q", result)
 
 	// update config secret with newly updated vshere conf file
 	framework.Logf("Updating the secret to reflect new conf credentials")
@@ -906,8 +928,8 @@ func setNewNameSpaceInCsiYaml(ctx context.Context, client clientset.Interface, s
 		return err
 	}
 	num_csi_pods := len(list_of_pods)
-	err = fpod.WaitForPodsRunningReady(ctx, client, newNS, int32(num_csi_pods), 0,
-		pollTimeout)
+	err = fpod.WaitForPodsRunningReady(ctx, client, newNS, int(num_csi_pods),
+		time.Duration(pollTimeout))
 	if err != nil {
 		return err
 	}
@@ -1014,7 +1036,7 @@ func createVsphereConfigSecret(namespace string, cfg e2eTestConfig, sshClientCon
 	conf += fmt.Sprintf("[Labels]\ntopology-categories = \"%s\"\n", cfg.Labels.TopologyCategories)
 	conf += "\nEOF"
 
-	framework.Logf(conf)
+	framework.Logf("conf: %s", conf)
 
 	result, err := sshExec(sshClientConfig, controlIp, conf)
 	if err != nil && result.Code != 0 {
@@ -1023,7 +1045,7 @@ func createVsphereConfigSecret(namespace string, cfg e2eTestConfig, sshClientCon
 	}
 	applyConf := "kubectl create secret generic vsphere-config-secret --from-file=csi-vsphere.conf " +
 		"-n " + namespace
-	framework.Logf(applyConf)
+	framework.Logf("applyConf: %s", applyConf)
 	result, err = sshExec(sshClientConfig, controlIp, applyConf)
 	if err != nil && result.Code != 0 {
 		fssh.LogResult(result)
@@ -1126,7 +1148,7 @@ func createStaticFCDPvAndPvc(ctx context.Context, f *framework.Framework,
 	fcdID, err := multiVCe2eVSphere.createFCDInMultiVC(ctx, "BasicStaticFCD"+curtimeinstring, diskSizeInMb,
 		defaultDatastore.Reference(), clientIndex)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	framework.Logf("FCD ID :", fcdID)
+	framework.Logf("FCD ID : %s", fcdID)
 
 	ginkgo.By(fmt.Sprintf("Sleeping for %v seconds to allow newly created FCD:%s to sync with pandora",
 		pandoraSyncWaitTime, fcdID))
@@ -1213,7 +1235,7 @@ func (vs *multiVCvSphere) deleteFCDInMultiVc(ctx context.Context, fcdID string,
 	task := object.NewTask(vs.multiVcClient[clientIndex].Client, res.Returnval)
 	_, err = task.WaitForResultEx(ctx, nil)
 	if err != nil {
-		framework.Logf(err.Error())
+		framework.Logf("%q", err.Error())
 	}
 	return nil
 }

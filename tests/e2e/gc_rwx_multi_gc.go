@@ -142,7 +142,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		pvcUID := string(pvclaim.GetUID())
-		framework.Logf("PVC UUID in GC " + pvcUID)
+		framework.Logf("PVC UUID in GC %q", pvcUID)
 
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclasspvc.Name, *metav1.NewDeleteOptions(0))
@@ -213,12 +213,12 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod1")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+pvcNameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod.Spec.NodeName+"-"+pvcNameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}()
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod1")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+pvcNameInSV,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod.Spec.NodeName+"-"+pvcNameInSV,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 		//Add a check to validate CnsVolumeMetadata crd
@@ -315,12 +315,12 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod2")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod2.Spec.NodeName+"-"+pvc2NameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod2.Spec.NodeName+"-"+pvc2NameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}()
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod2")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod2.Spec.NodeName+"-"+pvc2NameInSV,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod2.Spec.NodeName+"-"+pvc2NameInSV,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 		oldKubeConfig := framework.TestContext.KubeConfig
@@ -409,7 +409,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		pvcUID := string(pvclaim.GetUID())
-		framework.Logf("PVC UUID in GC " + pvcUID)
+		framework.Logf("PVC UUID in GC %q", pvcUID)
 
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclasspvc.Name, *metav1.NewDeleteOptions(0))
@@ -563,12 +563,12 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod2")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod2.Spec.NodeName+"-"+pvc2NameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod2.Spec.NodeName+"-"+pvc2NameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}()
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod2")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod2.Spec.NodeName+"-"+pvc2NameInSV,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod2.Spec.NodeName+"-"+pvc2NameInSV,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 		oldKubeConfig := framework.TestContext.KubeConfig
@@ -645,7 +645,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		pvcUID := string(pvclaim.GetUID())
-		framework.Logf("PVC UUID in GC " + pvcUID)
+		framework.Logf("PVC UUID in GC %q", pvcUID)
 
 		defer func() {
 			err = client.StorageV1().StorageClasses().Delete(ctx, storageclasspvc.Name, *metav1.NewDeleteOptions(0))
@@ -798,7 +798,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] Volume Provision Across TKG clusters", fu
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod2")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod2.Spec.NodeName+"-"+pvc2NameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod2.Spec.NodeName+"-"+pvc2NameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}()
 	})

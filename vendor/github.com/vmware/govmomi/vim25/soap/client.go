@@ -1,5 +1,5 @@
 /*
-Copyright (c) 2014-2023 VMware, Inc. All Rights Reserved.
+Copyright (c) 2014-2024 VMware, Inc. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -34,6 +34,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -85,7 +86,11 @@ type Client struct {
 	Types     types.Func `json:"types"`
 	UserAgent string     `json:"userAgent"`
 
-	cookie          string
+	// Cookie returns a value for the SOAP Header.Cookie.
+	// This SOAP request header is used for authentication by
+	// API endpoints such as pbm, vslm and sms.
+	// When nil, no SOAP Header.Cookie is set.
+	Cookie          func() *HeaderElement
 	insecureCookies bool
 
 	useJSON bool
@@ -134,20 +139,31 @@ func ParseURL(s string) (*url.URL, error) {
 	return u, nil
 }
 
+// Go's ForceAttemptHTTP2 default is true, we disable by default.
+// This undocumented env var can be used to enable.
+var http2 = os.Getenv("GOVMOMI_HTTP2") == "true"
+
 func NewClient(u *url.URL, insecure bool) *Client {
 	var t *http.Transport
 
 	if d, ok := http.DefaultTransport.(*http.Transport); ok {
-		t = d.Clone()
+		// Inherit the same defaults explicitly set in http.DefaultTransport,
+		// unless otherwise noted.
+		t = &http.Transport{
+			Proxy:                 d.Proxy,
+			DialContext:           d.DialContext,
+			ForceAttemptHTTP2:     http2, // false by default in govmomi
+			MaxIdleConns:          d.MaxIdleConns,
+			IdleConnTimeout:       d.IdleConnTimeout,
+			TLSHandshakeTimeout:   d.TLSHandshakeTimeout,
+			ExpectContinueTimeout: d.ExpectContinueTimeout,
+		}
 	} else {
 		t = new(http.Transport)
 	}
 
-	if insecure {
-		if t.TLSClientConfig == nil {
-			t.TLSClientConfig = new(tls.Config)
-		}
-		t.TLSClientConfig.InsecureSkipVerify = insecure
+	t.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: insecure,
 	}
 
 	c := newClientWithTransport(u, insecure, t)
@@ -198,6 +214,31 @@ func (c *Client) NewServiceClient(path string, namespace string) *Client {
 	return c.newServiceClientWithTransport(path, namespace, c.t)
 }
 
+func sessionCookie(jar http.CookieJar, u *url.URL) *HeaderElement {
+	for _, cookie := range jar.Cookies(u) {
+		if cookie.Name == SessionCookieName {
+			return &HeaderElement{Value: cookie.Value}
+		}
+	}
+	return nil
+}
+
+// SessionCookie returns a SessionCookie with value of the vmware_soap_session http.Cookie.
+func (c *Client) SessionCookie() *HeaderElement {
+	u := c.URL()
+
+	if cookie := sessionCookie(c.Jar, u); cookie != nil {
+		return cookie
+	}
+
+	// Default "/sdk" Path would match above,
+	// but saw a case of Path == "sdk", where above returns nil.
+	// The jar entry Path is normally "/", so fallback to that.
+	u.Path = "/"
+
+	return sessionCookie(c.Jar, u)
+}
+
 func (c *Client) newServiceClientWithTransport(path string, namespace string, t *http.Transport) *Client {
 	vc := c.URL()
 	u, err := url.Parse(path)
@@ -221,14 +262,6 @@ func (c *Client) newServiceClientWithTransport(path string, namespace string, t 
 
 	// Copy the cookies
 	client.Client.Jar.SetCookies(u, c.Client.Jar.Cookies(u))
-
-	// Set SOAP Header cookie
-	for _, cookie := range client.Jar.Cookies(u) {
-		if cookie.Name == SessionCookieName {
-			client.cookie = cookie.Value
-			break
-		}
-	}
 
 	// Copy any query params (e.g. GOVMOMI_TUNNEL_PROXY_PORT used in testing)
 	client.u.RawQuery = vc.RawQuery
@@ -477,6 +510,42 @@ func (c *Client) SetCertificate(cert tls.Certificate) {
 	t.TLSClientConfig.Certificates = []tls.Certificate{cert}
 }
 
+// UseServiceVersion sets Client.Version to the current version of the service endpoint via /sdk/vimServiceVersions.xml
+func (c *Client) UseServiceVersion(kind ...string) error {
+	ns := "vim"
+	if len(kind) != 0 {
+		ns = kind[0]
+	}
+
+	u := c.URL()
+	u.Path = path.Join("/sdk", ns+"ServiceVersions.xml")
+
+	res, err := c.Get(u.String())
+	if err != nil {
+		return err
+	}
+
+	if res.StatusCode != http.StatusOK {
+		return fmt.Errorf("http.Get(%s): %s", u.Path, res.Status)
+	}
+
+	v := struct {
+		Namespace *string `xml:"namespace>name"`
+		Version   *string `xml:"namespace>version"`
+	}{
+		&c.Namespace,
+		&c.Version,
+	}
+
+	err = xml.NewDecoder(res.Body).Decode(&v)
+	_ = res.Body.Close()
+	if err != nil {
+		return fmt.Errorf("xml.Decode(%s): %s", u.Path, err)
+	}
+
+	return nil
+}
+
 // Tunnel returns a Client configured to proxy requests through vCenter's http port 80,
 // to the SDK tunnel virtual host.  Use of the SDK tunnel is required by LoginExtensionByCertificate()
 // and optional for other methods.
@@ -670,8 +739,10 @@ func (c *Client) soapRoundTrip(ctx context.Context, reqBody, resBody HasFault) e
 		h.ID = id
 	}
 
-	h.Cookie = c.cookie
-	if h.Cookie != "" || h.ID != "" || h.Security != nil {
+	if c.Cookie != nil {
+		h.Cookie = c.Cookie()
+	}
+	if h.Cookie != nil || h.ID != "" || h.Security != nil {
 		reqEnv.Header = &h // XML marshal header only if a field is set
 	}
 

@@ -44,8 +44,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
-	f := framework.NewDefaultFramework("multi-vc")
+var _ = ginkgo.Describe("[multivc-positive] MultiVc-Topology-Positive", func() {
+	f := framework.NewDefaultFramework("multivc-positive")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -106,8 +106,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 		bindingMode = storagev1.VolumeBindingWaitForFirstConsumer
 		scParameters = make(map[string]string)
 		storagePolicyInVc1 = GetAndExpectStringEnvVar(envStoragePolicyNameVC1)
@@ -159,15 +159,11 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}
 
 		if isVsanHealthServiceStopped {
-			vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-			vcAddress := vCenterHostname[0] + ":" + sshdPort
 			framework.Logf("Bringing vsanhealth up before terminating the test")
 			startVCServiceWait4VPs(ctx, vcAddress, vsanhealthServiceName, &isVsanHealthServiceStopped)
 		}
 
 		if isSPSServiceStopped {
-			vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-			vcAddress := vCenterHostname[0] + ":" + sshdPort
 			framework.Logf("Bringing sps up before terminating the test")
 			startVCServiceWait4VPs(ctx, vcAddress, spsServiceName, &isSPSServiceStopped)
 			isSPSServiceStopped = false
@@ -202,7 +198,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 
 	ginkgo.It("Workload creation on a multivc environment with sts specified with node affinity "+
 		"and SC with no allowed topology", ginkgo.Label(p0, block, vanilla, multiVc,
-		newTest), func() {
+		vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -279,7 +275,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Workload creation when all allowed topology specified in SC on a "+
-		"multivc environment", ginkgo.Label(p0, block, vanilla, multiVc, newTest), func() {
+		"multivc environment", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -341,7 +337,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Workload creation when specific storage policy of any single VC is "+
-		"given in SC", ginkgo.Label(p0, block, vanilla, multiVc, newTest), func() {
+		"given in SC", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -408,7 +404,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Workload creation when storage policy available in multivc setup"+
-		"is given in SC", ginkgo.Label(p0, block, vanilla, multiVc, newTest), func() {
+		"is given in SC", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -501,8 +497,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Workload creation on a multivc environment with sts specified with pod affinity "+
-		"and SC with no allowed topology", ginkgo.Label(p0, block, vanilla, multiVc,
-		newTest), func() {
+		"and SC with no allowed topology", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -557,7 +552,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Deploy workload with allowed topology and datastore url on a multivc environment", ginkgo.Label(p0,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -622,8 +617,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Deploy workload with allowed topology details in SC specific "+
-		"to VC1 with Immediate Binding", ginkgo.Label(p0, block, vanilla, multiVc,
-		newTest), func() {
+		"to VC1 with Immediate Binding", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -690,7 +684,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 
 	ginkgo.It("Deploy workload with allowed topology details in SC specific to VC2 with WFC "+
 		"binding mode and with default pod management policy", ginkgo.Label(p1, block, vanilla, multiVc,
-		newTest), func() {
+		vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -757,8 +751,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Deploy workload with allowed topology details in SC specific to VC3 with "+
-		"parallel pod management policy", ginkgo.Label(p0, block, vanilla, multiVc,
-		newTest), func() {
+		"parallel pod management policy", ginkgo.Label(p0, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -831,7 +824,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Deploy workload with default SC parameters with WaitForFirstConsumer", ginkgo.Label(p0,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -937,7 +930,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		for i := 0; i < len(podList); i++ {
 			err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, podList[i],
-				namespace, allowedTopologies)
+				allowedTopologies)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 
@@ -966,7 +959,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create SC with single allowed topology label on a multivc environment", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1024,7 +1017,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("PVC creation failure when wrong storage policy name is specified in SC", ginkgo.Label(p2,
-		block, vanilla, multiVc, newTest, negative), func() {
+		block, vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1060,7 +1053,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Deploy workload with allowed topology of VC1 and datastore url of VC2", ginkgo.Label(p2,
-		block, vanilla, multiVc, newTest, negative), func() {
+		block, vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1107,7 +1100,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create storage policy in multivc and later delete storage policy from "+
-		"one of the VC", ginkgo.Label(p2, block, vanilla, multiVc, newTest, negative), func() {
+		"one of the VC", ginkgo.Label(p2, block, vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1178,7 +1171,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create Deployment pod using SC with allowed topology set to specific VC", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1249,7 +1242,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create SC with invalid allowed topology details", ginkgo.Label(p2, block,
-		vanilla, multiVc, newTest, negative), func() {
+		vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1305,7 +1298,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Offline and online volume expansion on a multivc setup", ginkgo.Label(p1, block,
-		vanilla, multiVc, newTest), func() {
+		vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1373,7 +1366,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		ginkgo.By("Verify PV node affinity and that the PODS are running " +
 			"on appropriate node as specified in the allowed topologies of SC")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
-			namespace, allowedTopologies)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -1394,7 +1387,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create workload and reboot one of the VC", ginkgo.Label(p2, block,
-		vanilla, multiVc, newTest, negative), func() {
+		vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1421,12 +1414,10 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}()
 
 		ginkgo.By("Rebooting VC1")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		err = invokeVCenterReboot(ctx, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = waitForHostToBeUp(vCenterHostname[0])
+		err = waitForHostToBeUp(vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By("Done with reboot")
 
@@ -1482,7 +1473,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Storage policy is present in VC1 and VC1 is under reboot", ginkgo.Label(p1, block,
-		vanilla, multiVc, newTest, negative), func() {
+		vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1518,12 +1509,10 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}()
 
 		ginkgo.By("Rebooting VC1")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		err = invokeVCenterReboot(ctx, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = waitForHostToBeUp(vCenterHostname[0])
+		err = waitForHostToBeUp(vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By("Done with reboot")
 
@@ -1590,7 +1579,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create workloads when VSAN-health is down on VC1", ginkgo.Label(p1, block,
-		vanilla, multiVc, newTest, negative), func() {
+		vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1658,8 +1647,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}()
 
 		ginkgo.By("Bring down Vsan-health service on VC1")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		err = invokeVCenterServiceControl(ctx, stopOperation, vsanhealthServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1766,7 +1753,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Create workloads with storage policy given in SC and when sps service is down", ginkgo.Label(p1,
-		block, vanilla, multiVc, newTest, negative), func() {
+		block, vanilla, multiVc, vc70, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1816,8 +1803,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Bring down SPS service")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		err = invokeVCenterServiceControl(ctx, stopOperation, spsServiceName, vcAddress)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1886,7 +1871,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Verify static provisioning and node affinity details on PV in a multivc setup", ginkgo.Label(p2,
-		block, vanilla, multiVc, newTest), func() {
+		block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1920,7 +1905,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}
 		vimClient, err := convertToVimClient(ctx, soapClient)
 		if err != nil {
-			framework.Logf("Error: ", err)
+			framework.Logf("Error: %v", err)
 		}
 		finder := find.NewFinder(vimClient, false)
 
@@ -1983,7 +1968,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 
 		ginkgo.By("Verify pv and pod node affinity")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
-			namespace, allowedTopologies)
+			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -2002,7 +1987,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 	*/
 
 	ginkgo.It("Validate Listvolume response when volume is deleted from CNS "+
-		"in a multivc", ginkgo.Label(p1, block, vanilla, multiVc, newTest), func() {
+		"in a multivc", ginkgo.Label(p1, block, vanilla, multiVc, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -2045,7 +2030,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		}()
 		ginkgo.By("Creating statefulset with replica 3 and a deployment")
 		statefulset, deployment, volumesBeforeScaleUp := createStsDeployment(ctx, client, namespace, sc, true,
-			false, 0, "", "")
+			false, 3, "", 1, "")
 
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate node")
 		err = verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx, client, statefulset,
@@ -2087,7 +2072,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-topology] Multi-VC", func() {
 		_, scaledownErr := fss.Scale(ctx, client, statefulset, int32(replicas))
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(ctx, client, statefulset, int32(replicas))
-		ssPodsAfterScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 

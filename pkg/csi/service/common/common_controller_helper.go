@@ -23,10 +23,12 @@ import (
 	"strings"
 	"time"
 
-	snap "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snap "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientset "k8s.io/client-go/kubernetes"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	vim25types "github.com/vmware/govmomi/vim25/types"
@@ -327,7 +329,7 @@ func IsVolumeSnapshotReady(ctx context.Context, client snapshotterClientSet.Inte
 					"from supervisor cluster with err: %+v",
 					namespace, supervisorVolumeSnapshotName, err)
 				log.Warnf(msg)
-				return false, logger.LogNewErrorf(log, msg)
+				return false, logger.LogNewError(log, msg)
 			}
 			if svs == nil || svs.Status == nil || svs.Status.ReadyToUse == nil {
 				log.Infof("Waiting up to %d seconds for VolumeSnapshot %v in namespace %s to be ReadyToUse, %+vs "+
@@ -354,8 +356,95 @@ func IsVolumeSnapshotReady(ctx context.Context, client snapshotterClientSet.Inte
 		if waitErr != nil {
 			msg += fmt.Sprintf(": message: %v", waitErr.Error())
 		}
-		return false, nil, fmt.Errorf(msg)
+		return false, nil, fmt.Errorf("%s", msg)
 	}
 
 	return true, svs, nil
+}
+
+// WaitForPVCDeleted waits for a PVC to get deleted or until timeout occurs, whichever comes first.
+func WaitForPVCDeleted(ctx context.Context, client clientset.Interface, pvcName string,
+	namespace string, timeout time.Duration) error {
+	log := logger.GetLogger(ctx)
+	timeoutSeconds := int64(timeout.Seconds())
+
+	log.Infof("Waiting up to %d seconds for PersistentVolumeClaim %s in namespace %s to be deleted",
+		timeoutSeconds, pvcName, namespace)
+	pvcDeleted := false
+	startTime := time.Now()
+
+	waitErr := wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true,
+		func(ctx context.Context) (done bool, err error) {
+			_, err = client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Infof("PersistentVolumeClaim %s/%s was deleted", namespace, pvcName)
+					pvcDeleted = true
+					return true, nil
+				}
+				msg := fmt.Sprintf("unable to fetch PersistentVolumeClaim %s/%s with err: %+v",
+					namespace, pvcName, err)
+				log.Warnf(msg)
+				return false, logger.LogNewError(log, msg)
+			}
+			log.Infof("Waiting up to %d seconds for PersistentVolumeClaim %s/%s to be deleted, %+vs "+
+				"since the start time", timeoutSeconds, namespace, pvcName,
+				time.Since(startTime).Seconds())
+			return false, nil
+		})
+
+	if !pvcDeleted {
+		msg := fmt.Sprintf("persistentVolumeClaim %s/%s is not deleted "+
+			"within %d seconds", namespace, pvcName, timeoutSeconds)
+		if waitErr != nil {
+			msg += fmt.Sprintf(": message: %v", waitErr.Error())
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	return nil
+}
+
+// WaitForVolumeSnapshotDeleted waits for a VolumeSnapshot to get deleted or until
+// timeout occurs, whichever comes first.
+func WaitForVolumeSnapshotDeleted(ctx context.Context, client snapshotterClientSet.Interface,
+	snapshotName string, namespace string, timeout time.Duration) error {
+	log := logger.GetLogger(ctx)
+	timeoutSeconds := int64(timeout.Seconds())
+
+	log.Infof("Waiting up to %d seconds for VolumeSnapshot %s in namespace %s to be deleted",
+		timeoutSeconds, snapshotName, namespace)
+	snapshotDeleted := false
+	startTime := time.Now()
+
+	waitErr := wait.PollUntilContextTimeout(ctx, 5*time.Second, timeout, true,
+		func(ctx context.Context) (done bool, err error) {
+			_, err = client.SnapshotV1().VolumeSnapshots(namespace).Get(ctx, snapshotName, metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) {
+					log.Infof("VolumeSnapshot %s/%s was deleted", namespace, snapshotName)
+					snapshotDeleted = true
+					return true, nil
+				}
+				msg := fmt.Sprintf("unable to fetch VolumeSnapshot %s/%s with err: %+v",
+					namespace, snapshotName, err)
+				log.Warnf(msg)
+				return false, logger.LogNewError(log, msg)
+			}
+			log.Infof("Waiting up to %d seconds for VolumeSnapshot %s/%s to be deleted, %+vs "+
+				"since the start time", timeoutSeconds, namespace, snapshotName,
+				time.Since(startTime).Seconds())
+			return false, nil
+		})
+
+	if !snapshotDeleted {
+		msg := fmt.Sprintf("volumeSnapshot %s/%s is not deleted "+
+			"within %d seconds", namespace, snapshotName, timeoutSeconds)
+		if waitErr != nil {
+			msg += fmt.Sprintf(": message: %v", waitErr.Error())
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	return nil
 }

@@ -184,12 +184,12 @@ func SetDeploymentRevision(deployment *apps.Deployment, revision string) bool {
 }
 
 // MaxRevision finds the highest revision in the replica sets
-func MaxRevision(allRSs []*apps.ReplicaSet) int64 {
+func MaxRevision(logger klog.Logger, allRSs []*apps.ReplicaSet) int64 {
 	max := int64(0)
 	for _, rs := range allRSs {
 		if v, err := Revision(rs); err != nil {
 			// Skip the replica sets when it failed to parse their revision information
-			klog.V(4).Info("Couldn't parse revision for replica set, deployment controller will skip it when reconciling revisions", "replicaSet", klog.KObj(rs), "err", err)
+			logger.V(4).Info("Couldn't parse revision for replica set, deployment controller will skip it when reconciling revisions", "replicaSet", klog.KObj(rs), "err", err)
 		} else if v > max {
 			max = v
 		}
@@ -198,12 +198,12 @@ func MaxRevision(allRSs []*apps.ReplicaSet) int64 {
 }
 
 // LastRevision finds the second max revision number in all replica sets (the last revision)
-func LastRevision(allRSs []*apps.ReplicaSet) int64 {
+func LastRevision(logger klog.Logger, allRSs []*apps.ReplicaSet) int64 {
 	max, secMax := int64(0), int64(0)
 	for _, rs := range allRSs {
 		if v, err := Revision(rs); err != nil {
 			// Skip the replica sets when it failed to parse their revision information
-			klog.V(4).Info("Couldn't parse revision for replica set, deployment controller will skip it when reconciling revisions", "replicaSet", klog.KObj(rs), "err", err)
+			logger.V(4).Info("Couldn't parse revision for replica set, deployment controller will skip it when reconciling revisions", "replicaSet", klog.KObj(rs), "err", err)
 		} else if v >= max {
 			secMax = max
 			max = v
@@ -378,24 +378,34 @@ func FindActiveOrLatest(newRS *apps.ReplicaSet, oldRSs []*apps.ReplicaSet) *apps
 
 // GetDesiredReplicasAnnotation returns the number of desired replicas
 func GetDesiredReplicasAnnotation(logger klog.Logger, rs *apps.ReplicaSet) (int32, bool) {
-	return getIntFromAnnotation(logger, rs, DesiredReplicasAnnotation)
+	return getNonNegativeInt32FromAnnotationVerbose(logger, rs, DesiredReplicasAnnotation)
 }
 
 func getMaxReplicasAnnotation(logger klog.Logger, rs *apps.ReplicaSet) (int32, bool) {
-	return getIntFromAnnotation(logger, rs, MaxReplicasAnnotation)
+	return getNonNegativeInt32FromAnnotationVerbose(logger, rs, MaxReplicasAnnotation)
 }
 
-func getIntFromAnnotation(logger klog.Logger, rs *apps.ReplicaSet, annotationKey string) (int32, bool) {
+func getNonNegativeInt32FromAnnotationVerbose(logger klog.Logger, rs *apps.ReplicaSet, annotationKey string) (int32, bool) {
+	value, ok, err := getNonNegativeInt32FromAnnotation(rs, annotationKey)
+	if err != nil {
+		logger.V(2).Info("Could not convert the value with annotation key for the replica set", "annotationValue", rs.Annotations[annotationKey], "annotationKey", annotationKey, "replicaSet", klog.KObj(rs))
+	}
+	return value, ok
+}
+
+func getNonNegativeInt32FromAnnotation(rs *apps.ReplicaSet, annotationKey string) (int32, bool, error) {
 	annotationValue, ok := rs.Annotations[annotationKey]
 	if !ok {
-		return int32(0), false
+		return int32(0), false, nil
 	}
-	intValue, err := strconv.Atoi(annotationValue)
+	intValue, err := strconv.ParseUint(annotationValue, 10, 32)
 	if err != nil {
-		logger.V(2).Info("Could not convert the value with annotation key for the replica set", "annotationValue", annotationValue, "annotationKey", annotationKey, "replicaSet", klog.KObj(rs))
-		return int32(0), false
+		return int32(0), false, err
 	}
-	return int32(intValue), true
+	if intValue > math.MaxInt32 {
+		return int32(0), false, fmt.Errorf("value %d is out of range (higher than %d)", intValue, math.MaxInt32)
+	}
+	return int32(intValue), true, nil
 }
 
 // SetReplicasAnnotations sets the desiredReplicas and maxReplicas into the annotations
@@ -464,10 +474,10 @@ func MaxSurge(deployment apps.Deployment) int32 {
 	return maxSurge
 }
 
-// GetProportion will estimate the proportion for the provided replica set using 1. the current size
+// GetReplicaSetProportion will estimate the proportion for the provided replica set using 1. the current size
 // of the parent deployment, 2. the replica count that needs be added on the replica sets of the
 // deployment, and 3. the total replicas added in the replica sets of the deployment so far.
-func GetProportion(logger klog.Logger, rs *apps.ReplicaSet, d apps.Deployment, deploymentReplicasToAdd, deploymentReplicasAdded int32) int32 {
+func GetReplicaSetProportion(logger klog.Logger, rs *apps.ReplicaSet, d apps.Deployment, deploymentReplicasToAdd, deploymentReplicasAdded int32) int32 {
 	if rs == nil || *(rs.Spec.Replicas) == 0 || deploymentReplicasToAdd == 0 || deploymentReplicasToAdd == deploymentReplicasAdded {
 		return int32(0)
 	}
@@ -479,12 +489,12 @@ func GetProportion(logger klog.Logger, rs *apps.ReplicaSet, d apps.Deployment, d
 		// Use the minimum between the replica set fraction and the maximum allowed replicas
 		// when scaling up. This way we ensure we will not scale up more than the allowed
 		// replicas we can add.
-		return integer.Int32Min(rsFraction, allowed)
+		return min(rsFraction, allowed)
 	}
 	// Use the maximum between the replica set fraction and the maximum allowed replicas
 	// when scaling down. This way we ensure we will not scale down more than the allowed
 	// replicas we can remove.
-	return integer.Int32Max(rsFraction, allowed)
+	return max(rsFraction, allowed)
 }
 
 // getReplicaSetFraction estimates the fraction of replicas a replica set can have in
@@ -495,19 +505,25 @@ func getReplicaSetFraction(logger klog.Logger, rs apps.ReplicaSet, d apps.Deploy
 		return -*(rs.Spec.Replicas)
 	}
 
-	deploymentReplicas := *(d.Spec.Replicas) + MaxSurge(d)
-	annotatedReplicas, ok := getMaxReplicasAnnotation(logger, &rs)
-	if !ok {
-		// If we cannot find the annotation then fallback to the current deployment size. Note that this
-		// will not be an accurate proportion estimation in case other replica sets have different values
+	deploymentMaxReplicas := *(d.Spec.Replicas) + MaxSurge(d)
+	deploymentMaxReplicasBeforeScale, ok := getMaxReplicasAnnotation(logger, &rs)
+	if !ok || deploymentMaxReplicasBeforeScale == 0 {
+		// If we cannot find the annotation then fallback to the current deployment size.
+		// This can occur if someone tampers with the annotation (removes it, sets it to an invalid value, or to 0).
+		// Note that this will not be an accurate proportion estimation in case other replica sets have different values
 		// which means that the deployment was scaled at some point but we at least will stay in limits
-		// due to the min-max comparisons in getProportion.
-		annotatedReplicas = d.Status.Replicas
+		// due to the min-max comparisons in GetReplicaSetProportion.
+		deploymentMaxReplicasBeforeScale = d.Status.Replicas
+		if deploymentMaxReplicasBeforeScale == 0 {
+			// Rare situation: missing annotation; some actor has removed it and pods are failing to be created.
+			return 0
+		}
 	}
 
-	// We should never proportionally scale up from zero which means rs.spec.replicas and annotatedReplicas
-	// will never be zero here.
-	newRSsize := (float64(*(rs.Spec.Replicas) * deploymentReplicas)) / float64(annotatedReplicas)
+	// We should never proportionally scale up from zero (see GetReplicaSetProportion) which means rs.spec.replicas will never be zero here.
+	scaleBase := *(rs.Spec.Replicas)
+	// deploymentMaxReplicasBeforeScale should normally be a positive value, and we have made sure that it is not a zero.
+	newRSsize := (float64(scaleBase * deploymentMaxReplicas)) / float64(deploymentMaxReplicasBeforeScale)
 	return integer.RoundToInt32(newRSsize) - *(rs.Spec.Replicas)
 }
 
@@ -698,6 +714,26 @@ func GetAvailableReplicaCountForReplicaSets(replicaSets []*apps.ReplicaSet) int3
 	return totalAvailableReplicas
 }
 
+// GetTerminatingReplicaCountForReplicaSets returns the number of terminating pods for all replica sets
+// or returns an error if any replica sets have been synced by the controller but do not report their terminating count.
+func GetTerminatingReplicaCountForReplicaSets(replicaSets []*apps.ReplicaSet) *int32 {
+	terminatingReplicas := int32(0)
+	for _, rs := range replicaSets {
+		switch {
+		case rs == nil:
+			// No-op
+		case rs.Status.ObservedGeneration == 0 && rs.Status.TerminatingReplicas == nil:
+			// Replicasets that have never been synced by the controller don't contribute to TerminatingReplicas
+		case rs.Status.TerminatingReplicas == nil:
+			// If any replicaset synced by the controller hasn't reported TerminatingReplicas, we cannot calculate a sum
+			return nil
+		default:
+			terminatingReplicas += *rs.Status.TerminatingReplicas
+		}
+	}
+	return &terminatingReplicas
+}
+
 // IsRollingUpdate returns true if the strategy type is a rolling update.
 func IsRollingUpdate(deployment *apps.Deployment) bool {
 	return deployment.Spec.Strategy.Type == apps.RollingUpdateDeploymentStrategyType
@@ -799,7 +835,7 @@ func NewRSNewReplicas(deployment *apps.Deployment, allRSs []*apps.ReplicaSet, ne
 		// Scale up.
 		scaleUpCount := maxTotalPods - currentPodCount
 		// Do not exceed the number of desired replicas.
-		scaleUpCount = int32(integer.IntMin(int(scaleUpCount), int(*(deployment.Spec.Replicas)-*(newRS.Spec.Replicas))))
+		scaleUpCount = min(scaleUpCount, *(deployment.Spec.Replicas)-*(newRS.Spec.Replicas))
 		return *(newRS.Spec.Replicas) + scaleUpCount, nil
 	case apps.RecreateDeploymentStrategyType:
 		return *(deployment.Spec.Replicas), nil
@@ -849,11 +885,11 @@ func WaitForObservedDeployment(getDeploymentFunc func() (*apps.Deployment, error
 // 2 desired, max unavailable 0%, surge 1% - should scale new(+1), then old(-1), then new(+1), then old(-1)
 // 1 desired, max unavailable 0%, surge 1% - should scale new(+1), then old(-1)
 func ResolveFenceposts(maxSurge, maxUnavailable *intstrutil.IntOrString, desired int32) (int32, int32, error) {
-	surge, err := intstrutil.GetScaledValueFromIntOrPercent(intstrutil.ValueOrDefault(maxSurge, intstrutil.FromInt(0)), int(desired), true)
+	surge, err := intstrutil.GetScaledValueFromIntOrPercent(intstrutil.ValueOrDefault(maxSurge, intstrutil.FromInt32(0)), int(desired), true)
 	if err != nil {
 		return 0, 0, err
 	}
-	unavailable, err := intstrutil.GetScaledValueFromIntOrPercent(intstrutil.ValueOrDefault(maxUnavailable, intstrutil.FromInt(0)), int(desired), false)
+	unavailable, err := intstrutil.GetScaledValueFromIntOrPercent(intstrutil.ValueOrDefault(maxUnavailable, intstrutil.FromInt32(0)), int(desired), false)
 	if err != nil {
 		return 0, 0, err
 	}

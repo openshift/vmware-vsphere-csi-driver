@@ -22,6 +22,9 @@ import (
 	"time"
 
 	apirequest "k8s.io/apiserver/pkg/endpoints/request"
+	"k8s.io/apiserver/pkg/features"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+
 	"k8s.io/klog/v2"
 )
 
@@ -80,7 +83,7 @@ func NewWorkEstimator(objectCountFn objectCountGetterFunc, watchCountFn watchCou
 
 // WorkEstimatorFunc returns the estimated work of a given request.
 // This function will be used by the Priority & Fairness filter to
-// estimate the work of of incoming requests.
+// estimate the work of incoming requests.
 type WorkEstimatorFunc func(request *http.Request, flowSchemaName, priorityLevelName string) WorkEstimate
 
 func (e WorkEstimatorFunc) EstimateWork(r *http.Request, flowSchemaName, priorityLevelName string) WorkEstimate {
@@ -109,6 +112,15 @@ func (e *workEstimator) estimate(r *http.Request, flowSchemaName, priorityLevelN
 	switch requestInfo.Verb {
 	case "list":
 		return e.listWorkEstimator.EstimateWork(r, flowSchemaName, priorityLevelName)
+	case "watch":
+		// WATCH supports `SendInitialEvents` option, which effectively means
+		// that is starts with sending of the contents of a corresponding LIST call.
+		// From that perspective, given that the watch only consumes APF seats
+		// during its initialization (sending init events), its cost should then
+		// be computed the same way as for a regular list.
+		if utilfeature.DefaultFeatureGate.Enabled(features.WatchList) {
+			return e.listWorkEstimator.EstimateWork(r, flowSchemaName, priorityLevelName)
+		}
 	case "create", "update", "patch", "delete":
 		return e.mutatingWorkEstimator.EstimateWork(r, flowSchemaName, priorityLevelName)
 	}

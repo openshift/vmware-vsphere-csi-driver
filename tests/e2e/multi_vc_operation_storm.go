@@ -36,8 +36,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm", func() {
-	f := framework.NewDefaultFramework("multi-vc-operation-storm")
+var _ = ginkgo.Describe("[multivc-operationstorm] MultiVc-OperationStorm", func() {
+	f := framework.NewDefaultFramework("multivc-operationstorm")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -93,8 +93,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm
 			framework.Failf("Unable to find ready and schedulable Node")
 		}
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 		nimbusGeneratedK8sVmPwd = GetAndExpectStringEnvVar(nimbusK8sVmPwd)
 
 		sshClientConfig = &ssh.ClientConfig{
@@ -115,7 +115,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		clusterWorkerMap := GetAndExpectStringEnvVar(workerClusterMap)
-		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap, topologyLength)
+		_, workerInitialAlias = createTopologyMapLevel5(clusterWorkerMap)
 
 		csiNamespace = GetAndExpectStringEnvVar(envCSINamespace)
 		csiDeployment, err := client.AppsV1().Deployments(csiNamespace).Get(
@@ -186,7 +186,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm
 	*/
 
 	ginkgo.It("Create statefulset pods in scale and in between bring down datatsore, esxi hosts "+
-		"and kill containers", ginkgo.Label(p1, block, vanilla, multiVc, newTest, flaky,
+		"and kill containers", ginkgo.Label(p1, block, vanilla, multiVc, vc70, flaky,
 		disruptive), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -287,7 +287,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm
 			}
 
 			ginkgo.By("Wait for k8s cluster to be healthy")
-			wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+			wait4AllK8sNodesToBeUp(nodeList)
 			err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}()
@@ -349,7 +349,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-operation-storm] Multi-VC-Operation-Storm
 
 		// Wait for k8s cluster to be healthy
 		ginkgo.By("Wait for k8s cluster to be healthy")
-		wait4AllK8sNodesToBeUp(ctx, client, nodeList)
+		wait4AllK8sNodesToBeUp(nodeList)
 		err = waitForAllNodes2BeReady(ctx, client, pollTimeout*4)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 

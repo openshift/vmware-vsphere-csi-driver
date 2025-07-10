@@ -159,7 +159,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaledown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaledown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaledown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaledown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -201,7 +202,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 					ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod")
-					verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, sspod.Spec.NodeName+"-"+pvcNameInSV,
+					verifyCNSFileAccessConfigCRDInSupervisor(ctx, sspod.Spec.NodeName+"-"+pvcNameInSV,
 						crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 					cnsFileAccessConfigCRDList = append(cnsFileAccessConfigCRDList,
@@ -237,7 +238,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		_, scaledownErr := fss.Scale(ctx, client, statefulset, replicas-1)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas-1)
-		ssPodsAfterScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas-1)).To(gomega.BeTrue(),
@@ -263,7 +265,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for missing Pod")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, missingPod.Spec.NodeName+"-"+missingVolumeHandle,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, missingPod.Spec.NodeName+"-"+missingVolumeHandle,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		//Add a check to validate CnsVolumeMetadata crd
 		verifyCRDInSupervisorWithWait(ctx, f, missingVolumeHandle, crdCNSVolumeMetadatas, crdVersion, crdGroup, false)
@@ -314,7 +316,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 
-		ssPodsAfterScaleUp := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleUp, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -338,7 +341,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 					gomega.Expect(fcdIDInCNS).NotTo(gomega.BeEmpty())
 
 					ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod")
-					verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, sspod.Spec.NodeName+"-"+pvcNameInSV,
+					verifyCNSFileAccessConfigCRDInSupervisor(ctx, sspod.Spec.NodeName+"-"+pvcNameInSV,
 						crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 					cnsFileAccessConfigCRDList = append(cnsFileAccessConfigCRDList,
@@ -352,7 +355,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		_, scaledownErr = fss.Scale(ctx, client, statefulset, replicas)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
-		ssPodsAfterScaleDown = fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 
@@ -376,7 +380,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 
 		ginkgo.By("Wait and verify CNSFileAccessConfig CRD is fully deleted")
 		for _, crdName := range cnsFileAccessConfigCRDList {
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, crdName, crdCNSFileAccessConfig,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, crdName, crdCNSFileAccessConfig,
 				crdVersion, crdGroup, false)
 		}
 	})
@@ -455,7 +459,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		// Waiting for pods status to be Ready.
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaledown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaledown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaledown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaledown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -497,7 +502,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 					gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 					ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod")
-					verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, sspod.Spec.NodeName+"-"+pvcNameInSV,
+					verifyCNSFileAccessConfigCRDInSupervisor(ctx, sspod.Spec.NodeName+"-"+pvcNameInSV,
 						crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 					cnsFileAccessConfigCRDList = append(cnsFileAccessConfigCRDList,
@@ -533,7 +538,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		_, scaledownErr := fss.Scale(ctx, client, statefulset, replicas-1)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas-1)
-		ssPodsAfterScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas-1)).To(gomega.BeTrue(),
@@ -558,7 +564,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for missing Pod")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, missingPod.Spec.NodeName+"-"+missingVolumeHandle,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, missingPod.Spec.NodeName+"-"+missingVolumeHandle,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		//Add a check to validate CnsVolumeMetadata crd
 		verifyCRDInSupervisorWithWait(ctx, f, missingVolumeHandle, crdCNSVolumeMetadatas, crdVersion, crdGroup, false)
@@ -609,7 +615,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 
-		ssPodsAfterScaleUp := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleUp, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -633,7 +640,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 					gomega.Expect(fcdIDInCNS).NotTo(gomega.BeEmpty())
 
 					ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod")
-					verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, sspod.Spec.NodeName+"-"+pvcNameInSV,
+					verifyCNSFileAccessConfigCRDInSupervisor(ctx, sspod.Spec.NodeName+"-"+pvcNameInSV,
 						crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 					cnsFileAccessConfigCRDList = append(cnsFileAccessConfigCRDList,
@@ -647,7 +654,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 		_, scaledownErr = fss.Scale(ctx, client, statefulset, replicas)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
-		ssPodsAfterScaleDown = fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 
@@ -671,7 +679,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Provision with Statefulsets",
 
 		ginkgo.By("Wait and verify CNSFileAccessConfig CRD is fully deleted")
 		for _, crdName := range cnsFileAccessConfigCRDList {
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, crdName, crdCNSFileAccessConfig,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, crdName, crdCNSFileAccessConfig,
 				crdVersion, crdGroup, false)
 		}
 	})

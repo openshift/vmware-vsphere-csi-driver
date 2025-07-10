@@ -39,12 +39,12 @@ import (
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	admissionapi "k8s.io/pod-security-admission/api"
 
-	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 )
 
-var _ = ginkgo.Describe("[topology-snapshot] Topology Volume Snapshot tests", func() {
-	f := framework.NewDefaultFramework("topology-volume-snapshot")
+var _ = ginkgo.Describe("[topology-snapshot] Topology-Snapshot", func() {
+	f := framework.NewDefaultFramework("topology-snapshot")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                  clientset.Interface
@@ -85,10 +85,9 @@ var _ = ginkgo.Describe("[topology-snapshot] Topology Volume Snapshot tests", fu
 
 		topologyLength, leafNode, _, leafNodeTag1, leafNodeTag2 = 5, 4, 0, 1, 2
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap,
-			topologyLength)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 
 		var datacenters []string
 		datastoreURL = GetAndExpectStringEnvVar(envSharedDatastoreURL)
@@ -266,14 +265,14 @@ var _ = ginkgo.Describe("[topology-snapshot] Topology Volume Snapshot tests", fu
 		ginkgo.By("Creating pod")
 		pod, err := createPod(ctx, client, namespace, nil, []*v1.PersistentVolumeClaim{pvclaim2}, false, "")
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		podName := pod.GetName
+		podName := pod.GetName()
 		framework.Logf("podName: %s", podName)
 
 		/* Verify PV node affinity and that the PODS are running on appropriate node as
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -364,7 +363,8 @@ var _ = ginkgo.Describe("[topology-snapshot] Topology Volume Snapshot tests", fu
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),

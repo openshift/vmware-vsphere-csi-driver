@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -158,7 +158,7 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 		}
 		if guestCluster {
 			svcClient, svNamespace := getSvcClientAndNamespace()
-			setResourceQuota(svcClient, svNamespace, defaultrqLimit)
+			setResourceQuota(svcClient, svNamespace, rqLimit)
 			dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 		}
 		if deleteFCDRequired {
@@ -240,7 +240,8 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 		// Check if raw device available inside all pods of statefulset
 		gomega.Expect(CheckDevice(ctx, client, statefulset, statefulset_devicePath)).NotTo(gomega.HaveOccurred())
 
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -271,7 +272,8 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 		_, scaledownErr := fss.Scale(ctx, client, statefulset, replicas-1)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas-1)
-		ssPodsAfterScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas-1)).To(gomega.BeTrue(),
@@ -325,7 +327,8 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 
-		ssPodsAfterScaleUp := fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleUp, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsAfterScaleUp.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsAfterScaleUp.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -374,7 +377,8 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 		_, scaledownErr = fss.Scale(ctx, client, statefulset, replicas)
 		gomega.Expect(scaledownErr).NotTo(gomega.HaveOccurred())
 		fss.WaitForStatusReplicas(ctx, client, statefulset, replicas)
-		ssPodsAfterScaleDown = fss.GetPodList(ctx, client, statefulset)
+		ssPodsAfterScaleDown, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(len(ssPodsAfterScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
 			"Number of Pods in the statefulset should match with number of replicas")
 	})
@@ -1203,7 +1207,7 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 
 		ginkgo.By("Create a dynamic volume snapshot")
 		volumeSnapshot, snapshotContent, snapshotCreated,
-			snapshotContentCreated, snapshotId, err := createDynamicVolumeSnapshot(ctx, namespace, snapc, volumeSnapshotClass,
+			snapshotContentCreated, snapshotId, _, err := createDynamicVolumeSnapshot(ctx, namespace, snapc, volumeSnapshotClass,
 			pvc1, volumeID, diskSize, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		defer func() {
@@ -1301,7 +1305,7 @@ var _ = ginkgo.Describe("raw block volume support", func() {
 
 		ginkgo.By("Delete dyanmic volume snapshot")
 		snapshotCreated, snapshotContentCreated, err = deleteVolumeSnapshot(ctx, snapc, namespace,
-			volumeSnapshot, pandoraSyncWaitTime, volumeID, snapshotId)
+			volumeSnapshot, pandoraSyncWaitTime, volumeID, snapshotId, true)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })

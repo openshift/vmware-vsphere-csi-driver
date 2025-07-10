@@ -18,14 +18,14 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
-	"github.com/davecgh/go-spew/spew"
-
 	apps "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/dump"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
@@ -37,7 +37,7 @@ type LogfFn func(format string, args ...interface{})
 
 func LogReplicaSetsOfDeployment(deployment *apps.Deployment, allOldRSs []*apps.ReplicaSet, newRS *apps.ReplicaSet, logf LogfFn) {
 	if newRS != nil {
-		logf(spew.Sprintf("New ReplicaSet %q of Deployment %q:\n%+v", newRS.Name, deployment.Name, *newRS))
+		logf("New ReplicaSet %q of Deployment %q:\n%s", newRS.Name, deployment.Name, dump.Pretty(*newRS))
 	} else {
 		logf("New ReplicaSet of Deployment %q is nil.", deployment.Name)
 	}
@@ -45,7 +45,7 @@ func LogReplicaSetsOfDeployment(deployment *apps.Deployment, allOldRSs []*apps.R
 		logf("All old ReplicaSets of Deployment %q:", deployment.Name)
 	}
 	for i := range allOldRSs {
-		logf(spew.Sprintf("%+v", *allOldRSs[i]))
+		logf(dump.Pretty(*allOldRSs[i]))
 	}
 }
 
@@ -65,7 +65,7 @@ func LogPodsOfDeployment(c clientset.Interface, deployment *apps.Deployment, rsL
 		if podutil.IsPodAvailable(&pod, minReadySeconds, metav1.Now()) {
 			availability = "available"
 		}
-		logf(spew.Sprintf("Pod %q is %s:\n%+v", pod.Name, availability, pod))
+		logf("Pod %q is %s:\n%s", pod.Name, availability, dump.Pretty(pod))
 	}
 }
 
@@ -106,7 +106,7 @@ func waitForDeploymentCompleteMaybeCheckRolling(c clientset.Interface, d *apps.D
 		return false, nil
 	})
 
-	if err == wait.ErrWaitTimeout {
+	if wait.Interrupted(err) {
 		err = fmt.Errorf("%s", reason)
 	}
 	if err != nil {
@@ -225,9 +225,9 @@ func WaitForDeploymentRevisionAndImage(c clientset.Interface, ns, deploymentName
 		}
 		return true, nil
 	})
-	if err == wait.ErrWaitTimeout {
+	if wait.Interrupted(err) {
 		LogReplicaSetsOfDeployment(deployment, nil, newRS, logf)
-		err = fmt.Errorf(reason)
+		err = errors.New(reason)
 	}
 	if newRS == nil {
 		return fmt.Errorf("deployment %q failed to create new replica set", deploymentName)
@@ -317,7 +317,7 @@ func UpdateDeploymentWithRetries(c clientset.Interface, namespace, name string, 
 		updateErr = err
 		return false, nil
 	})
-	if pollErr == wait.ErrWaitTimeout {
+	if wait.Interrupted(pollErr) {
 		pollErr = fmt.Errorf("couldn't apply the provided updated to deployment %q: %v", name, updateErr)
 	}
 	return deployment, pollErr
@@ -327,25 +327,6 @@ func WaitForObservedDeployment(c clientset.Interface, ns, deploymentName string,
 	return deploymentutil.WaitForObservedDeployment(func() (*apps.Deployment, error) {
 		return c.AppsV1().Deployments(ns).Get(context.TODO(), deploymentName, metav1.GetOptions{})
 	}, desiredGeneration, 2*time.Second, 1*time.Minute)
-}
-
-// WaitForDeploymentRollbackCleared waits for given deployment either started rolling back or doesn't need to rollback.
-func WaitForDeploymentRollbackCleared(c clientset.Interface, ns, deploymentName string, pollInterval, pollTimeout time.Duration) error {
-	err := wait.PollImmediate(pollInterval, pollTimeout, func() (bool, error) {
-		deployment, err := c.AppsV1().Deployments(ns).Get(context.TODO(), deploymentName, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		// Rollback not set or is kicked off
-		if deployment.Annotations[apps.DeprecatedRollbackTo] == "" {
-			return true, nil
-		}
-		return false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("error waiting for deployment %s rollbackTo to be cleared: %v", deploymentName, err)
-	}
-	return nil
 }
 
 // WaitForDeploymentUpdatedReplicasGTE waits for given deployment to be observed by the controller and has at least a number of updatedReplicas
@@ -376,7 +357,7 @@ func WaitForDeploymentWithCondition(c clientset.Interface, ns, deploymentName, r
 		cond := deploymentutil.GetDeploymentCondition(deployment.Status, condType)
 		return cond != nil && cond.Reason == reason, nil
 	})
-	if pollErr == wait.ErrWaitTimeout {
+	if wait.Interrupted(pollErr) {
 		pollErr = fmt.Errorf("deployment %q never updated with the desired condition and reason, latest deployment conditions: %+v", deployment.Name, deployment.Status.Conditions)
 		_, allOldRSs, newRS, err := GetAllReplicaSets(deployment, c)
 		if err == nil {

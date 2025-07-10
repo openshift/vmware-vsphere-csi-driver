@@ -37,23 +37,24 @@ import (
 	"k8s.io/klog/v2"
 )
 
-type recordMetrics func(context.Context, *authenticator.Response, bool, error, authenticator.Audiences, time.Time, time.Time)
+type authenticationRecordMetricsFunc func(context.Context, *authenticator.Response, bool, error, authenticator.Audiences, time.Time, time.Time)
 
 // WithAuthentication creates an http handler that tries to authenticate the given request as a user, and then
 // stores any such user found onto the provided context for the request. If authentication fails or returns an error
 // the failed handler is used. On success, "Authorization" header is removed from the request and handler
 // is invoked to serve the request.
 func WithAuthentication(handler http.Handler, auth authenticator.Request, failed http.Handler, apiAuds authenticator.Audiences, requestHeaderConfig *authenticatorfactory.RequestHeaderConfig) http.Handler {
-	return withAuthentication(handler, auth, failed, apiAuds, requestHeaderConfig, recordAuthMetrics)
+	return withAuthentication(handler, auth, failed, apiAuds, requestHeaderConfig, recordAuthenticationMetrics)
 }
 
-func withAuthentication(handler http.Handler, auth authenticator.Request, failed http.Handler, apiAuds authenticator.Audiences, requestHeaderConfig *authenticatorfactory.RequestHeaderConfig, metrics recordMetrics) http.Handler {
+func withAuthentication(handler http.Handler, auth authenticator.Request, failed http.Handler, apiAuds authenticator.Audiences, requestHeaderConfig *authenticatorfactory.RequestHeaderConfig, metrics authenticationRecordMetricsFunc) http.Handler {
 	if auth == nil {
 		klog.Warning("Authentication is disabled")
 		return handler
 	}
 	standardRequestHeaderConfig := &authenticatorfactory.RequestHeaderConfig{
 		UsernameHeaders:     headerrequest.StaticStringSlice{"X-Remote-User"},
+		UIDHeaders:          headerrequest.StaticStringSlice{"X-Remote-Uid"},
 		GroupHeaders:        headerrequest.StaticStringSlice{"X-Remote-Group"},
 		ExtraHeaderPrefixes: headerrequest.StaticStringSlice{"X-Remote-Extra-"},
 	}
@@ -67,6 +68,7 @@ func withAuthentication(handler http.Handler, auth authenticator.Request, failed
 		authenticationFinish := time.Now()
 		defer func() {
 			metrics(req.Context(), resp, ok, err, apiAuds, authenticationStart, authenticationFinish)
+			genericapirequest.TrackAuthenticationLatency(req.Context(), authenticationFinish.Sub(authenticationStart))
 		}()
 		if err != nil || !ok {
 			if err != nil {
@@ -90,6 +92,7 @@ func withAuthentication(handler http.Handler, auth authenticator.Request, failed
 		headerrequest.ClearAuthenticationHeaders(
 			req.Header,
 			standardRequestHeaderConfig.UsernameHeaders,
+			standardRequestHeaderConfig.UIDHeaders,
 			standardRequestHeaderConfig.GroupHeaders,
 			standardRequestHeaderConfig.ExtraHeaderPrefixes,
 		)
@@ -99,6 +102,7 @@ func withAuthentication(handler http.Handler, auth authenticator.Request, failed
 			headerrequest.ClearAuthenticationHeaders(
 				req.Header,
 				requestHeaderConfig.UsernameHeaders,
+				requestHeaderConfig.UIDHeaders,
 				requestHeaderConfig.GroupHeaders,
 				requestHeaderConfig.ExtraHeaderPrefixes,
 			)
@@ -115,7 +119,6 @@ func withAuthentication(handler http.Handler, auth authenticator.Request, failed
 			// https://github.com/golang/net/commit/97aa3a539ec716117a9d15a4659a911f50d13c3c
 			w.Header().Set("Connection", "close")
 		}
-
 		req = req.WithContext(genericapirequest.WithUser(req.Context(), resp.User))
 		handler.ServeHTTP(w, req)
 	})

@@ -20,7 +20,6 @@ import (
 	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
-
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
@@ -198,6 +197,7 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 		QueryLimit:                  cfg.Global.QueryLimit,
 		ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
 		MigrationDataStoreURL:       cfg.VirtualCenter[host].MigrationDataStoreURL,
+		FileVolumeActivated:         cfg.VirtualCenter[host].FileVolumeActivated,
 	}
 
 	log.Debugf("Setting the queryLimit = %v, ListVolumeThreshold = %v", vcConfig.QueryLimit, vcConfig.ListVolumeThreshold)
@@ -243,6 +243,7 @@ func GetVirtualCenterConfigs(ctx context.Context, cfg *config.Config) ([]*Virtua
 			TargetvSANFileShareClusters: targetvSANClustersForFile,
 			QueryLimit:                  cfg.Global.QueryLimit,
 			ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
+			FileVolumeActivated:         cfg.VirtualCenter[vCenterIP].FileVolumeActivated,
 		}
 		if vcConfig.CAFile == "" {
 			vcConfig.CAFile = cfg.Global.CAFile
@@ -359,6 +360,27 @@ func GetTagManager(ctx context.Context, vc *VirtualCenter) (*tags.Manager, error
 	return tagManager, nil
 }
 
+// GetCandidateDatastoresInClusters gets the shared datastores and vSAN-direct
+// managed datastores of given VC clusters from GetCandidateDatastoresInCluster and
+// returns a map of clusterID -> array of datastores
+func GetCandidateDatastoresInClusters(ctx context.Context, vc *VirtualCenter, clusterIDs []string,
+	includevSANDirectDatastores bool) map[string][]*DatastoreInfo {
+	log := logger.GetLogger(ctx)
+
+	clusterIDToDSs := make(map[string][]*DatastoreInfo)
+	for _, clusterID := range clusterIDs {
+		sharedDSs, vsanDirectDSs, err := GetCandidateDatastoresInCluster(ctx, vc, clusterID, includevSANDirectDatastores)
+		if err != nil {
+			log.Warnf("Getting datastores for the cluster %s failed - err: %s", clusterID, err)
+			continue
+		}
+
+		clusterIDToDSs[clusterID] = append(sharedDSs, vsanDirectDSs...)
+	}
+
+	return clusterIDToDSs
+}
+
 // GetCandidateDatastoresInCluster gets the shared datastores and vSAN-direct
 // managed datastores of given VC cluster.
 // The 1st output parameter will be shared datastores.
@@ -433,27 +455,36 @@ func GetCandidateDatastoresInCluster(ctx context.Context, vc *VirtualCenter, clu
 	if len(sharedDatastores) == 0 && len(vsanDirectDatastores) == 0 {
 		return nil, nil, fmt.Errorf("no candidates datastores found in the Kubernetes cluster")
 	}
-	log.Infof("Found shared datastores: %+v and vSAN Direct datastores: %+v", sharedDatastores,
+	log.Debugf("Found shared datastores: %+v and vSAN Direct datastores: %+v", sharedDatastores,
 		vsanDirectDatastores)
 	return sharedDatastores, vsanDirectDatastores, nil
 }
 
 // GetDatastoreInfoByURL returns info of a datastore found in given cluster
 // whose URL matches the specified datastore URL.
-func GetDatastoreInfoByURL(ctx context.Context, vc *VirtualCenter, clusterID, dsURL string) (*DatastoreInfo, error) {
+// TODO: optimise this by caching the datastore URL to clusterID mapping or
+// adding the clusterID as part of the CRD.
+func GetDatastoreInfoByURL(ctx context.Context, vc *VirtualCenter,
+	clusterIDs []string, dsURL string) (*DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
-	// Get all datastores in this cluster.
-	datastoreInfos, err := vc.GetDatastoresByCluster(ctx, clusterID)
-	if err != nil {
-		log.Warnf("Not able to fetch datastores in cluster %q. Err: %v", clusterID, err)
-		return nil, err
-	}
-	for _, dsInfo := range datastoreInfos {
-		if dsInfo.Info.Url == dsURL {
-			return dsInfo, nil
+	for _, clusterID := range clusterIDs {
+		// Get all datastores in this cluster.
+		datastoreInfos, err := vc.GetDatastoresByCluster(ctx, clusterID)
+		if err != nil {
+			log.Warnf("Not able to fetch datastores in cluster %q. Err: %v", clusterID, err)
+			continue
 		}
+
+		for _, dsInfo := range datastoreInfos {
+			if dsInfo.Info.Url == dsURL {
+				return dsInfo, nil
+			}
+		}
+
+		log.Debugf("datastore corresponding to URL %s not found in cluster %s", dsURL, clusterID)
 	}
-	return nil, fmt.Errorf("datastore corresponding to URL %v not found in cluster %v", dsURL, clusterID)
+
+	return nil, fmt.Errorf("datastore corresponding to URL %v not found in any cluster", dsURL)
 }
 
 // isVsan67u3Release returns true if it is vSAN 67u3 Release of vCenter.

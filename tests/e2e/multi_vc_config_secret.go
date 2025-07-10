@@ -38,8 +38,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", func() {
-	f := framework.NewDefaultFramework("multi-vc-config-secret")
+var _ = ginkgo.Describe("[multivc-configsecret] MultiVc-ConfigSecret", func() {
+	f := framework.NewDefaultFramework("multivc-configsecret")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                      clientset.Interface
@@ -106,8 +106,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		csiReplicas = *csiDeployment.Spec.Replicas
 
 		// read testbed topology map
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 
 		// save original vsphere conf credentials in temp variable
 		vCenterIP = multiVCe2eVSphere.multivcConfig.Global.VCenterHostname
@@ -157,7 +157,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 		if originalVC1PasswordChanged {
 			clientIndex := 0
-			vcAddress := strings.Split(vCenterIP, ",")[0] + ":" + sshdPort
 			username := strings.Split(vCenterUser, ",")[0]
 			originalPassword := strings.Split(vCenterPassword, ",")[0]
 			newPassword := e2eTestPassword
@@ -169,7 +168,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 		if originalVC3PasswordChanged {
 			clientIndex2 := 2
-			vcAddress3 := strings.Split(vCenterIP, ",")[2] + ":" + sshdPort
 			username3 := strings.Split(vCenterUser, ",")[2]
 			originalPassword3 := strings.Split(vCenterPassword, ",")[2]
 			newPassword3 := "Admin!23"
@@ -220,7 +218,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 	ginkgo.It("Change vCenter password on one of the multi-vc setup and update the same "+
 		"in csi vsphere conf", ginkgo.Label(p1, vsphereConfigSecret, block, vanilla,
-		multiVc, newTest, flaky), func() {
+		multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -242,8 +240,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		// read original vsphere config secret
 		vsphereCfg, err := readVsphereConfSecret(client, ctx, csiNamespace)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-		vcAddress := strings.Split(vsphereCfg.Global.VCenterHostname, ",")[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		username := strings.Split(vsphereCfg.Global.User, ",")[0]
 		originalPassword := strings.Split(vsphereCfg.Global.Password, ",")[0]
@@ -325,7 +321,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Copy same vCenter details twice in csi vsphere conf in a multi-vc setup", ginkgo.Label(p2,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -441,7 +437,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 	ginkgo.It("Use VC-hostname instead of VC-IP for one VC and try to switch the same during"+
 		"a workload vcreation in a multivc setup", ginkgo.Label(p1,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -555,7 +551,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 	ginkgo.It("Install CSI driver on different namespace and restart CSI-controller and node daemon sets"+
 		"in between the statefulset creation", ginkgo.Label(p2,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -698,7 +694,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 				e2ekubectl.RunKubectlOrDie(newNamespace.Name, statusCheck...)
 
 				// wait for csi Pods to be in running ready state
-				err = fpod.WaitForPodsRunningReady(ctx, client, newNamespace.Name, int32(num_csi_pods), 0, pollTimeout)
+				err = fpod.WaitForPodsRunningReady(ctx, client, newNamespace.Name, int(num_csi_pods),
+					time.Duration(pollTimeout))
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 				err = performScalingOnStatefulSetAndVerifyPvNodeAffinity(ctx, client, scaleUpReplicaCount,
@@ -725,7 +722,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Keep different passwords on each VC and check Statefulset creation and reboot VC", ginkgo.Label(p2,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky, negative), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky, negative), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -733,7 +730,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		scaleUpReplicaCount = 5
 		scaleDownReplicaCount = 2
 		var clientIndex2 int
-		var username3, newPassword3, originalPassword3, vcAddress3 string
+		var username3, newPassword3, originalPassword3 string
 
 		// read original vsphere config secret
 		vsphereCfg, err := readVsphereConfSecret(client, ctx, csiNamespace)
@@ -750,20 +747,18 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		}()
 
 		// read VC1 credentials
-		vcAddress1 := strings.Split(vsphereCfg.Global.VCenterHostname, ",")[0] + ":" + sshdPort
 		username1 := strings.Split(vsphereCfg.Global.User, ",")[0]
 		originalPassword1 := strings.Split(vsphereCfg.Global.Password, ",")[0]
 		newPassword1 := "E2E-test-password!23"
 
 		ginkgo.By("Changing password on the vCenter VC1 host")
 		clientIndex0 := 0
-		err = invokeVCenterChangePassword(ctx, username1, originalPassword1, newPassword1, vcAddress1, clientIndex0)
+		err = invokeVCenterChangePassword(ctx, username1, originalPassword1, newPassword1, vcAddress, clientIndex0)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		originalVC1PasswordChanged = true
 
 		if multiVCSetupType == "multi-3vc-setup" {
 			// read VC3 credentials
-			vcAddress3 = strings.Split(vsphereCfg.Global.VCenterHostname, ",")[2] + ":" + sshdPort
 			username3 = strings.Split(vsphereCfg.Global.User, ",")[2]
 			originalPassword3 = strings.Split(vsphereCfg.Global.Password, ",")[2]
 			newPassword3 = "Admin!23"
@@ -793,7 +788,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		defer func() {
 			if originalVC1PasswordChanged {
 				ginkgo.By("Reverting the password change")
-				err = invokeVCenterChangePassword(ctx, username1, newPassword1, originalPassword1, vcAddress1,
+				err = invokeVCenterChangePassword(ctx, username1, newPassword1, originalPassword1, vcAddress,
 					clientIndex0)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 				originalVC1PasswordChanged = false
@@ -845,20 +840,18 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		}()
 
 		ginkgo.By("Rebooting VC2")
-		vCenterHostname := strings.Split(multiVCe2eVSphere.multivcConfig.Global.VCenterHostname, ",")
-		vcAddress := vCenterHostname[1] + ":" + sshdPort
-		framework.Logf("vcAddress - %s ", vcAddress)
-		err = invokeVCenterReboot(ctx, vcAddress)
+		framework.Logf("vcAddress - %s ", vcAddress2)
+		err = invokeVCenterReboot(ctx, vcAddress2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		err = waitForHostToBeUp(vCenterHostname[1])
+		err = waitForHostToBeUp(vcAddress2)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		ginkgo.By("Done with reboot")
 
 		essentialServices := []string{spsServiceName, vsanhealthServiceName, vpxdServiceName}
-		checkVcenterServicesRunning(ctx, vcAddress, essentialServices)
+		checkVcenterServicesRunning(ctx, vcAddress2, essentialServices)
 
 		ginkgo.By("Reverting the password change on VC1")
-		err = invokeVCenterChangePassword(ctx, username1, newPassword1, originalPassword1, vcAddress1,
+		err = invokeVCenterChangePassword(ctx, username1, newPassword1, originalPassword1, vcAddress,
 			clientIndex0)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		originalVC1PasswordChanged = false
@@ -907,7 +900,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 
 	ginkgo.It("Change VC in the UI but not on the vsphere secret and verify "+
 		"volume creation workflow on a multivc setup", ginkgo.Label(p2,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -917,7 +910,6 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		// read original vsphere config secret
 		vsphereCfg, err := readVsphereConfSecret(client, ctx, csiNamespace)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		vcAddress := strings.Split(vsphereCfg.Global.VCenterHostname, ",")[0] + ":" + sshdPort
 		framework.Logf("vcAddress - %s ", vcAddress)
 		username := strings.Split(vsphereCfg.Global.User, ",")[0]
 		originalPassword := strings.Split(vsphereCfg.Global.Password, ",")[0]
@@ -976,7 +968,7 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 	*/
 
 	ginkgo.It("Add any wrong entry in vsphere conf and verify csi pods behaviour", ginkgo.Label(p2,
-		vsphereConfigSecret, block, vanilla, multiVc, newTest, flaky), func() {
+		vsphereConfigSecret, block, vanilla, multiVc, vc70, flaky), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1045,7 +1037,8 @@ var _ = ginkgo.Describe("[csi-multi-vc-config-secret] Multi-VC-Config-Secret", f
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		if deploymentPods.Status.UnavailableReplicas != csiReplicas {
-			framework.Logf("CSi Pods are not ready or in CLBO state with %d unavilable csi pod replica")
+			framework.Logf("CSi Pods are not ready or in CLBO state with %d unavilable csi pod replica",
+				deploymentPods.Status.UnavailableReplicas)
 		}
 
 		ginkgo.By("Try to create a PVC verify that it is stuck in pending state")

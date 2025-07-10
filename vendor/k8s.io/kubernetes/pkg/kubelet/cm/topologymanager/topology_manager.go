@@ -21,7 +21,7 @@ import (
 	"time"
 
 	cadvisorapi "github.com/google/cadvisor/info/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
 	"k8s.io/kubernetes/pkg/kubelet/lifecycle"
@@ -29,7 +29,7 @@ import (
 )
 
 const (
-	// maxAllowableNUMANodes specifies the maximum number of NUMA Nodes that
+	// defaultMaxAllowableNUMANodes specifies the maximum number of NUMA Nodes that
 	// the TopologyManager supports on the underlying machine.
 	//
 	// At present, having more than this number of NUMA Nodes will result in a
@@ -37,7 +37,7 @@ const (
 	// generate hints for them. As such, if more NUMA Nodes than this are
 	// present on a machine and the TopologyManager is enabled, an error will
 	// be returned and the TopologyManager will not be loaded.
-	maxAllowableNUMANodes = 8
+	defaultMaxAllowableNUMANodes = 8
 	// ErrorTopologyAffinity represents the type for a TopologyAffinityError
 	ErrorTopologyAffinity = "TopologyAffinityError"
 )
@@ -133,27 +133,30 @@ var _ Manager = &manager{}
 
 // NewManager creates a new TopologyManager based on provided policy and scope
 func NewManager(topology []cadvisorapi.Node, topologyPolicyName string, topologyScopeName string, topologyPolicyOptions map[string]string) (Manager, error) {
-	klog.InfoS("Creating topology manager with policy per scope", "topologyPolicyName", topologyPolicyName, "topologyScopeName", topologyScopeName)
+	// When policy is none, the scope is not relevant, so we can short circuit here.
+	if topologyPolicyName == PolicyNone {
+		klog.InfoS("Creating topology manager with none policy")
+		return &manager{scope: NewNoneScope()}, nil
+	}
 
 	opts, err := NewPolicyOptions(topologyPolicyOptions)
 	if err != nil {
 		return nil, err
 	}
 
+	klog.InfoS("Creating topology manager with policy per scope", "topologyPolicyName", topologyPolicyName, "topologyScopeName", topologyScopeName, "topologyPolicyOptions", opts)
+
 	numaInfo, err := NewNUMAInfo(topology, opts)
 	if err != nil {
 		return nil, fmt.Errorf("cannot discover NUMA topology: %w", err)
 	}
 
-	if topologyPolicyName != PolicyNone && len(numaInfo.Nodes) > maxAllowableNUMANodes {
-		return nil, fmt.Errorf("unsupported on machines with more than %v NUMA Nodes", maxAllowableNUMANodes)
+	if topologyPolicyName != PolicyNone && len(numaInfo.Nodes) > opts.MaxAllowableNUMANodes {
+		return nil, fmt.Errorf("unsupported on machines with more than %v NUMA Nodes", opts.MaxAllowableNUMANodes)
 	}
 
 	var policy Policy
 	switch topologyPolicyName {
-
-	case PolicyNone:
-		policy = NewNonePolicy()
 
 	case PolicyBestEffort:
 		policy = NewBestEffortPolicy(numaInfo, opts)
@@ -185,7 +188,17 @@ func NewManager(topology []cadvisorapi.Node, topologyPolicyName string, topology
 		scope: scope,
 	}
 
+	manager.initializeMetrics()
+
 	return manager, nil
+}
+
+func (m *manager) initializeMetrics() {
+	// ensure the values exist
+	metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopeContainer, metrics.AlignedNUMANode).Add(0)
+	metrics.ContainerAlignedComputeResources.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Add(0)
+	metrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopeContainer, metrics.AlignedNUMANode).Add(0)
+	metrics.ContainerAlignedComputeResourcesFailure.WithLabelValues(metrics.AlignScopePod, metrics.AlignedNUMANode).Add(0)
 }
 
 func (m *manager) GetAffinity(podUID string, containerName string) TopologyHint {
@@ -209,12 +222,13 @@ func (m *manager) RemoveContainer(containerID string) error {
 }
 
 func (m *manager) Admit(attrs *lifecycle.PodAdmitAttributes) lifecycle.PodAdmitResult {
-	klog.InfoS("Topology Admit Handler", "podUID", attrs.Pod.UID, "podNamespace", attrs.Pod.Namespace, "podName", attrs.Pod.Name)
+	klog.V(4).InfoS("Topology manager admission check", "pod", klog.KObj(attrs.Pod))
 	metrics.TopologyManagerAdmissionRequestsTotal.Inc()
 
 	startTime := time.Now()
 	podAdmitResult := m.scope.Admit(attrs.Pod)
 	metrics.TopologyManagerAdmissionDuration.Observe(float64(time.Since(startTime).Milliseconds()))
 
+	klog.V(4).InfoS("Pod Admit Result", "Message", podAdmitResult.Message, "pod", klog.KObj(attrs.Pod))
 	return podAdmitResult
 }

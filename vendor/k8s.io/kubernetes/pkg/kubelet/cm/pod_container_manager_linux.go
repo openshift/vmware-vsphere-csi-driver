@@ -23,7 +23,7 @@ import (
 	"path"
 	"strings"
 
-	libcontainercgroups "github.com/opencontainers/runc/libcontainer/cgroups"
+	libcontainercgroups "github.com/opencontainers/cgroups"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
@@ -55,6 +55,8 @@ type podContainerManagerImpl struct {
 	// cpuCFSQuotaPeriod is the cfs period value, cfs_period_us, setting per
 	// node for all containers in usec
 	cpuCFSQuotaPeriod uint64
+	// podContainerManager is the ContainerManager running on the machine
+	podContainerManager ContainerManager
 }
 
 // Make sure that podContainerManagerImpl implements the PodContainerManager interface
@@ -73,6 +75,11 @@ func (m *podContainerManagerImpl) EnsureExists(pod *v1.Pod) error {
 	// check if container already exist
 	alreadyExists := m.Exists(pod)
 	if !alreadyExists {
+		enforceCPULimits := m.enforceCPULimits
+		if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DisableCPUQuotaWithExclusiveCPUs) && m.podContainerManager.PodHasExclusiveCPUs(pod) {
+			klog.V(2).InfoS("Disabled CFS quota", "pod", klog.KObj(pod))
+			enforceCPULimits = false
+		}
 		enforceMemoryQoS := false
 		if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.MemoryQoS) &&
 			libcontainercgroups.IsCgroup2UnifiedMode() {
@@ -82,7 +89,7 @@ func (m *podContainerManagerImpl) EnsureExists(pod *v1.Pod) error {
 		podContainerName, _ := m.GetPodContainerName(pod)
 		containerConfig := &CgroupConfig{
 			Name:               podContainerName,
-			ResourceParameters: ResourceConfigForPod(pod, m.enforceCPULimits, m.cpuCFSQuotaPeriod, enforceMemoryQoS),
+			ResourceParameters: ResourceConfigForPod(pod, enforceCPULimits, m.cpuCFSQuotaPeriod, enforceMemoryQoS),
 		}
 		if m.podPidsLimit > 0 {
 			containerConfig.ResourceParameters.PidsLimit = &m.podPidsLimit
@@ -134,9 +141,9 @@ func (m *podContainerManagerImpl) GetPodCgroupConfig(pod *v1.Pod, resource v1.Re
 	return m.cgroupManager.GetCgroupConfig(podCgroupName, resource)
 }
 
-func (m *podContainerManagerImpl) SetPodCgroupConfig(pod *v1.Pod, resource v1.ResourceName, resourceConfig *ResourceConfig) error {
+func (m *podContainerManagerImpl) SetPodCgroupConfig(pod *v1.Pod, resourceConfig *ResourceConfig) error {
 	podCgroupName, _ := m.GetPodContainerName(pod)
-	return m.cgroupManager.SetCgroupConfig(podCgroupName, resource, resourceConfig)
+	return m.cgroupManager.SetCgroupConfig(podCgroupName, resourceConfig)
 }
 
 // Kill one process ID
@@ -350,6 +357,6 @@ func (m *podContainerManagerNoop) GetPodCgroupConfig(_ *v1.Pod, _ v1.ResourceNam
 	return nil, nil
 }
 
-func (m *podContainerManagerNoop) SetPodCgroupConfig(_ *v1.Pod, _ v1.ResourceName, _ *ResourceConfig) error {
+func (m *podContainerManagerNoop) SetPodCgroupConfig(_ *v1.Pod, _ *ResourceConfig) error {
 	return nil
 }

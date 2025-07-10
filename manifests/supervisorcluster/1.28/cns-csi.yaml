@@ -10,11 +10,14 @@ metadata:
   name: vsphere-csi-controller-role
 rules:
   - apiGroups: [""]
-    resources: ["nodes", "pods", "configmaps", "resourcequotas", "namespaces", "services"]
+    resources: ["nodes", "pods", "resourcequotas", "namespaces", "services"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "update"]
+  - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
-    verbs: ["get", "list", "watch", "create", "update", "patch"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
     resources: ["persistentvolumes"]
     verbs: ["get", "list", "watch", "update", "create", "delete", "patch"]
@@ -26,7 +29,7 @@ rules:
     verbs: ["get", "list", "watch", "patch"]
   - apiGroups: ["storage.k8s.io"]
     resources: ["csinodes"]
-    verbs: ["get", "list", "watch", "create"]
+    verbs: ["get", "list", "watch", "create", "delete"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch", "create", "update", "patch"]
@@ -44,9 +47,9 @@ rules:
     verbs: ["create", "get", "list", "update", "watch"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["cnsfilevolumeclients"]
-    verbs: ["get", "update", "create", "delete"]
+    verbs: ["get", "list", "update", "create", "delete"]
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsregistervolumes"]
+    resources: ["cnsregistervolumes", "cnsunregistervolumes"]
     verbs: ["get", "list", "watch", "update", "delete"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["triggercsifullsyncs"]
@@ -76,13 +79,22 @@ rules:
     resources: ["storagepolicyusages"]
     verbs: ["create", "get", "list", "patch", "delete"]
   - apiGroups: ["cns.vmware.com"]
+    resources: ["storagepolicyusages/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["storagequotaperiodicsyncs"]
+    verbs: ["create", "get", "list", "patch", "delete" ,"watch"]
+  - apiGroups: ["cns.vmware.com"]
+    resources: ["storagequotaperiodicsyncs/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: ["cns.vmware.com"]
     resources: ["storagepolicyquotas"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["list"]
   - apiGroups: ["topology.tanzu.vmware.com"]
-    resources: ["availabilityzones"]
+    resources: ["availabilityzones", "zones"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [ "snapshot.storage.k8s.io" ]
     resources: [ "volumesnapshots" ]
@@ -99,6 +111,12 @@ rules:
   - apiGroups: ["cns.vmware.com"]
     resources: ["cnsvolumeinfoes"]
     verbs: ["create", "get", "list", "watch", "delete", "patch"]
+  - apiGroups: ["crd.nsx.vmware.com"]
+    resources: ["networkinfos"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["encryption.vmware.com"]
+    resources: ["encryptionclasses"]
+    verbs: ["get", "list", "watch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -134,7 +152,7 @@ metadata:
   name: vsphere-admin-csi-role
 rules:
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsregistervolumes"]
+    resources: ["cnsregistervolumes", "cnsunregistervolumes"]
     verbs: ["get", "list", "create", "delete", "watch"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
@@ -180,6 +198,30 @@ roleRef:
   name: vsphere-csi-secret-reader
   apiGroup: rbac.authorization.k8s.io
 ---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: vmware-system-csi
+  name: vsphere-csi-configmap-writer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "watch", "list", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: vsphere-csi-controller-configmap-writer
+  namespace: vmware-system-csi
+subjects:
+  - kind: ServiceAccount
+    name: vsphere-csi-controller
+    namespace: vmware-system-csi
+roleRef:
+  kind: Role
+  name: vsphere-csi-configmap-writer
+  apiGroup: rbac.authorization.k8s.io
+---
 kind: Deployment
 apiVersion: apps/v1
 metadata:
@@ -222,7 +264,7 @@ spec:
       priorityClassName: system-node-critical
       containers:
         - name: csi-provisioner
-          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v4.0.0_vmware.4
+          image: localhost:5000/vmware/csi-provisioner/csi-provisioner:v5.0.2_vmware.5
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -239,6 +281,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
+            - "--enable-vdpp-on-stretched-supervisor=true"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -257,7 +300,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-attacher
-          image: localhost:5000/vmware.io/csi-attacher:v4.5.0_vmware.1
+          image: localhost:5000/vmware.io/csi-attacher:v4.7.0_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -268,7 +311,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
-            - "--worker-threads=25"
+            - "--worker-threads=100"
           env:
             - name: ADDRESS
               value: /csi/csi.sock
@@ -281,7 +324,7 @@ spec:
             - name: socket-dir
               mountPath: /csi
         - name: csi-resizer
-          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.10.0_vmware.1
+          image: localhost:5000/vmware/kubernetes-csi_external-resizer/kubernetes-csi_external-resizer:v1.12.0_vmware.1
           imagePullPolicy: IfNotPresent
           args:
             - --v=4
@@ -357,7 +400,7 @@ spec:
             - mountPath: /etc/vmware/wcp/tls/
               name: host-vmca
         - name: liveness-probe
-          image: localhost:5000/vmware.io/csi-livenessprobe:v2.12.0_vmware.1
+          image: localhost:5000/vmware.io/csi-livenessprobe:v2.14.0_vmware.1
           args:
             - "--csi-address=/csi/csi.sock"
           volumeMounts:
@@ -370,6 +413,7 @@ spec:
             - "--leader-election-lease-duration=120s"
             - "--leader-election-renew-deadline=60s"
             - "--leader-election-retry-period=30s"
+            - "--storagequota-sync-interval=10m"
           env:
             - name: CLUSTER_FLAVOR
               value: "WORKLOAD"
@@ -409,7 +453,7 @@ spec:
             - mountPath: /etc/vmware/wcp/tls/
               name: host-vmca
         - name: csi-snapshotter
-          image: localhost:5000/vmware.io/csi-snapshotter:v6.1.0_vmware.6
+          image: localhost:5000/vmware.io/csi-snapshotter:v8.2.0_vmware.1
           args:
             - "--v=4"
             - "--timeout=300s"
@@ -460,7 +504,11 @@ data:
   "tkgs-ha": "true"
   "list-volumes": "true"
   "cnsmgr-suspend-create-volume": "true"
-  "storage-quota-m2": "false"
+  "storage-quota-m2": "true"
+  "vdpp-on-stretched-supervisor": "true"
+  "cns-unregister-volume": "false"
+  "workload-domain-isolation": "false"
+  "WCP_VMService_BYOK": "false"
 kind: ConfigMap
 metadata:
   name: csi-feature-states
@@ -548,11 +596,31 @@ webhooks:
         operations:  ["CREATE", "UPDATE", "DELETE"]
         resources:   ["persistentvolumeclaims"]
         scope: "Namespaced"
-      - apiGroups:   ["snapshot.storage.k8s.io"]
-        apiVersions: ["v1"]
-        operations:  ["CREATE"]
-        resources:   ["volumesnapshots"]
-        scope:       "Namespaced"
+    sideEffects: None
+    admissionReviewVersions: ["v1"]
+    failurePolicy: Fail
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: vmware-system-csi-mutating-webhook-configuration
+  labels:
+    app: vsphere-csi-webhook
+  annotations:
+    cert-manager.io/inject-ca-from: vmware-system-csi/vmware-system-csi-serving-cert
+webhooks:
+  - name: mutation.csi.vsphere.vmware.com
+    clientConfig:
+      service:
+        name: vmware-system-csi-webhook-service
+        namespace: vmware-system-csi
+        path: "/mutate"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1", "v1beta1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["persistentvolumeclaims"]
+        scope: "Namespaced"
     sideEffects: None
     admissionReviewVersions: ["v1"]
     failurePolicy: Fail
@@ -568,6 +636,12 @@ rules:
   - apiGroups: ["snapshot.storage.k8s.io"]
     resources: ["volumesnapshots"]
     verbs: ["get", "list"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["encryption.vmware.com"]
+    resources: ["encryptionclasses"]
+    verbs: ["get", "list", "watch"]
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

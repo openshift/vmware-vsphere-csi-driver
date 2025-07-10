@@ -24,12 +24,15 @@ import (
 	"testing"
 	"time"
 
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	v1 "k8s.io/api/core/v1"
-
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	clientset "k8s.io/client-go/kubernetes"
 	testclient "k8s.io/client-go/kubernetes/fake"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	ctrlclientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -317,6 +320,116 @@ func TestGuestClusterControllerFlowForTkgsHA(t *testing.T) {
 	}
 }
 
+// TestGuestClusterControllerFlowForWorkloadDomainIsolation creates file volume with topology.
+func TestGuestClusterControllerFlowForWorkloadDomainIsolation(t *testing.T) {
+	ct := getControllerTest(t)
+	// Create.
+	params := make(map[string]string)
+
+	params[common.AttributeSupervisorStorageClass] = testStorageClass
+	if v := os.Getenv("SUPERVISOR_STORAGE_CLASS"); v != "" {
+		params[common.AttributeSupervisorStorageClass] = v
+	}
+	capabilities := []*csi.VolumeCapability{
+		{
+			AccessMode: &csi.VolumeCapability_AccessMode{
+				Mode: csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER,
+			},
+		},
+	}
+
+	topologyRequirement := createTestTopologyRequirement()
+
+	reqCreate := &csi.CreateVolumeRequest{
+		Name: testVolumeName,
+		CapacityRange: &csi.CapacityRange{
+			RequiredBytes: 1 * common.GbInBytes,
+		},
+		Parameters:                params,
+		VolumeCapabilities:        capabilities,
+		AccessibilityRequirements: topologyRequirement,
+	}
+
+	var respCreate *csi.CreateVolumeResponse
+	var err error
+
+	if isUnitTest {
+		// Invoking CreateVolume in a separate thread and then setting the
+		// Status to Bound explicitly.
+		response := make(chan *csi.CreateVolumeResponse)
+		error := make(chan error)
+
+		go createVolume(ctx, ct, reqCreate, response, error)
+		time.Sleep(1 * time.Second)
+		pvc, _ := ct.controller.supervisorClient.CoreV1().PersistentVolumeClaims(
+			ct.controller.supervisorNamespace).Get(ctx, testSupervisorPVCName, metav1.GetOptions{})
+		// Update annotation on the supervisor PVC
+		pvcAnnotations := make(map[string]string)
+		pvcAnnotations[common.AnnVolumeAccessibleTopology] = `[{"R1" : "Zone1"}]`
+		pvc.Annotations = pvcAnnotations
+		pvc.Status.Phase = "Bound"
+		_, err = ct.controller.supervisorClient.CoreV1().PersistentVolumeClaims(
+			ct.controller.supervisorNamespace).Update(ctx, pvc, metav1.UpdateOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		respCreate, err = <-response, <-error
+	} else {
+		// TODO: Skip currently until supervisor side changes are completed
+		t.Skipf("Skipping test until supervisor side changes are complete.")
+		//respCreate, err = ct.controller.CreateVolume(ctx, reqCreate)
+		// Wait for create volume finish.
+		//time.Sleep(1 * time.Second)
+		return
+	}
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify the response to ensure Accessibility topology is set.
+	if respCreate.Volume.AccessibleTopology == nil {
+		t.Fatalf("AccessibleTopology was unset when volume was created with topology on guest cluster")
+	}
+
+	// Retrieve the segments
+	respAccessibleTopology := respCreate.Volume.AccessibleTopology[0].Segments
+	if val, ok := respAccessibleTopology["R1"]; !ok {
+		t.Fatalf("AccessibleTopology inccorectly populated, key not present")
+	} else {
+		if val != "Zone1" {
+			t.Fatalf("AccessibleTopology inccorectly populated, value incorrect")
+		}
+	}
+	t.Log("AccessibleTopology was correctly set in create volume response")
+
+	supervisorPVCName := respCreate.Volume.VolumeId
+	// Verify the pvc has been created.
+	_, err = ct.controller.supervisorClient.CoreV1().PersistentVolumeClaims(
+		ct.controller.supervisorNamespace).Get(ctx, supervisorPVCName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Delete.
+	reqDelete := &csi.DeleteVolumeRequest{
+		VolumeId: supervisorPVCName,
+	}
+	_, err = ct.controller.DeleteVolume(ctx, reqDelete)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for delete volume finish.
+	time.Sleep(1 * time.Second)
+	// Verify the pvc has been deleted.
+	_, err = ct.controller.supervisorClient.CoreV1().PersistentVolumeClaims(
+		ct.controller.supervisorNamespace).Get(ctx, supervisorPVCName, metav1.GetOptions{})
+	if !errors.IsNotFound(err) {
+		t.Fatal(err)
+	}
+}
+
 func createTestTopologyRequirement() *csi.TopologyRequirement {
 	// Create a dummy topology requirement.
 	segment := make(map[string]string)
@@ -415,4 +528,113 @@ func TestGenerateGuestClusterRequestedTopologyJSON(t *testing.T) {
 	}
 	t.Logf("volumeAccessibleTopologyJSON %v match with expectedVolumeAccessibleTopologyJSON: %v",
 		volumeAccessibleTopologyJSON, expectedVolumeAccessibleTopologyJSON)
+}
+
+func TestVirtualMachineVolumePatchWithOptimisticMerge(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = vmoperatortypes.AddToScheme(scheme)
+
+	client := ctrlclientfake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(&vmoperatortypes.VirtualMachine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "my-vm",
+				Namespace: "my-namespace",
+			},
+			Spec: vmoperatortypes.VirtualMachineSpec{
+				Volumes: []vmoperatortypes.VirtualMachineVolume{
+					{
+						Name: "my-vol-1",
+						VirtualMachineVolumeSource: vmoperatortypes.VirtualMachineVolumeSource{
+							PersistentVolumeClaim: &vmoperatortypes.PersistentVolumeClaimVolumeSource{
+								PersistentVolumeClaimVolumeSource: v1.PersistentVolumeClaimVolumeSource{
+									ClaimName: "my-pvc-1",
+								},
+							},
+						},
+					},
+				},
+			},
+		}).
+		WithStatusSubresource(&vmoperatortypes.VirtualMachine{}).
+		Build()
+
+	var (
+		vm1 vmoperatortypes.VirtualMachine
+		ctx = context.Background()
+		key = ctrlclient.ObjectKey{Name: "my-vm", Namespace: "my-namespace"}
+	)
+
+	if err := client.Get(ctx, key, &vm1); err != nil {
+		t.Fatal(err)
+	}
+
+	addVolumePatch := ctrlclient.MergeFromWithOptions(
+		vm1.DeepCopy(),
+		ctrlclient.MergeFromWithOptimisticLock{})
+
+	vm1.Spec.Volumes = append(
+		vm1.Spec.Volumes,
+		vmoperatortypes.VirtualMachineVolume{
+			Name: "my-vol-2",
+			VirtualMachineVolumeSource: vmoperatortypes.VirtualMachineVolumeSource{
+				PersistentVolumeClaim: &vmoperatortypes.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaimVolumeSource: v1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "my-pvc-2",
+					},
+				},
+			},
+		})
+
+	if err := client.Patch(ctx, &vm1, addVolumePatch); err != nil {
+		t.Fatal(err)
+	}
+
+	var vm2 vmoperatortypes.VirtualMachine
+	if err := client.Get(ctx, key, &vm2); err != nil {
+		t.Fatal(err)
+	}
+
+	if a, e := len(vm2.Spec.Volumes), 2; a != e {
+		t.Fatalf("invalid number of volumes: a=%d, e=%d", a, e)
+	}
+	if a, e := vm2.Spec.Volumes[0].Name, "my-vol-1"; a != e {
+		t.Fatalf("invalid volume name: a=%s, e=%s", a, e)
+	}
+	if a, e := vm2.Spec.Volumes[1].Name, "my-vol-2"; a != e {
+		t.Fatalf("invalid volume name: a=%s, e=%s", a, e)
+	}
+
+	rmVolumePatch := ctrlclient.MergeFromWithOptions(
+		vm2.DeepCopy(),
+		ctrlclient.MergeFromWithOptimisticLock{})
+
+	vm2.Spec.Volumes = []vmoperatortypes.VirtualMachineVolume{
+		{
+			Name: "my-vol-2",
+			VirtualMachineVolumeSource: vmoperatortypes.VirtualMachineVolumeSource{
+				PersistentVolumeClaim: &vmoperatortypes.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaimVolumeSource: v1.PersistentVolumeClaimVolumeSource{
+						ClaimName: "my-pvc-2",
+					},
+				},
+			},
+		},
+	}
+
+	if err := client.Patch(ctx, &vm2, rmVolumePatch); err != nil {
+		t.Fatal(err)
+	}
+
+	var vm3 vmoperatortypes.VirtualMachine
+	if err := client.Get(ctx, key, &vm3); err != nil {
+		t.Fatal(err)
+	}
+
+	if a, e := len(vm3.Spec.Volumes), 1; a != e {
+		t.Fatalf("invalid number of volumes: a=%d, e=%d", a, e)
+	}
+	if a, e := vm3.Spec.Volumes[0].Name, "my-vol-2"; a != e {
+		t.Fatalf("invalid volume name: a=%s, e=%s", a, e)
+	}
 }

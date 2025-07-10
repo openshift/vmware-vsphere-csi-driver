@@ -22,16 +22,12 @@ import (
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	csilibplugins "k8s.io/csi-translation-lib/plugins"
-	v1helper "k8s.io/kubernetes/pkg/apis/core/v1/helper"
-	"k8s.io/kubernetes/pkg/features"
-	"k8s.io/kubernetes/pkg/scheduler/framework"
 )
 
 // isCSIMigrationOn returns a boolean value indicating whether
 // the CSI migration has been enabled for a particular storage plugin.
-func isCSIMigrationOn(csiNode *storagev1.CSINode, pluginName string) bool {
+func isCSIMigrationOn(csiNode *storagev1.CSINode, pluginName string, enableCSIMigrationPortworx bool) bool {
 	if csiNode == nil || len(pluginName) == 0 {
 		return false
 	}
@@ -42,21 +38,15 @@ func isCSIMigrationOn(csiNode *storagev1.CSINode, pluginName string) bool {
 	case csilibplugins.AWSEBSInTreePluginName:
 		return true
 	case csilibplugins.PortworxVolumePluginName:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationPortworx) {
+		if !enableCSIMigrationPortworx {
 			return false
 		}
 	case csilibplugins.GCEPDInTreePluginName:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationGCE) {
-			return false
-		}
+		return true
 	case csilibplugins.AzureDiskInTreePluginName:
 		return true
 	case csilibplugins.CinderInTreePluginName:
 		return true
-	case csilibplugins.RBDVolumePluginName:
-		if !utilfeature.DefaultFeatureGate.Enabled(features.CSIMigrationRBD) {
-			return false
-		}
 	default:
 		return false
 	}
@@ -68,25 +58,14 @@ func isCSIMigrationOn(csiNode *storagev1.CSINode, pluginName string) bool {
 		return false
 	}
 
-	var mpaSet sets.String
+	var mpaSet sets.Set[string]
 	mpa := csiNodeAnn[v1.MigratedPluginsAnnotationKey]
 	if len(mpa) == 0 {
-		mpaSet = sets.NewString()
+		mpaSet = sets.New[string]()
 	} else {
 		tok := strings.Split(mpa, ",")
-		mpaSet = sets.NewString(tok...)
+		mpaSet = sets.New(tok...)
 	}
 
 	return mpaSet.Has(pluginName)
-}
-
-// volumeLimits returns volume limits associated with the node.
-func volumeLimits(n *framework.NodeInfo) map[v1.ResourceName]int64 {
-	volumeLimits := map[v1.ResourceName]int64{}
-	for k, v := range n.Allocatable.ScalarResources {
-		if v1helper.IsAttachableVolumeResourceName(k) {
-			volumeLimits[k] = v
-		}
-	}
-	return volumeLimits
 }

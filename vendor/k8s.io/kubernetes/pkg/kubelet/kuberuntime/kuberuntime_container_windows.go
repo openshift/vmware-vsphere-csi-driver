@@ -24,7 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	runtimeapi "k8s.io/cri-api/pkg/apis/runtime/v1"
 	"k8s.io/klog/v2"
+	"k8s.io/kubernetes/pkg/kubelet/cm"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
+	"k8s.io/kubernetes/pkg/kubelet/types"
 	"k8s.io/kubernetes/pkg/kubelet/winstats"
 	"k8s.io/kubernetes/pkg/securitycontext"
 )
@@ -42,19 +44,29 @@ func (m *kubeGenericRuntimeManager) applyPlatformSpecificContainerConfig(config 
 
 // generateContainerResources generates platform specific (windows) container resources config for runtime
 func (m *kubeGenericRuntimeManager) generateContainerResources(pod *v1.Pod, container *v1.Container) *runtimeapi.ContainerResources {
-	//TODO: Add windows support
+	return &runtimeapi.ContainerResources{
+		Windows: m.generateWindowsContainerResources(pod, container),
+	}
+}
+
+// generateUpdatePodSandboxResourcesRequest generates platform specific podsandox resources config for runtime
+func (m *kubeGenericRuntimeManager) generateUpdatePodSandboxResourcesRequest(sandboxID string, pod *v1.Pod, podResources *cm.ResourceConfig) *runtimeapi.UpdatePodSandboxResourcesRequest {
 	return nil
 }
 
-// generateWindowsContainerConfig generates windows container config for kubelet runtime v1.
-// Refer https://git.k8s.io/design-proposals-archive/node/cri-windows.md.
-func (m *kubeGenericRuntimeManager) generateWindowsContainerConfig(container *v1.Container, pod *v1.Pod, uid *int64, username string) (*runtimeapi.WindowsContainerConfig, error) {
-	wc := &runtimeapi.WindowsContainerConfig{
-		Resources:       &runtimeapi.WindowsContainerResources{},
-		SecurityContext: &runtimeapi.WindowsContainerSecurityContext{},
-	}
+// generateWindowsContainerResources generates windows container resources config for runtime
+func (m *kubeGenericRuntimeManager) generateWindowsContainerResources(pod *v1.Pod, container *v1.Container) *runtimeapi.WindowsContainerResources {
+	wcr := m.calculateWindowsResources(container.Resources.Limits.Cpu(), container.Resources.Limits.Memory())
 
-	cpuLimit := container.Resources.Limits.Cpu()
+	return wcr
+}
+
+// calculateWindowsResources will create the windowsContainerResources type based on the provided CPU and memory resource requests, limits
+func (m *kubeGenericRuntimeManager) calculateWindowsResources(cpuLimit, memoryLimit *resource.Quantity) *runtimeapi.WindowsContainerResources {
+	resources := runtimeapi.WindowsContainerResources{}
+
+	memLimit := memoryLimit.Value()
+
 	if !cpuLimit.IsZero() {
 		// Since Kubernetes doesn't have any notion of weight in the Pod/Container API, only limits/reserves, then applying CpuMaximum only
 		// will better follow the intent of the user. At one point CpuWeights were set, but this prevented limits from having any effect.
@@ -79,22 +91,32 @@ func (m *kubeGenericRuntimeManager) generateWindowsContainerConfig(container *v1
 		//   https://github.com/kubernetes/kubernetes/blob/56d1c3b96d0a544130a82caad33dd57629b8a7f8/staging/src/k8s.io/cri-api/pkg/apis/runtime/v1/api.proto#L681-L682
 		//   https://github.com/opencontainers/runtime-spec/blob/ad53dcdc39f1f7f7472b10aa0a45648fe4865496/config-windows.md#cpu
 		//   If both CpuWeight and CpuMaximum are set - ContainerD catches this invalid case and returns an error instead.
-		wc.Resources.CpuMaximum = calculateCPUMaximum(cpuLimit, int64(winstats.ProcessorCount()))
+		resources.CpuMaximum = calculateCPUMaximum(cpuLimit, int64(winstats.ProcessorCount()))
 	}
 
 	// The processor resource controls are mutually exclusive on
 	// Windows Server Containers, the order of precedence is
 	// CPUCount first, then CPUMaximum.
-	if wc.Resources.CpuCount > 0 {
-		if wc.Resources.CpuMaximum > 0 {
-			wc.Resources.CpuMaximum = 0
+	if resources.CpuCount > 0 {
+		if resources.CpuMaximum > 0 {
+			resources.CpuMaximum = 0
 			klog.InfoS("Mutually exclusive options: CPUCount priority > CPUMaximum priority on Windows Server Containers. CPUMaximum should be ignored")
 		}
 	}
 
-	memoryLimit := container.Resources.Limits.Memory().Value()
-	if memoryLimit != 0 {
-		wc.Resources.MemoryLimitInBytes = memoryLimit
+	if memLimit != 0 {
+		resources.MemoryLimitInBytes = memLimit
+	}
+
+	return &resources
+}
+
+// generateWindowsContainerConfig generates windows container config for kubelet runtime v1.
+// Refer https://github.com/kubernetes/community/blob/master/contributors/design-proposals/node/cri-windows.md.
+func (m *kubeGenericRuntimeManager) generateWindowsContainerConfig(container *v1.Container, pod *v1.Pod, uid *int64, username string) (*runtimeapi.WindowsContainerConfig, error) {
+	wc := &runtimeapi.WindowsContainerConfig{
+		Resources:       m.generateWindowsContainerResources(pod, container),
+		SecurityContext: &runtimeapi.WindowsContainerSecurityContext{},
 	}
 
 	// setup security context
@@ -134,6 +156,35 @@ func calculateCPUMaximum(cpuLimit *resource.Quantity, cpuCount int64) int64 {
 }
 
 func toKubeContainerResources(statusResources *runtimeapi.ContainerResources) *kubecontainer.ContainerResources {
-	//TODO: Add windows support
+	var cStatusResources *kubecontainer.ContainerResources
+	runtimeStatusResources := statusResources.GetWindows()
+	if runtimeStatusResources != nil {
+		var memLimit, cpuLimit *resource.Quantity
+
+		// Used the reversed formula from the calculateCPUMaximum function
+		if runtimeStatusResources.CpuMaximum > 0 {
+			cpuLimitValue := runtimeStatusResources.CpuMaximum * int64(winstats.ProcessorCount()) / 10
+			cpuLimit = resource.NewMilliQuantity(cpuLimitValue, resource.DecimalSI)
+		}
+
+		if runtimeStatusResources.MemoryLimitInBytes > 0 {
+			memLimit = resource.NewQuantity(runtimeStatusResources.MemoryLimitInBytes, resource.BinarySI)
+		}
+
+		if cpuLimit != nil || memLimit != nil {
+			cStatusResources = &kubecontainer.ContainerResources{
+				CPULimit:    cpuLimit,
+				MemoryLimit: memLimit,
+			}
+		}
+	}
+	return cStatusResources
+}
+
+func toKubeContainerUser(statusUser *runtimeapi.ContainerUser) *kubecontainer.ContainerUser {
 	return nil
+}
+
+func (m *kubeGenericRuntimeManager) GetContainerSwapBehavior(pod *v1.Pod, container *v1.Container) types.SwapBehavior {
+	return types.NoSwap
 }

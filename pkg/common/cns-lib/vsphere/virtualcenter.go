@@ -146,6 +146,8 @@ type VirtualCenterConfig struct {
 	// when ReloadVCConfigForNewClient is set to true it forces re-read config secret when
 	// new vc client needs to be created
 	ReloadVCConfigForNewClient bool
+	// FileVolumeActivated indicates whether file service has been enabled on any vSAN cluster or not
+	FileVolumeActivated bool
 }
 
 // NewClient creates a new govmomi Client instance.
@@ -265,7 +267,7 @@ func (vc *VirtualCenter) Connect(ctx context.Context) error {
 	defer vc.ClientMutex.Unlock()
 
 	// Set up the vc connection.
-	err := vc.connect(ctx, false)
+	err := vc.connect(ctx)
 	if err != nil {
 		log.Errorf("Cannot connect to vCenter with err: %v", err)
 		// Logging out of the current session to make sure the retry create
@@ -283,7 +285,7 @@ func (vc *VirtualCenter) Connect(ctx context.Context) error {
 }
 
 // connect creates a connection to the virtual center host.
-func (vc *VirtualCenter) connect(ctx context.Context, requestNewSession bool) error {
+func (vc *VirtualCenter) connect(ctx context.Context) error {
 	log := logger.GetLogger(ctx)
 
 	// If client was never initialized, initialize one.
@@ -311,25 +313,26 @@ func (vc *VirtualCenter) connect(ctx context.Context, requestNewSession bool) er
 		log.Infof("VirtualCenter.connect() successfully created new client")
 		return nil
 	}
-	if !requestNewSession {
-		// If session hasn't expired, nothing to do.
-		sessionMgr := session.NewManager(vc.Client.Client)
-		// SessionMgr.UserSession(ctx) retrieves and returns the SessionManager's
-		// CurrentSession field. Nil is returned if the session is not
-		// authenticated or timed out.
-		if userSession, err := sessionMgr.UserSession(ctx); err != nil {
-			log.Errorf("failed to obtain user session with err: %v", err)
-			return err
-		} else if userSession != nil {
-			return nil
-		}
+
+	// If session hasn't expired, nothing to do.
+	sessionMgr := session.NewManager(vc.Client.Client)
+	// SessionMgr.UserSession(ctx) retrieves and returns the SessionManager's
+	// CurrentSession field. Nil is returned if the session is not
+	// authenticated or timed out.
+	if userSession, err := sessionMgr.UserSession(ctx); err != nil {
+		log.Errorf("failed to obtain user session with err: %v", err)
+		return err
+	} else if userSession != nil {
+		return nil
 	}
 
 	log.Infof("logging out current session and clearing idle sessions")
 
-	err = vc.Client.Logout(ctx)
-	if err != nil {
-		log.Errorf("failed to logout current session. still clearing idle sessions. err: %v", err)
+	if vc.Client != nil && vc.Client.Client != nil {
+		err = vc.Client.Logout(ctx)
+		if err != nil {
+			log.Errorf("failed to logout current session. still clearing idle sessions. err: %v", err)
+		}
 	}
 
 	// If session has expired, create a new instance.
@@ -744,7 +747,7 @@ func (vc *VirtualCenter) GetAllVirtualMachines(ctx context.Context,
 	if len(hostObjList) < 1 {
 		msg := "host object list is empty"
 		log.Errorf(msg+": %v", hostObjList)
-		return nil, fmt.Errorf(msg)
+		return nil, fmt.Errorf("%s", msg)
 	}
 
 	properties := []string{"vm"}

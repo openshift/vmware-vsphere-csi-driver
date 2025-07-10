@@ -19,10 +19,11 @@ package e2e
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
-	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v6/apis/volumesnapshot/v1"
-	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v6/clientset/versioned"
+	snapV1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	snapclient "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/vmware/govmomi/object"
@@ -43,7 +44,7 @@ func govcLoginCmd() string {
 	loginCmd := "export GOVC_INSECURE=1;"
 	loginCmd += fmt.Sprintf("export GOVC_URL='https://%s:%s@%s:%s';",
 		e2eVSphere.Config.Global.User, e2eVSphere.Config.Global.Password,
-		e2eVSphere.Config.Global.VCenterHostname, e2eVSphere.Config.Global.VCenterPort)
+		e2eVSphere.Config.Global.VCenterHostname, defaultVcAdminPortNum)
 	return loginCmd
 }
 
@@ -56,6 +57,7 @@ func getTopologyLevel5ClusterGroupNames(masterIp string, sshClientConfig *ssh.Cl
 	var clusterList, clusList, clusFolderTemp, clusterGroupRes []string
 	var clusterFolderName string
 	var clusterFolder, clusterGroup, cluster string
+
 	for i := 0; i < len(dataCenter); i++ {
 		if !multivc {
 			clusterFolder = govcLoginCmd() + "govc ls " + dataCenter[i].InventoryPath
@@ -94,28 +96,43 @@ func getTopologyLevel5ClusterGroupNames(masterIp string, sshClientConfig *ssh.Cl
 			clusterGroupRes = strings.Split(clusterGroupResult.Stdout, "\n")
 		}
 		if !multivc {
-			cluster = govcLoginCmd() + "govc ls " + clusterGroupRes[0] + " | sort"
+			/* Reading the topology setup type (Level 2 or Level 5), and based on the selected setup type,
+			fetching the list of clusters */
+			topologySetupType := GetAndExpectStringEnvVar(envTopologySetupType)
 
-			framework.Logf("cmd: %s ", cluster)
-			clusterResult, err := sshExec(sshClientConfig, masterIp, cluster)
-			if err != nil && clusterResult.Code != 0 {
-				fssh.LogResult(clusterResult)
-				return nil, fmt.Errorf("couldn't execute command: %s on host: %v , error: %s",
-					cluster, masterIp, err)
+			if topologySetupType == "Level2" {
+				var clusterRes []string
+				for _, str := range clusterGroupRes {
+					if str != "" {
+						clusterRes = append(clusterRes, str)
+					}
+				}
+				sort.Strings(clusterRes)
+				return clusterRes, nil
+			} else if topologySetupType == "Level5" {
+				cluster = govcLoginCmd() + "govc ls " + clusterGroupRes[0] + " | sort"
+				framework.Logf("cmd: %s ", cluster)
+				clusterResult, err := sshExec(sshClientConfig, masterIp, cluster)
+				if err != nil && clusterResult.Code != 0 {
+					fssh.LogResult(clusterResult)
+					return nil, fmt.Errorf("couldn't execute command: %s on host: %v , error: %s",
+						cluster, masterIp, err)
+				}
+				if clusterResult.Stdout != "" {
+					clusListTemp := strings.Split(clusterResult.Stdout, "\n")
+					clusList = append(clusList, clusListTemp...)
+				}
+				for i := 0; i < len(clusList)-1; i++ {
+					clusterList = append(clusterList, clusList[i])
+				}
+				clusList = nil
 			}
-			if clusterResult.Stdout != "" {
-				clusListTemp := strings.Split(clusterResult.Stdout, "\n")
-				clusList = append(clusList, clusListTemp...)
-			}
-			for i := 0; i < len(clusList)-1; i++ {
-				clusterList = append(clusterList, clusList[i])
-			}
-			clusList = nil
 		} else {
 			return clusterGroupRes, nil
 		}
 	}
 	return clusterList, nil
+
 }
 
 /*
@@ -263,12 +280,14 @@ func verifyVolumeProvisioningForStatefulSet(ctx context.Context,
 	multipleAllowedTopology bool, parallelStatefulSetCreation bool, multiVCDsUrls []string) error {
 	counter := 0
 	stsPodCount := 0
+	var err error
 	var dsUrls []string
 	var ssPodsBeforeScaleDown *v1.PodList
 	if parallelStatefulSetCreation {
 		ssPodsBeforeScaleDown = GetListOfPodsInSts(client, statefulset)
 	} else {
-		ssPodsBeforeScaleDown = fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err = fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	stsPodCount = len(ssPodsBeforeScaleDown.Items)
 	if !multivc {
@@ -522,7 +541,7 @@ func createTagForPreferredDatastore(masterIp string, sshClientConfig *ssh.Client
 		} else {
 			createTagCat = govcLoginCmdForMultiVC(i) +
 				"govc tags.create -d '" + preferredTagDesc + "' -c " + preferredDSCat + " " + tagName[i]
-			framework.Logf(createTagCat)
+			framework.Logf("%q", createTagCat)
 		}
 		framework.Logf("Creating tag for preferred datastore: %s ", createTagCat)
 		createTagCatRes, err := sshExec(sshClientConfig, masterIp, createTagCat)

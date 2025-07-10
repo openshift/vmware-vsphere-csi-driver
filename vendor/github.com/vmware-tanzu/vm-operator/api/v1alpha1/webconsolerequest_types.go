@@ -1,4 +1,5 @@
-// Copyright (c) 2021-2023 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -51,6 +52,7 @@ type WebConsoleRequestStatus struct {
 // +kubebuilder:resource:scope=Namespaced
 // +kubebuilder:storageversion
 // +kubebuilder:subresource:status
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // WebConsoleRequest allows the creation of a one-time web console ticket that can be used to interact with the VM.
 type WebConsoleRequest struct {
@@ -66,6 +68,7 @@ func (s *WebConsoleRequest) NamespacedName() string {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // WebConsoleRequestList contains a list of WebConsoleRequests.
 type WebConsoleRequestList struct {
@@ -75,5 +78,5 @@ type WebConsoleRequestList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&WebConsoleRequest{}, &WebConsoleRequestList{})
+	objectTypes = append(objectTypes, &WebConsoleRequest{}, &WebConsoleRequestList{})
 }

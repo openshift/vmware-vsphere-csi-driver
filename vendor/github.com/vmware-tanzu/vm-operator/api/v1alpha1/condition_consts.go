@@ -1,4 +1,5 @@
-// Copyright (c) 2021 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -39,6 +40,12 @@ const (
 	// VirtualMachineImageNotReadyReason (Severity=Error) documents that the VirtualMachineImage specified in the VirtualMachineSpec
 	// is not ready.
 	VirtualMachineImageNotReadyReason = "VirtualMachineImageNotReady"
+)
+
+const (
+	// GuestBootstrapCondition exposes the status of guest bootstrap from within
+	// the guest OS, when available.
+	GuestBootstrapCondition ConditionType = "GuestBootstrap"
 )
 
 const (
@@ -95,7 +102,7 @@ const (
 	VirtualMachineImageOSTypeSupportedCondition ConditionType = "VirtualMachineImageOSTypeSupported"
 
 	// VirtualMachineImageV1Alpha1CompatibleCondition denotes image compatibility with VMService. VMService expects
-	// VirtualMachineImage to be prepared by VMware specifically for VMService v1alpha1.
+	// VirtualMachineImage to be prepared by VMware specifically for VMService vmopv1a1.
 	VirtualMachineImageV1Alpha1CompatibleCondition ConditionType = "VirtualMachineImageV1Alpha1Compatible"
 
 	// VirtualMachineImageSyncedCondition denotes that the image is synced with the vSphere content library item

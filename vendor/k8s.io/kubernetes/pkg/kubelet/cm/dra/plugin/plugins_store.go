@@ -17,60 +17,80 @@ limitations under the License.
 package plugin
 
 import (
+	"errors"
+	"fmt"
+	"slices"
 	"sync"
-
-	utilversion "k8s.io/apimachinery/pkg/util/version"
 )
 
-// Plugin is a description of a DRA Plugin, defined by an endpoint
-// and the highest DRA version supported.
-type Plugin struct {
-	endpoint                string
-	highestSupportedVersion *utilversion.Version
+// PluginsStore holds a list of DRA Plugins.
+type pluginsStore struct {
+	sync.RWMutex
+	// plugin name -> Plugin in the order in which they got added
+	store map[string][]*Plugin
 }
 
-// PluginsStore holds a list of DRA Plugins.
-type PluginsStore struct {
-	sync.RWMutex
-	store map[string]*Plugin
-}
+// draPlugins map keeps track of all registered DRA plugins on the node
+// and their corresponding sockets.
+var draPlugins = &pluginsStore{}
 
 // Get lets you retrieve a DRA Plugin by name.
 // This method is protected by a mutex.
-func (s *PluginsStore) Get(pluginName string) *Plugin {
+func (s *pluginsStore) get(pluginName string) *Plugin {
 	s.RLock()
 	defer s.RUnlock()
 
-	return s.store[pluginName]
+	instances := s.store[pluginName]
+	if len(instances) == 0 {
+		return nil
+	}
+	// Heuristic: pick the most recent one. It's most likely
+	// the newest, except when kubelet got restarted and registered
+	// all running plugins in random order.
+	return instances[len(instances)-1]
 }
 
 // Set lets you save a DRA Plugin to the list and give it a specific name.
 // This method is protected by a mutex.
-func (s *PluginsStore) Set(pluginName string, plugin *Plugin) {
+func (s *pluginsStore) add(p *Plugin) error {
 	s.Lock()
 	defer s.Unlock()
 
 	if s.store == nil {
-		s.store = make(map[string]*Plugin)
+		s.store = make(map[string][]*Plugin)
+	}
+	for _, oldP := range s.store[p.name] {
+		if oldP.endpoint == p.endpoint {
+			// One plugin instance cannot hijack the endpoint of another instance.
+			return fmt.Errorf("endpoint %s already registered for plugin %s", p.endpoint, p.name)
+		}
+	}
+	s.store[p.name] = append(s.store[p.name], p)
+	return nil
+}
+
+// remove lets you remove one endpoint for a DRA Plugin.
+// This method is protected by a mutex. It returns the
+// plugin if found and true if that was the last instance
+func (s *pluginsStore) remove(pluginName, endpoint string) (*Plugin, bool) {
+	s.Lock()
+	defer s.Unlock()
+
+	instances := s.store[pluginName]
+	i := slices.IndexFunc(instances, func(p *Plugin) bool { return p.endpoint == endpoint })
+	if i == -1 {
+		return nil, false
+	}
+	p := instances[i]
+	last := len(instances) == 1
+	if last {
+		delete(s.store, pluginName)
+	} else {
+		s.store[pluginName] = slices.Delete(instances, i, i+1)
 	}
 
-	s.store[pluginName] = plugin
-}
-
-// Delete lets you delete a DRA Plugin by name.
-// This method is protected by a mutex.
-func (s *PluginsStore) Delete(pluginName string) {
-	s.Lock()
-	defer s.Unlock()
-
-	delete(s.store, pluginName)
-}
-
-// Clear deletes all entries in the store.
-// This methiod is protected by a mutex.
-func (s *PluginsStore) Clear() {
-	s.Lock()
-	defer s.Unlock()
-
-	s.store = make(map[string]*Plugin)
+	if p.cancel != nil {
+		p.cancel(errors.New("plugin got removed"))
+	}
+	return p, last
 }

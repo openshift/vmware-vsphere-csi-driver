@@ -1,4 +1,5 @@
-// Copyright (c) 2020 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -22,6 +23,7 @@ type ContentLibraryProviderStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Content-Library-UUID",type="string",JSONPath=".spec.uuid",description="UUID of the vSphere content library"
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // ContentLibraryProvider is the Schema for the contentlibraryproviders API.
 type ContentLibraryProvider struct {
@@ -33,6 +35,7 @@ type ContentLibraryProvider struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // ContentLibraryProviderList contains a list of ContentLibraryProvider.
 type ContentLibraryProviderList struct {
@@ -42,5 +45,5 @@ type ContentLibraryProviderList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ContentLibraryProvider{}, &ContentLibraryProviderList{})
+	objectTypes = append(objectTypes, &ContentLibraryProvider{}, &ContentLibraryProviderList{})
 }

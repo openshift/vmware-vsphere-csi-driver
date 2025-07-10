@@ -24,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -42,6 +42,7 @@ import (
 	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool/cns/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
@@ -161,13 +162,12 @@ func validateWCPControllerExpandVolumeRequest(ctx context.Context, req *csi.Cont
 			return logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to get config with error: %+v", err)
 		}
-		vmOperatorClient, err := k8s.NewClientForGroup(ctx, cfg, vmoperatorv1alpha1.GroupName)
+		vmOperatorClient, err := k8s.NewClientForGroup(ctx, cfg, vmoperatorv1alpha4.GroupName)
 		if err != nil {
 			return logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to get client for group %s with error: %+v", vmoperatorv1alpha1.GroupName, err)
+				"failed to get client for group %s with error: %+v", vmoperatorv1alpha4.GroupName, err)
 		}
-		vmList := &vmoperatorv1alpha1.VirtualMachineList{}
-		err = vmOperatorClient.List(ctx, vmList)
+		vmList, err := utils.GetVirtualMachineListAllApiVersions(ctx, "", vmOperatorClient)
 		if err != nil {
 			return logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to list virtualmachines with error: %+v", err)
@@ -245,7 +245,7 @@ func getK8sCloudOperatorClientConnection(ctx context.Context) (*grpc.ClientConn,
 	port := common.GetK8sCloudOperatorServicePort(ctx)
 	k8sCloudOperatorServiceAddr := "127.0.0.1:" + strconv.Itoa(port)
 	// Connect to k8s cloud operator gRPC service.
-	conn, err := grpc.Dial(k8sCloudOperatorServiceAddr, opts...)
+	conn, err := grpc.NewClient(k8sCloudOperatorServiceAddr, opts...)
 	if err != nil {
 		return nil, err
 	}

@@ -45,7 +45,6 @@ import (
 	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	e2epodoutput "k8s.io/kubernetes/test/e2e/framework/pod/output"
 	e2eskipper "k8s.io/kubernetes/test/e2e/framework/skipper"
-	e2essh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 	netutils "k8s.io/utils/net"
 )
@@ -89,9 +88,6 @@ const (
 	// the destination will echo its hostname.
 	echoHostname = "hostname"
 )
-
-// NetexecImageName is the image name for agnhost.
-var NetexecImageName = imageutils.GetE2EImage(imageutils.Agnhost)
 
 // Option is used to configure the NetworkingTest object
 type Option func(*NetworkingTestConfig)
@@ -258,7 +254,7 @@ func (config *NetworkingTestConfig) diagnoseMissingEndpoints(foundEndpoints sets
 		framework.Logf("\nOutput of kubectl describe pod %v/%v:\n", e.Namespace, e.Name)
 		desc, _ := e2ekubectl.RunKubectl(
 			e.Namespace, "describe", "pod", e.Name, fmt.Sprintf("--namespace=%v", e.Namespace))
-		framework.Logf(desc)
+		framework.Logf("%s", desc)
 	}
 }
 
@@ -266,8 +262,30 @@ func (config *NetworkingTestConfig) diagnoseMissingEndpoints(foundEndpoints sets
 func (config *NetworkingTestConfig) EndpointHostnames() sets.String {
 	expectedEps := sets.NewString()
 	for _, p := range config.EndpointPods {
+
 		if config.EndpointsHostNetwork {
-			expectedEps.Insert(p.Spec.NodeSelector["kubernetes.io/hostname"])
+			// Hostname behavior for hostNetwork pods is not well defined and when
+			// using the flag hostname-override in the kubelet, the node reported
+			// hostname on host network pods will not match the node's hostanme.
+			// It seems that the node.status.addresses hostname value is the only
+			// one that matches the value returned by os.Hostname
+			// used by the agnhost web handler, so we'll use that value.
+			// If by any circumstances the node does not provide that hostnae address
+			// we use the value of the node name.
+			// xref: https://issues.k8s.io/126087
+			hostname := p.Spec.NodeSelector["kubernetes.io/hostname"]
+			for _, n := range config.Nodes {
+				if n.Name == p.Spec.NodeSelector["kubernetes.io/hostname"] {
+					for _, address := range n.Status.Addresses {
+						if address.Type == v1.NodeHostName {
+							hostname = address.Address
+							break
+						}
+					}
+					break
+				}
+			}
+			expectedEps.Insert(hostname)
 		} else {
 			expectedEps.Insert(p.Name)
 		}
@@ -328,6 +346,12 @@ func (config *NetworkingTestConfig) DialFromContainer(ctx context.Context, proto
 				responses.Insert(trimmed)
 			}
 		}
+		if responses.Difference(expectedResponses).Len() > 0 {
+			returnMsg := fmt.Errorf("received unexpected responses... \nAttempt %d\nCommand %v\nretrieved %v\nexpected %v", i, cmd, responses, expectedResponses)
+			framework.Logf("encountered error during dial (%v)", returnMsg)
+			return returnMsg
+		}
+
 		framework.Logf("Waiting for responses: %v", expectedResponses.Difference(responses))
 
 		// Check against i+1 so we exit if minTries == maxTries.
@@ -419,9 +443,8 @@ func (config *NetworkingTestConfig) GetResponseFromTestContainer(ctx context.Con
 
 // GetHTTPCodeFromTestContainer executes a curl via kubectl exec in a test container and returns the status code.
 func (config *NetworkingTestConfig) GetHTTPCodeFromTestContainer(ctx context.Context, path, targetIP string, targetPort int) (int, error) {
-	cmd := fmt.Sprintf("curl -g -q -s -o /dev/null -w %%{http_code} http://%s:%d%s",
-		targetIP,
-		targetPort,
+	cmd := fmt.Sprintf("curl -g -q -s -o /dev/null -w %%{http_code} http://%s%s",
+		net.JoinHostPort(targetIP, strconv.Itoa(targetPort)),
 		path)
 	stdout, stderr, err := e2epod.ExecShellInPodWithFullOutput(ctx, config.f, config.TestContainerPod.Name, cmd)
 	// We only care about the status code reported by curl,
@@ -526,16 +549,16 @@ func (config *NetworkingTestConfig) executeCurlCmd(ctx context.Context, cmd stri
 	const retryTimeout = 30 * time.Second
 	podName := config.HostTestContainerPod.Name
 	var msg string
-	if pollErr := wait.PollImmediateWithContext(ctx, retryInterval, retryTimeout, func(ctx context.Context) (bool, error) {
+	if pollErr := wait.PollUntilContextTimeout(ctx, retryInterval, retryTimeout, true, func(ctx context.Context) (bool, error) {
 		stdout, err := e2epodoutput.RunHostCmd(config.Namespace, podName, cmd)
 		if err != nil {
 			msg = fmt.Sprintf("failed executing cmd %v in %v/%v: %v", cmd, config.Namespace, podName, err)
-			framework.Logf(msg)
+			framework.Logf("%s", msg)
 			return false, nil
 		}
 		if !strings.Contains(stdout, expected) {
 			msg = fmt.Sprintf("successfully executed %v in %v/%v, but output '%v' doesn't contain expected string '%v'", cmd, config.Namespace, podName, stdout, expected)
-			framework.Logf(msg)
+			framework.Logf("%s", msg)
 			return false, nil
 		}
 		return true, nil
@@ -587,7 +610,7 @@ func (config *NetworkingTestConfig) createNetShellPodSpec(podName, hostname stri
 			Containers: []v1.Container{
 				{
 					Name:            "webserver",
-					Image:           NetexecImageName,
+					Image:           imageutils.GetE2EImage(imageutils.Agnhost),
 					ImagePullPolicy: v1.PullIfNotPresent,
 					Args:            netexecArgs,
 					Ports: []v1.ContainerPort{
@@ -657,7 +680,7 @@ func (config *NetworkingTestConfig) createTestPodSpec() *v1.Pod {
 			Containers: []v1.Container{
 				{
 					Name:            "webserver",
-					Image:           NetexecImageName,
+					Image:           imageutils.GetE2EImage(imageutils.Agnhost),
 					ImagePullPolicy: v1.PullIfNotPresent,
 					Args: []string{
 						"netexec",
@@ -688,8 +711,8 @@ func (config *NetworkingTestConfig) createNodePortServiceSpec(svcName string, se
 		Spec: v1.ServiceSpec{
 			Type: v1.ServiceTypeNodePort,
 			Ports: []v1.ServicePort{
-				{Port: ClusterHTTPPort, Name: "http", Protocol: v1.ProtocolTCP, TargetPort: intstr.FromInt(EndpointHTTPPort)},
-				{Port: ClusterUDPPort, Name: "udp", Protocol: v1.ProtocolUDP, TargetPort: intstr.FromInt(EndpointUDPPort)},
+				{Port: ClusterHTTPPort, Name: "http", Protocol: v1.ProtocolTCP, TargetPort: intstr.FromInt32(EndpointHTTPPort)},
+				{Port: ClusterUDPPort, Name: "udp", Protocol: v1.ProtocolUDP, TargetPort: intstr.FromInt32(EndpointUDPPort)},
 			},
 			Selector:        selector,
 			SessionAffinity: sessionAffinity,
@@ -697,7 +720,7 @@ func (config *NetworkingTestConfig) createNodePortServiceSpec(svcName string, se
 	}
 
 	if config.SCTPEnabled {
-		res.Spec.Ports = append(res.Spec.Ports, v1.ServicePort{Port: ClusterSCTPPort, Name: "sctp", Protocol: v1.ProtocolSCTP, TargetPort: intstr.FromInt(EndpointSCTPPort)})
+		res.Spec.Ports = append(res.Spec.Ports, v1.ServicePort{Port: ClusterSCTPPort, Name: "sctp", Protocol: v1.ProtocolSCTP, TargetPort: intstr.FromInt32(EndpointSCTPPort)})
 	}
 	if config.DualStackEnabled {
 		requireDual := v1.IPFamilyPolicyRequireDualStack
@@ -840,10 +863,14 @@ func (config *NetworkingTestConfig) setup(ctx context.Context, selector map[stri
 	}
 
 	ginkgo.By("Waiting for NodePort service to expose endpoint")
-	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, nodePortServiceName, len(config.EndpointPods), time.Second, wait.ForeverTestTimeout)
+	numEndpoints := len(config.EndpointPods)
+	if config.DualStackEnabled {
+		numEndpoints = 2 * len(config.EndpointPods)
+	}
+	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, nodePortServiceName, numEndpoints, time.Second, wait.ForeverTestTimeout)
 	framework.ExpectNoError(err, "failed to validate endpoints for service %s in namespace: %s", nodePortServiceName, config.Namespace)
 	ginkgo.By("Waiting for Session Affinity service to expose endpoint")
-	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, sessionAffinityServiceName, len(config.EndpointPods), time.Second, wait.ForeverTestTimeout)
+	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, sessionAffinityServiceName, numEndpoints, time.Second, wait.ForeverTestTimeout)
 	framework.ExpectNoError(err, "failed to validate endpoints for service %s in namespace: %s", sessionAffinityServiceName, config.Namespace)
 }
 
@@ -885,15 +912,19 @@ func (config *NetworkingTestConfig) createNetProxyPods(ctx context.Context, podN
 // DeleteNetProxyPod deletes the first endpoint pod and waits for it being removed.
 func (config *NetworkingTestConfig) DeleteNetProxyPod(ctx context.Context) {
 	pod := config.EndpointPods[0]
-	framework.ExpectNoError(config.getPodClient().Delete(ctx, pod.Name, *metav1.NewDeleteOptions(0)))
+	framework.ExpectNoError(config.getPodClient().Delete(ctx, pod.Name, metav1.DeleteOptions{}))
 	config.EndpointPods = config.EndpointPods[1:]
 	// wait for pod being deleted.
-	err := e2epod.WaitForPodNotFoundInNamespace(ctx, config.f.ClientSet, pod.Name, config.Namespace, wait.ForeverTestTimeout)
+	err := e2epod.WaitForPodNotFoundInNamespace(ctx, config.f.ClientSet, pod.Name, config.Namespace, config.f.Timeouts.PodDelete)
 	if err != nil {
 		framework.Failf("Failed to delete %s pod: %v", pod.Name, err)
 	}
 	// wait for endpoint being removed.
-	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, nodePortServiceName, len(config.EndpointPods), time.Second, wait.ForeverTestTimeout)
+	numEndpoints := len(config.EndpointPods)
+	if config.DualStackEnabled {
+		numEndpoints = 2 * len(config.EndpointPods)
+	}
+	err = framework.WaitForServiceEndpointsNum(ctx, config.f.ClientSet, config.Namespace, nodePortServiceName, numEndpoints, time.Second, wait.ForeverTestTimeout)
 	if err != nil {
 		framework.Failf("Failed to remove endpoint from service: %s", nodePortServiceName)
 	}
@@ -1075,104 +1106,9 @@ func httpGetNoConnectionPoolTimeout(url string, timeout time.Duration) (*http.Re
 	return client.Get(url)
 }
 
-// TestUnderTemporaryNetworkFailure blocks outgoing network traffic on 'node'. Then runs testFunc and returns its status.
-// At the end (even in case of errors), the network traffic is brought back to normal.
-// This function executes commands on a node so it will work only for some
-// environments.
-func TestUnderTemporaryNetworkFailure(ctx context.Context, c clientset.Interface, ns string, node *v1.Node, testFunc func(ctx context.Context)) {
-	host, err := e2enode.GetSSHExternalIP(node)
-	if err != nil {
-		framework.Failf("Error getting node external ip : %v", err)
-	}
-	controlPlaneAddresses := framework.GetControlPlaneAddresses(ctx, c)
-	ginkgo.By(fmt.Sprintf("block network traffic from node %s to the control plane", node.Name))
-	defer func() {
-		// This code will execute even if setting the iptables rule failed.
-		// It is on purpose because we may have an error even if the new rule
-		// had been inserted. (yes, we could look at the error code and ssh error
-		// separately, but I prefer to stay on the safe side).
-		ginkgo.By(fmt.Sprintf("Unblock network traffic from node %s to the control plane", node.Name))
-		for _, instanceAddress := range controlPlaneAddresses {
-			UnblockNetwork(ctx, host, instanceAddress)
-		}
-	}()
-
-	framework.Logf("Waiting %v to ensure node %s is ready before beginning test...", resizeNodeReadyTimeout, node.Name)
-	if !e2enode.WaitConditionToBe(ctx, c, node.Name, v1.NodeReady, true, resizeNodeReadyTimeout) {
-		framework.Failf("Node %s did not become ready within %v", node.Name, resizeNodeReadyTimeout)
-	}
-	for _, instanceAddress := range controlPlaneAddresses {
-		BlockNetwork(ctx, host, instanceAddress)
-	}
-
-	framework.Logf("Waiting %v for node %s to be not ready after simulated network failure", resizeNodeNotReadyTimeout, node.Name)
-	if !e2enode.WaitConditionToBe(ctx, c, node.Name, v1.NodeReady, false, resizeNodeNotReadyTimeout) {
-		framework.Failf("Node %s did not become not-ready within %v", node.Name, resizeNodeNotReadyTimeout)
-	}
-
-	testFunc(ctx)
-	// network traffic is unblocked in a deferred function
-}
-
-// BlockNetwork blocks network between the given from value and the given to value.
-// The following helper functions can block/unblock network from source
-// host to destination host by manipulating iptable rules.
-// This function assumes it can ssh to the source host.
-//
-// Caution:
-// Recommend to input IP instead of hostnames. Using hostnames will cause iptables to
-// do a DNS lookup to resolve the name to an IP address, which will
-// slow down the test and cause it to fail if DNS is absent or broken.
-//
-// Suggested usage pattern:
-//
-//	func foo() {
-//		...
-//		defer UnblockNetwork(from, to)
-//		BlockNetwork(from, to)
-//		...
-//	}
-func BlockNetwork(ctx context.Context, from string, to string) {
-	framework.Logf("block network traffic from %s to %s", from, to)
-	iptablesRule := fmt.Sprintf("OUTPUT --destination %s --jump REJECT", to)
-	dropCmd := fmt.Sprintf("sudo iptables --insert %s", iptablesRule)
-	if result, err := e2essh.SSH(ctx, dropCmd, from, framework.TestContext.Provider); result.Code != 0 || err != nil {
-		e2essh.LogResult(result)
-		framework.Failf("Unexpected error: %v", err)
-	}
-}
-
-// UnblockNetwork unblocks network between the given from value and the given to value.
-func UnblockNetwork(ctx context.Context, from string, to string) {
-	framework.Logf("Unblock network traffic from %s to %s", from, to)
-	iptablesRule := fmt.Sprintf("OUTPUT --destination %s --jump REJECT", to)
-	undropCmd := fmt.Sprintf("sudo iptables --delete %s", iptablesRule)
-	// Undrop command may fail if the rule has never been created.
-	// In such case we just lose 30 seconds, but the cluster is healthy.
-	// But if the rule had been created and removing it failed, the node is broken and
-	// not coming back. Subsequent tests will run or fewer nodes (some of the tests
-	// may fail). Manual intervention is required in such case (recreating the
-	// cluster solves the problem too).
-	err := wait.PollWithContext(ctx, time.Millisecond*100, time.Second*30, func(ctx context.Context) (bool, error) {
-		result, err := e2essh.SSH(ctx, undropCmd, from, framework.TestContext.Provider)
-		if result.Code == 0 && err == nil {
-			return true, nil
-		}
-		e2essh.LogResult(result)
-		if err != nil {
-			framework.Logf("Unexpected error: %v", err)
-		}
-		return false, nil
-	})
-	if err != nil {
-		framework.Failf("Failed to remove the iptable REJECT rule. Manual intervention is "+
-			"required on host %s: remove rule %s, if exists", from, iptablesRule)
-	}
-}
-
 // WaitForService waits until the service appears (exist == true), or disappears (exist == false)
 func WaitForService(ctx context.Context, c clientset.Interface, namespace, name string, exist bool, interval, timeout time.Duration) error {
-	err := wait.PollImmediateWithContext(ctx, interval, timeout, func(ctx context.Context) (bool, error) {
+	err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
 		_, err := c.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
 		switch {
 		case err == nil:

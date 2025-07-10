@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-//go:generate mockgen -source=status_manager.go -destination=testing/mock_pod_status_provider.go -package=testing PodStatusProvider
+//go:generate mockery
 package status
 
 import (
@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/go-cmp/cmp" //nolint:depguard
 	clientset "k8s.io/client-go/kubernetes"
 
 	v1 "k8s.io/api/core/v1"
@@ -32,7 +33,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/diff"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
@@ -40,14 +40,10 @@ import (
 	"k8s.io/kubernetes/pkg/features"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
-	kubepod "k8s.io/kubernetes/pkg/kubelet/pod"
-	"k8s.io/kubernetes/pkg/kubelet/status/state"
 	kubetypes "k8s.io/kubernetes/pkg/kubelet/types"
+	kubeutil "k8s.io/kubernetes/pkg/kubelet/util"
 	statusutil "k8s.io/kubernetes/pkg/util/pod"
 )
-
-// podStatusManagerStateFile is the file name where status manager stores its state
-const podStatusManagerStateFile = "pod_status_manager_state"
 
 // A wrapper around v1.PodStatus that includes a version to enforce that stale pod statuses are
 // not sent to the API server.
@@ -70,25 +66,48 @@ type versionedPodStatus struct {
 // All methods are thread-safe.
 type manager struct {
 	kubeClient clientset.Interface
-	podManager kubepod.Manager
+	podManager PodManager
 	// Map from pod UID to sync status of the corresponding pod.
-	podStatuses      map[types.UID]versionedPodStatus
-	podStatusesLock  sync.RWMutex
-	podStatusChannel chan struct{}
+	podStatuses         map[types.UID]versionedPodStatus
+	podResizeConditions map[types.UID]podResizeConditions
+	podStatusesLock     sync.RWMutex
+	podStatusChannel    chan struct{}
 	// Map from (mirror) pod UID to latest status version successfully sent to the API server.
 	// apiStatusVersions must only be accessed from the sync thread.
 	apiStatusVersions map[kubetypes.MirrorPodUID]uint64
 	podDeletionSafety PodDeletionSafetyProvider
 
 	podStartupLatencyHelper PodStartupLatencyStateHelper
-	// state allows to save/restore pod resource allocation and tolerate kubelet restarts.
-	state state.State
-	// stateFileDirectory holds the directory where the state file for checkpoints is held.
-	stateFileDirectory string
 }
 
-// PodStatusProvider knows how to provide status for a pod. It's intended to be used by other components
-// that need to introspect status.
+type podResizeConditions struct {
+	PodResizePending    *v1.PodCondition
+	PodResizeInProgress *v1.PodCondition
+}
+
+func (prc podResizeConditions) List() []*v1.PodCondition {
+	var conditions []*v1.PodCondition
+	if prc.PodResizePending != nil {
+		conditions = append(conditions, prc.PodResizePending)
+	}
+	if prc.PodResizeInProgress != nil {
+		conditions = append(conditions, prc.PodResizeInProgress)
+	}
+	return conditions
+}
+
+// PodManager is the subset of methods the manager needs to observe the actual state of the kubelet.
+// See pkg/k8s.io/kubernetes/pkg/kubelet/pod.Manager for method godoc.
+type PodManager interface {
+	GetPodByUID(types.UID) (*v1.Pod, bool)
+	GetMirrorPodByPod(*v1.Pod) (*v1.Pod, bool)
+	TranslatePodUID(uid types.UID) kubetypes.ResolvedPodUID
+	GetUIDTranslations() (podToMirror map[kubetypes.ResolvedPodUID]kubetypes.MirrorPodUID, mirrorToPod map[kubetypes.MirrorPodUID]kubetypes.ResolvedPodUID)
+}
+
+// PodStatusProvider knows how to provide status for a pod. It is intended to be used by other components
+// that need to introspect the authoritative status of a pod.  The PodStatusProvider represents the actual
+// status of a running pod as the kubelet sees it.
 type PodStatusProvider interface {
 	// GetPodStatus returns the cached status for the provided pod UID, as well as whether it
 	// was a cache hit.
@@ -133,32 +152,35 @@ type Manager interface {
 	// the provided podUIDs.
 	RemoveOrphanedStatuses(podUIDs map[types.UID]bool)
 
-	// GetContainerResourceAllocation returns checkpointed AllocatedResources value for the container
-	GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceList, bool)
+	// GetPodResizeConditions returns cached PodStatus Resize conditions value
+	GetPodResizeConditions(podUID types.UID) []*v1.PodCondition
 
-	// GetPodResizeStatus returns checkpointed PodStatus.Resize value
-	GetPodResizeStatus(podUID string) (v1.PodResizeStatus, bool)
+	// SetPodResizePendingCondition caches the last PodResizePending condition for the pod.
+	SetPodResizePendingCondition(podUID types.UID, reason, message string)
 
-	// SetPodAllocation checkpoints the resources allocated to a pod's containers.
-	SetPodAllocation(pod *v1.Pod) error
+	// SetPodResizeInProgressCondition caches the last PodResizeInProgress condition for the pod.
+	SetPodResizeInProgressCondition(podUID types.UID, reason, message string, allowReasonToBeCleared bool)
 
-	// SetPodResizeStatus checkpoints the last resizing decision for the pod.
-	SetPodResizeStatus(podUID types.UID, resize v1.PodResizeStatus) error
+	// ClearPodResizePendingCondition clears the PodResizePending condition for the pod from the cache.
+	ClearPodResizePendingCondition(podUID types.UID)
+
+	// ClearPodResizeInProgressCondition clears the PodResizeInProgress condition for the pod from the cache.
+	ClearPodResizeInProgressCondition(podUID types.UID)
 }
 
 const syncPeriod = 10 * time.Second
 
 // NewManager returns a functional Manager.
-func NewManager(kubeClient clientset.Interface, podManager kubepod.Manager, podDeletionSafety PodDeletionSafetyProvider, podStartupLatencyHelper PodStartupLatencyStateHelper, stateFileDirectory string) Manager {
+func NewManager(kubeClient clientset.Interface, podManager PodManager, podDeletionSafety PodDeletionSafetyProvider, podStartupLatencyHelper PodStartupLatencyStateHelper) Manager {
 	return &manager{
 		kubeClient:              kubeClient,
 		podManager:              podManager,
 		podStatuses:             make(map[types.UID]versionedPodStatus),
+		podResizeConditions:     make(map[types.UID]podResizeConditions),
 		podStatusChannel:        make(chan struct{}, 1),
 		apiStatusVersions:       make(map[kubetypes.MirrorPodUID]uint64),
 		podDeletionSafety:       podDeletionSafety,
 		podStartupLatencyHelper: podStartupLatencyHelper,
-		stateFileDirectory:      stateFileDirectory,
 	}
 }
 
@@ -168,34 +190,35 @@ func NewManager(kubeClient clientset.Interface, podManager kubepod.Manager, podD
 // changes will be ignored.
 func isPodStatusByKubeletEqual(oldStatus, status *v1.PodStatus) bool {
 	oldCopy := oldStatus.DeepCopy()
+
+	newConditions := make(map[v1.PodConditionType]*v1.PodCondition, len(status.Conditions))
+	oldConditions := make(map[v1.PodConditionType]*v1.PodCondition, len(oldStatus.Conditions))
 	for _, c := range status.Conditions {
-		// both owned and shared conditions are used for kubelet status equality
 		if kubetypes.PodConditionByKubelet(c.Type) || kubetypes.PodConditionSharedByKubelet(c.Type) {
-			_, oc := podutil.GetPodCondition(oldCopy, c.Type)
-			if oc == nil || oc.Status != c.Status || oc.Message != c.Message || oc.Reason != c.Reason {
-				return false
-			}
+			newConditions[c.Type] = &c
 		}
 	}
+	for _, c := range oldStatus.Conditions {
+		if kubetypes.PodConditionByKubelet(c.Type) || kubetypes.PodConditionSharedByKubelet(c.Type) {
+			oldConditions[c.Type] = &c
+		}
+	}
+
+	if len(newConditions) != len(oldConditions) {
+		return false
+	}
+	for _, newCondition := range newConditions {
+		oldCondition := oldConditions[newCondition.Type]
+		if oldCondition == nil || oldCondition.Status != newCondition.Status || oldCondition.Message != newCondition.Message || oldCondition.Reason != newCondition.Reason {
+			return false
+		}
+	}
+
 	oldCopy.Conditions = status.Conditions
 	return apiequality.Semantic.DeepEqual(oldCopy, status)
 }
 
 func (m *manager) Start() {
-	// Initialize m.state to no-op state checkpoint manager
-	m.state = state.NewNoopStateCheckpoint()
-
-	// Create pod allocation checkpoint manager even if client is nil so as to allow local get/set of AllocatedResources & Resize
-	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		stateImpl, err := state.NewStateCheckpoint(m.stateFileDirectory, podStatusManagerStateFile)
-		if err != nil {
-			// This is a crictical, non-recoverable failure.
-			klog.ErrorS(err, "Could not initialize pod allocation checkpoint manager, please drain node and remove policy state file")
-			panic(err)
-		}
-		m.state = stateImpl
-	}
-
 	// Don't start the status manager if we don't have a client. This will happen
 	// on the master, where the kubelet is responsible for bootstrapping the pods
 	// of the master components.
@@ -224,43 +247,65 @@ func (m *manager) Start() {
 	}, 0)
 }
 
-// GetContainerResourceAllocation returns the last checkpointed AllocatedResources values
-// If checkpoint manager has not been initialized, it returns nil, false
-func (m *manager) GetContainerResourceAllocation(podUID string, containerName string) (v1.ResourceList, bool) {
+// GetPodResizeConditions returns the last cached ResizeStatus value.
+func (m *manager) GetPodResizeConditions(podUID types.UID) []*v1.PodCondition {
 	m.podStatusesLock.RLock()
 	defer m.podStatusesLock.RUnlock()
-	return m.state.GetContainerResourceAllocation(podUID, containerName)
+	return m.podResizeConditions[podUID].List()
 }
 
-// GetPodResizeStatus returns the last checkpointed ResizeStaus value
-// If checkpoint manager has not been initialized, it returns nil, false
-func (m *manager) GetPodResizeStatus(podUID string) (v1.PodResizeStatus, bool) {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	return m.state.GetPodResizeStatus(podUID)
+// SetPodResizePendingCondition caches the last PodResizePending condition for the pod.
+func (m *manager) SetPodResizePendingCondition(podUID types.UID, reason, message string) {
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+
+	m.podResizeConditions[podUID] = podResizeConditions{
+		PodResizePending:    updatedPodResizeCondition(v1.PodResizePending, m.podResizeConditions[podUID].PodResizePending, reason, message),
+		PodResizeInProgress: m.podResizeConditions[podUID].PodResizeInProgress,
+	}
 }
 
-// SetPodAllocation checkpoints the resources allocated to a pod's containers
-func (m *manager) SetPodAllocation(pod *v1.Pod) error {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	for _, container := range pod.Spec.Containers {
-		var alloc v1.ResourceList
-		if container.Resources.Requests != nil {
-			alloc = container.Resources.Requests.DeepCopy()
-		}
-		if err := m.state.SetContainerResourceAllocation(string(pod.UID), container.Name, alloc); err != nil {
-			return err
+// SetPodResizeInProgressCondition caches the last PodResizeInProgress condition for the pod.
+func (m *manager) SetPodResizeInProgressCondition(podUID types.UID, reason, message string, allowReasonToBeCleared bool) {
+	oldConditions := m.GetPodResizeConditions(podUID)
+
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+
+	if !allowReasonToBeCleared && reason == "" && message == "" {
+		// Preserve the old reason and message if there is one.
+		for _, c := range oldConditions {
+			if c.Type == v1.PodResizeInProgress {
+				reason = c.Reason
+				message = c.Message
+			}
 		}
 	}
-	return nil
+
+	m.podResizeConditions[podUID] = podResizeConditions{
+		PodResizeInProgress: updatedPodResizeCondition(v1.PodResizeInProgress, m.podResizeConditions[podUID].PodResizeInProgress, reason, message),
+		PodResizePending:    m.podResizeConditions[podUID].PodResizePending,
+	}
 }
 
-// SetPodResizeStatus checkpoints the last resizing decision for the pod.
-func (m *manager) SetPodResizeStatus(podUID types.UID, resizeStatus v1.PodResizeStatus) error {
-	m.podStatusesLock.RLock()
-	defer m.podStatusesLock.RUnlock()
-	return m.state.SetPodResizeStatus(string(podUID), resizeStatus)
+// ClearPodResizePendingCondition clears the PodResizePending condition for the pod from the cache.
+func (m *manager) ClearPodResizePendingCondition(podUID types.UID) {
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+	m.podResizeConditions[podUID] = podResizeConditions{
+		PodResizePending:    nil,
+		PodResizeInProgress: m.podResizeConditions[podUID].PodResizeInProgress,
+	}
+}
+
+// ClearPodResizeInProgressCondition clears the PodResizeInProgress condition for the pod from the cache.
+func (m *manager) ClearPodResizeInProgressCondition(podUID types.UID) {
+	m.podStatusesLock.Lock()
+	defer m.podStatusesLock.Unlock()
+	m.podResizeConditions[podUID] = podResizeConditions{
+		PodResizePending:    m.podResizeConditions[podUID].PodResizePending,
+		PodResizeInProgress: nil,
+	}
 }
 
 func (m *manager) GetPodStatus(uid types.UID) (v1.PodStatus, bool) {
@@ -276,6 +321,9 @@ func (m *manager) SetPodStatus(pod *v1.Pod, status v1.PodStatus) {
 
 	// Make sure we're caching a deep copy.
 	status = *status.DeepCopy()
+
+	// Set the observedGeneration for this pod status.
+	status.ObservedGeneration = podutil.GetPodObservedGenerationIfEnabled(pod)
 
 	// Force a status update if deletion timestamp is set. This is necessary
 	// because if the pod is in the non-running state, the pod worker still
@@ -339,8 +387,10 @@ func (m *manager) SetContainerReadiness(podUID types.UID, containerID kubecontai
 			status.Conditions = append(status.Conditions, condition)
 		}
 	}
-	updateConditionFunc(v1.PodReady, GeneratePodReadyCondition(&pod.Spec, status.Conditions, status.ContainerStatuses, status.Phase))
-	updateConditionFunc(v1.ContainersReady, GenerateContainersReadyCondition(&pod.Spec, status.ContainerStatuses, status.Phase))
+
+	allContainerStatuses := append(status.InitContainerStatuses, status.ContainerStatuses...)
+	updateConditionFunc(v1.PodReady, GeneratePodReadyCondition(pod, &oldStatus.status, status.Conditions, allContainerStatuses, status.Phase))
+	updateConditionFunc(v1.ContainersReady, GenerateContainersReadyCondition(pod, &oldStatus.status, allContainerStatuses, status.Phase))
 	m.updateStatusInternal(pod, status, false, false)
 }
 
@@ -435,7 +485,7 @@ func (m *manager) TerminatePod(pod *v1.Pod) {
 			}
 			status.ContainerStatuses[i].State = v1.ContainerState{
 				Terminated: &v1.ContainerStateTerminated{
-					Reason:   "ContainerStatusUnknown",
+					Reason:   kubecontainer.ContainerReasonStatusUnknown,
 					Message:  "The container could not be located when the pod was terminated",
 					ExitCode: 137,
 				},
@@ -451,7 +501,7 @@ func (m *manager) TerminatePod(pod *v1.Pod) {
 		}
 		status.InitContainerStatuses[i].State = v1.ContainerState{
 			Terminated: &v1.ContainerStateTerminated{
-				Reason:   "ContainerStatusUnknown",
+				Reason:   kubecontainer.ContainerReasonStatusUnknown,
 				Message:  "The container could not be located when the pod was terminated",
 				ExitCode: 137,
 			},
@@ -495,12 +545,25 @@ func hasPodInitialized(pod *v1.Pod) bool {
 	}
 	// if the last init container has ever completed with a zero exit code, the pod is initialized
 	if l := len(pod.Status.InitContainerStatuses); l > 0 {
-		container := pod.Status.InitContainerStatuses[l-1]
-		if state := container.LastTerminationState; state.Terminated != nil && state.Terminated.ExitCode == 0 {
-			return true
+		container, ok := kubeutil.GetContainerByIndex(pod.Spec.InitContainers, pod.Status.InitContainerStatuses, l-1)
+		if !ok {
+			klog.V(4).InfoS("Mismatch between pod spec and status, likely programmer error", "pod", klog.KObj(pod), "containerName", container.Name)
+			return false
 		}
-		if state := container.State; state.Terminated != nil && state.Terminated.ExitCode == 0 {
-			return true
+
+		containerStatus := pod.Status.InitContainerStatuses[l-1]
+		if podutil.IsRestartableInitContainer(&container) {
+			if containerStatus.State.Running != nil &&
+				containerStatus.Started != nil && *containerStatus.Started {
+				return true
+			}
+		} else { // regular init container
+			if state := containerStatus.LastTerminationState; state.Terminated != nil && state.Terminated.ExitCode == 0 {
+				return true
+			}
+			if state := containerStatus.State; state.Terminated != nil && state.Terminated.ExitCode == 0 {
+				return true
+			}
 		}
 	}
 	// otherwise the pod has no record of being initialized
@@ -509,7 +572,7 @@ func hasPodInitialized(pod *v1.Pod) bool {
 
 // initializedContainers returns all status except for suffix of containers that are in Waiting
 // state, which is the set of containers that have attempted to start at least once. If all containers
-// are Watiing, the first container is always returned.
+// are Waiting, the first container is always returned.
 func initializedContainers(containers []v1.ContainerStatus) []v1.ContainerStatus {
 	for i := len(containers) - 1; i >= 0; i-- {
 		if containers[i].State.Waiting == nil || containers[i].LastTerminationState.Terminated != nil {
@@ -526,23 +589,47 @@ func initializedContainers(containers []v1.ContainerStatus) []v1.ContainerStatus
 // checkContainerStateTransition ensures that no container is trying to transition
 // from a terminated to non-terminated state, which is illegal and indicates a
 // logical error in the kubelet.
-func checkContainerStateTransition(oldStatuses, newStatuses []v1.ContainerStatus, restartPolicy v1.RestartPolicy) error {
+func checkContainerStateTransition(oldStatuses, newStatuses *v1.PodStatus, podSpec *v1.PodSpec) error {
 	// If we should always restart, containers are allowed to leave the terminated state
-	if restartPolicy == v1.RestartPolicyAlways {
+	if podSpec.RestartPolicy == v1.RestartPolicyAlways {
 		return nil
 	}
-	for _, oldStatus := range oldStatuses {
+	for _, oldStatus := range oldStatuses.ContainerStatuses {
 		// Skip any container that wasn't terminated
 		if oldStatus.State.Terminated == nil {
 			continue
 		}
 		// Skip any container that failed but is allowed to restart
-		if oldStatus.State.Terminated.ExitCode != 0 && restartPolicy == v1.RestartPolicyOnFailure {
+		if oldStatus.State.Terminated.ExitCode != 0 && podSpec.RestartPolicy == v1.RestartPolicyOnFailure {
 			continue
 		}
-		for _, newStatus := range newStatuses {
+		for _, newStatus := range newStatuses.ContainerStatuses {
 			if oldStatus.Name == newStatus.Name && newStatus.State.Terminated == nil {
 				return fmt.Errorf("terminated container %v attempted illegal transition to non-terminated state", newStatus.Name)
+			}
+		}
+	}
+
+	for i, oldStatus := range oldStatuses.InitContainerStatuses {
+		initContainer, ok := kubeutil.GetContainerByIndex(podSpec.InitContainers, oldStatuses.InitContainerStatuses, i)
+		if !ok {
+			return fmt.Errorf("found mismatch between pod spec and status, container: %v", oldStatus.Name)
+		}
+		// Skip any restartable init container as it always is allowed to restart
+		if podutil.IsRestartableInitContainer(&initContainer) {
+			continue
+		}
+		// Skip any container that wasn't terminated
+		if oldStatus.State.Terminated == nil {
+			continue
+		}
+		// Skip any container that failed but is allowed to restart
+		if oldStatus.State.Terminated.ExitCode != 0 && podSpec.RestartPolicy == v1.RestartPolicyOnFailure {
+			continue
+		}
+		for _, newStatus := range newStatuses.InitContainerStatuses {
+			if oldStatus.Name == newStatus.Name && newStatus.State.Terminated == nil {
+				return fmt.Errorf("terminated init container %v attempted illegal transition to non-terminated state", newStatus.Name)
 			}
 		}
 	}
@@ -571,11 +658,7 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 	}
 
 	// Check for illegal state transition in containers
-	if err := checkContainerStateTransition(oldStatus.ContainerStatuses, status.ContainerStatuses, pod.Spec.RestartPolicy); err != nil {
-		klog.ErrorS(err, "Status update on pod aborted", "pod", klog.KObj(pod))
-		return
-	}
-	if err := checkContainerStateTransition(oldStatus.InitContainerStatuses, status.InitContainerStatuses, pod.Spec.RestartPolicy); err != nil {
+	if err := checkContainerStateTransition(&oldStatus, &status, &pod.Spec); err != nil {
 		klog.ErrorS(err, "Status update on pod aborted", "pod", klog.KObj(pod))
 		return
 	}
@@ -589,16 +672,14 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 	// Set InitializedCondition.LastTransitionTime.
 	updateLastTransitionTime(&status, &oldStatus, v1.PodInitialized)
 
-	// Set PodHasNetwork.LastTransitionTime.
-	updateLastTransitionTime(&status, &oldStatus, kubetypes.PodHasNetwork)
+	// Set PodReadyToStartContainersCondition.LastTransitionTime.
+	updateLastTransitionTime(&status, &oldStatus, v1.PodReadyToStartContainers)
 
 	// Set PodScheduledCondition.LastTransitionTime.
 	updateLastTransitionTime(&status, &oldStatus, v1.PodScheduled)
 
-	if utilfeature.DefaultFeatureGate.Enabled(features.PodDisruptionConditions) {
-		// Set DisruptionTarget.LastTransitionTime.
-		updateLastTransitionTime(&status, &oldStatus, v1.DisruptionTarget)
-	}
+	// Set DisruptionTarget.LastTransitionTime.
+	updateLastTransitionTime(&status, &oldStatus, v1.DisruptionTarget)
 
 	// ensure that the start time does not change across updates.
 	if oldStatus.StartTime != nil && !oldStatus.StartTime.IsZero() {
@@ -607,6 +688,11 @@ func (m *manager) updateStatusInternal(pod *v1.Pod, status v1.PodStatus, forceUp
 		// if the status has no start time, we need to set an initial time
 		now := metav1.Now()
 		status.StartTime = &now
+	}
+
+	// prevent sending unnecessary patches
+	if oldStatus.ObservedGeneration > status.ObservedGeneration {
+		status.ObservedGeneration = oldStatus.ObservedGeneration
 	}
 
 	normalizeStatus(pod, &status)
@@ -698,7 +784,7 @@ func (m *manager) deletePodStatus(uid types.UID) {
 	delete(m.podStatuses, uid)
 	m.podStartupLatencyHelper.DeletePodStartupState(uid)
 	if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-		m.state.Delete(string(uid), "")
+		delete(m.podResizeConditions, uid)
 	}
 }
 
@@ -711,7 +797,7 @@ func (m *manager) RemoveOrphanedStatuses(podUIDs map[types.UID]bool) {
 			klog.V(5).InfoS("Removing pod from status map.", "podUID", key)
 			delete(m.podStatuses, key)
 			if utilfeature.DefaultFeatureGate.Enabled(features.InPlacePodVerticalScaling) {
-				m.state.Delete(string(key), "")
+				delete(m.podResizeConditions, key)
 			}
 		}
 	}
@@ -824,7 +910,7 @@ func (m *manager) syncPod(uid types.UID, status versionedPodStatus) {
 		return
 	}
 
-	mergedStatus := mergePodStatus(pod.Status, status.status, m.podDeletionSafety.PodCouldHaveRunningContainers(pod))
+	mergedStatus := mergePodStatus(pod, pod.Status, status.status, m.podDeletionSafety.PodCouldHaveRunningContainers(pod))
 
 	newPod, patchBytes, unchanged, err := statusutil.PatchPodStatus(context.TODO(), m.kubeClient, pod.Namespace, pod.Name, pod.UID, pod.Status, mergedStatus)
 	klog.V(3).InfoS("Patch status for pod", "pod", klog.KObj(pod), "podUID", uid, "patch", string(patchBytes))
@@ -939,7 +1025,7 @@ func (m *manager) needsReconcile(uid types.UID, status v1.PodStatus) bool {
 	}
 	klog.V(3).InfoS("Pod status is inconsistent with cached status for pod, a reconciliation should be triggered",
 		"pod", klog.KObj(pod),
-		"statusDiff", diff.ObjectDiff(podStatus, &status))
+		"statusDiff", cmp.Diff(podStatus, &status))
 
 	return true
 }
@@ -951,7 +1037,7 @@ func (m *manager) needsReconcile(uid types.UID, status v1.PodStatus) bool {
 // Related issue #15262/PR #15263 to move apiserver to RFC339NANO is closed.
 func normalizeStatus(pod *v1.Pod, status *v1.PodStatus) *v1.PodStatus {
 	bytesPerStatus := kubecontainer.MaxPodTerminationMessageLogLength
-	if containers := len(pod.Spec.Containers) + len(pod.Spec.InitContainers); containers > 0 {
+	if containers := len(pod.Spec.Containers) + len(pod.Spec.InitContainers) + len(pod.Spec.EphemeralContainers); containers > 0 {
 		bytesPerStatus = bytesPerStatus / containers
 	}
 	normalizeTimeStamp := func(t *metav1.Time) {
@@ -979,30 +1065,30 @@ func normalizeStatus(pod *v1.Pod, status *v1.PodStatus) *v1.PodStatus {
 		normalizeTimeStamp(&condition.LastTransitionTime)
 	}
 
-	// update container statuses
-	for i := range status.ContainerStatuses {
-		cstatus := &status.ContainerStatuses[i]
-		normalizeContainerState(&cstatus.State)
-		normalizeContainerState(&cstatus.LastTerminationState)
+	normalizeContainerStatuses := func(containerStatuses []v1.ContainerStatus) {
+		for i := range containerStatuses {
+			cstatus := &containerStatuses[i]
+			normalizeContainerState(&cstatus.State)
+			normalizeContainerState(&cstatus.LastTerminationState)
+		}
 	}
-	// Sort the container statuses, so that the order won't affect the result of comparison
+
+	normalizeContainerStatuses(status.ContainerStatuses)
 	sort.Sort(kubetypes.SortedContainerStatuses(status.ContainerStatuses))
 
-	// update init container statuses
-	for i := range status.InitContainerStatuses {
-		cstatus := &status.InitContainerStatuses[i]
-		normalizeContainerState(&cstatus.State)
-		normalizeContainerState(&cstatus.LastTerminationState)
-	}
-	// Sort the container statuses, so that the order won't affect the result of comparison
+	normalizeContainerStatuses(status.InitContainerStatuses)
 	kubetypes.SortInitContainerStatuses(pod, status.InitContainerStatuses)
+
+	normalizeContainerStatuses(status.EphemeralContainerStatuses)
+	sort.Sort(kubetypes.SortedContainerStatuses(status.EphemeralContainerStatuses))
+
 	return status
 }
 
 // mergePodStatus merges oldPodStatus and newPodStatus to preserve where pod conditions
 // not owned by kubelet and to ensure terminal phase transition only happens after all
 // running containers have terminated. This method does not modify the old status.
-func mergePodStatus(oldPodStatus, newPodStatus v1.PodStatus, couldHaveRunningContainers bool) v1.PodStatus {
+func mergePodStatus(pod *v1.Pod, oldPodStatus, newPodStatus v1.PodStatus, couldHaveRunningContainers bool) v1.PodStatus {
 	podConditions := make([]v1.PodCondition, 0, len(oldPodStatus.Conditions)+len(newPodStatus.Conditions))
 
 	for _, c := range oldPodStatus.Conditions {
@@ -1038,6 +1124,9 @@ func mergePodStatus(oldPodStatus, newPodStatus v1.PodStatus, couldHaveRunningCon
 	}
 	newPodStatus.Conditions = podConditions
 
+	// ResourceClaimStatuses is not owned and not modified by kubelet.
+	newPodStatus.ResourceClaimStatuses = oldPodStatus.ResourceClaimStatuses
+
 	// Delay transitioning a pod to a terminal status unless the pod is actually terminal.
 	// The Kubelet should never transition a pod to terminal status that could have running
 	// containers and thus actively be leveraging exclusive resources. Note that resources
@@ -1061,10 +1150,10 @@ func mergePodStatus(oldPodStatus, newPodStatus v1.PodStatus, couldHaveRunningCon
 	// See https://issues.k8s.io/108594 for more details.
 	if podutil.IsPodPhaseTerminal(newPodStatus.Phase) {
 		if podutil.IsPodReadyConditionTrue(newPodStatus) || podutil.IsContainersReadyConditionTrue(newPodStatus) {
-			containersReadyCondition := generateContainersReadyConditionForTerminalPhase(newPodStatus.Phase)
+			containersReadyCondition := generateContainersReadyConditionForTerminalPhase(pod, &oldPodStatus, newPodStatus.Phase)
 			podutil.UpdatePodCondition(&newPodStatus, &containersReadyCondition)
 
-			podReadyCondition := generatePodReadyConditionForTerminalPhase(newPodStatus.Phase)
+			podReadyCondition := generatePodReadyConditionForTerminalPhase(pod, &oldPodStatus, newPodStatus.Phase)
 			podutil.UpdatePodCondition(&newPodStatus, &podReadyCondition)
 		}
 	}
@@ -1077,11 +1166,30 @@ func NeedToReconcilePodReadiness(pod *v1.Pod) bool {
 	if len(pod.Spec.ReadinessGates) == 0 {
 		return false
 	}
-	podReadyCondition := GeneratePodReadyCondition(&pod.Spec, pod.Status.Conditions, pod.Status.ContainerStatuses, pod.Status.Phase)
+	podReadyCondition := GeneratePodReadyCondition(pod, &pod.Status, pod.Status.Conditions, pod.Status.ContainerStatuses, pod.Status.Phase)
 	i, curCondition := podutil.GetPodConditionFromList(pod.Status.Conditions, v1.PodReady)
 	// Only reconcile if "Ready" condition is present and Status or Message is not expected
 	if i >= 0 && (curCondition.Status != podReadyCondition.Status || curCondition.Message != podReadyCondition.Message) {
 		return true
 	}
 	return false
+}
+
+func updatedPodResizeCondition(conditionType v1.PodConditionType, oldCondition *v1.PodCondition, reason, message string) *v1.PodCondition {
+	now := metav1.NewTime(time.Now())
+	var lastTransitionTime metav1.Time
+	if oldCondition == nil || oldCondition.Reason != reason {
+		lastTransitionTime = now
+	} else {
+		lastTransitionTime = oldCondition.LastTransitionTime
+	}
+
+	return &v1.PodCondition{
+		Type:               conditionType,
+		Status:             v1.ConditionTrue,
+		LastProbeTime:      now,
+		LastTransitionTime: lastTransitionTime,
+		Reason:             reason,
+		Message:            message,
+	}
 }

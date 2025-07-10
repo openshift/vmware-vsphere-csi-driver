@@ -1,4 +1,5 @@
-// Copyright (c) 2020 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -31,6 +32,7 @@ type ContentSourceStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // ContentSource is the Schema for the contentsources API.
 // A ContentSource represents the desired specification and the observed status of a ContentSource instance.
@@ -43,6 +45,7 @@ type ContentSource struct {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion:warning="This API has been deprecated and is unsupported in future versions"
 
 // ContentSourceList contains a list of ContentSource.
 type ContentSourceList struct {
@@ -52,5 +55,5 @@ type ContentSourceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&ContentSource{}, &ContentSourceList{})
+	objectTypes = append(objectTypes, &ContentSource{}, &ContentSourceList{})
 }

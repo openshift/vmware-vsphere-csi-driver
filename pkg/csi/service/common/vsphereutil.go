@@ -18,9 +18,9 @@ package common
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
@@ -31,7 +31,6 @@ import (
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/protobuf/types/known/timestamppb"
-
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -54,10 +53,24 @@ type VanillaCreateBlockVolParamsForMultiVC struct {
 	FilterSuspendedDatastores bool
 }
 
+// CreateBlockVolumeOptions defines the FSS required to create a block volume.
+type CreateBlockVolumeOptions struct {
+	FilterSuspendedDatastores,
+	UseSupervisorId,
+	IsVdppOnStretchedSvFssEnabled bool
+	IsByokEnabled bool
+}
+
 // CreateBlockVolumeUtil is the helper function to create CNS block volume.
-func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, manager *Manager,
-	spec *CreateVolumeSpec, sharedDatastores []*vsphere.DatastoreInfo, filterSuspendedDatastores bool, useSupervisorId,
-	checkCompatibleDataStores bool, extraParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error) {
+func CreateBlockVolumeUtil(
+	ctx context.Context,
+	clusterFlavor cnstypes.CnsClusterFlavor,
+	manager *Manager,
+	spec *CreateVolumeSpec,
+	sharedDatastores []*vsphere.DatastoreInfo,
+	opts CreateBlockVolumeOptions,
+	extraParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error) {
+
 	log := logger.GetLogger(ctx)
 	vc, err := GetVCenter(ctx, manager)
 	if err != nil {
@@ -78,51 +91,45 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 		}
 	}
 
-	if filterSuspendedDatastores {
+	if opts.FilterSuspendedDatastores {
 		sharedDatastores, err = vsphere.FilterSuspendedDatastores(ctx, sharedDatastores)
 		if err != nil {
 			log.Errorf("Error occurred while filter suspended datastores, err: %+v", err)
 			return nil, csifault.CSIInternalFault, err
 		}
-
 	}
+
 	var datastoreObj *vsphere.Datastore
 	var datastores []vim25types.ManagedObjectReference
 	var datastoreInfoList []*vsphere.DatastoreInfo
 	if spec.ScParams.DatastoreURL == "" {
 		// Check if datastore URL is specified by the storage pool parameter.
-		if spec.VsanDirectDatastoreURL != "" {
-			// Create Datacenter object.
-			var dcList []*vsphere.Datacenter
-			for _, dc := range vc.Config.DatacenterPaths {
-				dcList = append(dcList,
-					&vsphere.Datacenter{
-						Datacenter: object.NewDatacenter(
-							vc.Client.Client,
-							vim25types.ManagedObjectReference{
-								Type:  "Datacenter",
-								Value: dc,
-							}),
-						VirtualCenterHost: vc.Config.Host,
-					})
-			}
+		if spec.VsanDatastoreURL != "" {
 			// Search the datastore from the URL in the datacenter list.
-			var datastoreObj *vsphere.Datastore
 			var datastoreInfoObj *vsphere.DatastoreInfo
-			for _, datacenter := range dcList {
-				datastoreInfoObj, err = datacenter.GetDatastoreInfoByURL(ctx, spec.VsanDirectDatastoreURL)
+			for _, dc := range vc.Config.DatacenterPaths {
+				datacenter := &vsphere.Datacenter{
+					Datacenter: object.NewDatacenter(
+						vc.Client.Client,
+						vim25types.ManagedObjectReference{
+							Type:  "Datacenter",
+							Value: dc,
+						}),
+					VirtualCenterHost: vc.Config.Host,
+				}
+				datastoreInfoObj, err = datacenter.GetDatastoreInfoByURL(ctx, spec.VsanDatastoreURL)
 				if err != nil {
 					log.Warnf("Failed to find datastore with URL %q in datacenter %q from VC %q, Error: %+v",
-						spec.VsanDirectDatastoreURL, datacenter.InventoryPath, vc.Config.Host, err)
+						spec.VsanDatastoreURL, datacenter.InventoryPath, vc.Config.Host, err)
 					continue
 				}
 
-				if filterSuspendedDatastores && vsphere.IsVolumeCreationSuspended(ctx, datastoreInfoObj) {
+				if opts.FilterSuspendedDatastores && vsphere.IsVolumeCreationSuspended(ctx, datastoreInfoObj) {
 					continue
 				}
 				datastoreObj = datastoreInfoObj.Datastore
 				log.Debugf("Successfully fetched the datastore %v from the URL: %v",
-					datastoreObj.Reference(), spec.VsanDirectDatastoreURL)
+					datastoreObj.Reference(), spec.VsanDatastoreURL)
 				datastores = append(datastores, datastoreObj.Reference())
 				datastoreInfoList = append(datastoreInfoList, datastoreInfoObj)
 				break
@@ -132,7 +139,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 				// Currently, just return csi.fault.Internal.
 				return nil, csifault.CSIInternalFault,
 					logger.LogNewErrorf(log, "DatastoreURL: %s specified in the create volume spec is not found.",
-						spec.VsanDirectDatastoreURL)
+						spec.VsanDatastoreURL)
 			}
 		} else {
 			// If DatastoreURL is not specified in StorageClass, get all shared
@@ -163,7 +170,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 				continue
 			}
 
-			if filterSuspendedDatastores && vsphere.IsVolumeCreationSuspended(ctx, datastoreInfoObj) {
+			if opts.FilterSuspendedDatastores && vsphere.IsVolumeCreationSuspended(ctx, datastoreInfoObj) {
 				continue
 			}
 			datastoreObj = datastoreInfoObj.Datastore
@@ -198,7 +205,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 		}
 	}
 
-	if checkCompatibleDataStores {
+	if !opts.IsVdppOnStretchedSvFssEnabled || spec.VsanDatastoreURL == "" {
 		fault, err := isDataStoreCompatible(ctx, vc, spec, datastores, datastoreObj)
 		if err != nil {
 			return nil, fault, err
@@ -207,7 +214,7 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 
 	var containerClusterArray []cnstypes.CnsContainerCluster
 	clusterID := manager.CnsConfig.Global.ClusterID
-	if useSupervisorId {
+	if opts.UseSupervisorId {
 		clusterID = manager.CnsConfig.Global.SupervisorID
 	}
 	containerCluster := vsphere.GetContainerCluster(clusterID,
@@ -247,6 +254,8 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 		}
 		createSpec.Profile = append(createSpec.Profile, profileSpec)
 	}
+
+	var snapshotVolumeCryptoKeyID *vim25types.CryptoKeyId
 
 	// Handle the case of CreateVolumeFromSnapshot by checking if
 	// the ContentSourceSnapshotID is available in CreateVolumeSpec
@@ -302,6 +311,32 @@ func CreateBlockVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluste
 			"when create volume from snapshot %s", createSpec.Datastores, compatibleDatastore,
 			spec.ContentSourceSnapshotID)
 		createSpec.Datastores = []vim25types.ManagedObjectReference{compatibleDatastore}
+
+		if opts.IsByokEnabled {
+			// Retrieve the encryption key ID from the source volume
+			snapshotVolumeCryptoKeyID, err = QueryVolumeCryptoKeyByID(ctx, manager.VolumeManager, cnsVolumeID)
+			if err != nil {
+				return nil, csifault.CSIInternalFault, logger.LogNewErrorf(log,
+					"failed to query volume crypto key for the snapshot %s with error %+v",
+					spec.ContentSourceSnapshotID, err)
+			}
+		}
+	}
+
+	if opts.IsByokEnabled {
+		// Build crypto spec for the new volume.
+		var cryptoKeyID *vim25types.CryptoKeyId
+		if spec.CryptoKeyID != nil {
+			cryptoKeyID = &vim25types.CryptoKeyId{
+				KeyId:      spec.CryptoKeyID.KeyID,
+				ProviderId: &vim25types.KeyProviderId{Id: spec.CryptoKeyID.KeyProvider},
+			}
+		}
+
+		cryptoSpec := createCryptoSpec(snapshotVolumeCryptoKeyID, cryptoKeyID)
+		if cryptoSpec != nil {
+			createSpec.CreateSpec = &cnstypes.CnsBlockCreateSpec{CryptoSpec: cryptoSpec}
+		}
 	}
 
 	log.Debugf("vSphere CSI driver creating volume %s with create spec %+v", spec.Name, spew.Sdump(createSpec))
@@ -457,7 +492,7 @@ func CreateBlockVolumeUtilForMultiVC(ctx context.Context, reqParams interface{})
 func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor,
 	vc *vsphere.VirtualCenter, volumeManager cnsvolume.Manager, cnsConfig *config.Config, spec *CreateVolumeSpec,
 	datastores []*vsphere.DatastoreInfo, filterSuspendedDatastores, useSupervisorId bool, extraParams interface{}) (
-	string, string, error) {
+	*cnsvolume.CnsVolumeInfo, string, error) {
 	log := logger.GetLogger(ctx)
 	var err error
 	if spec.ScParams.StoragePolicyName != "" {
@@ -468,7 +503,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 				spec.ScParams.StoragePolicyName, err)
 			// TODO: need to extract fault from err returned by GetStoragePolicyIDByName.
 			// Currently, just return csi.fault.Internal.
-			return "", csifault.CSIInternalFault, err
+			return nil, csifault.CSIInternalFault, err
 		}
 	}
 
@@ -476,7 +511,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 		datastores, err = vsphere.FilterSuspendedDatastores(ctx, datastores)
 		if err != nil {
 			log.Errorf("Error occurred while filter suspended datastores, err: %+v", err)
-			return "", csifault.CSIInternalFault, err
+			return nil, csifault.CSIInternalFault, err
 		}
 	}
 
@@ -498,7 +533,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 		if !isFound {
 			// TODO: Need to figure out which fault need to be returned when datastoreURL is not specified in
 			// storage class. Currently, just return csi.fault.Internal.
-			return "", csifault.CSIInternalFault, logger.LogNewErrorf(log,
+			return nil, csifault.CSIInternalFault, logger.LogNewErrorf(log,
 				"datastore %q not found in candidate list for volume provisioning.",
 				spec.ScParams.DatastoreURL)
 		}
@@ -510,7 +545,7 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 	}
 	fault, err := isDataStoreCompatible(ctx, vc, spec, dataStoreList, nil)
 	if err != nil {
-		return "", fault, err
+		return nil, fault, err
 	}
 
 	// Retrieve net permissions from CnsConfig of manager and convert to required
@@ -564,9 +599,9 @@ func CreateFileVolumeUtil(ctx context.Context, clusterFlavor cnstypes.CnsCluster
 	volumeInfo, faultType, err := volumeManager.CreateVolume(ctx, createSpec, extraParams)
 	if err != nil {
 		log.Errorf("failed to create file volume %q with error %+v faultType %q", spec.Name, err, faultType)
-		return "", faultType, err
+		return nil, faultType, err
 	}
-	return volumeInfo.VolumeID.Id, "", nil
+	return volumeInfo, "", nil
 }
 
 // getHostVsanUUID returns the config.clusterInfo.nodeUuid of the ESX host's
@@ -1032,44 +1067,45 @@ func isExpansionRequired(ctx context.Context, volumeID string, requestedSize int
 // to be filled with the CSI CreateSnapshotRequest Name, which is generated by the CSI snapshotter sidecar.
 //
 // The returned string is a combination of CNS VolumeID and CNS SnapshotID concatenated by the "+" sign.
-// The returned *time.Time denotes the creation time of snapshot from the storage system, i.e., CNS.
+// The returned cnsSnapshotInfo include details of snapshot created from the storage system, i.e., CNS.
 func CreateSnapshotUtil(ctx context.Context, volumeManager cnsvolume.Manager, volumeID string,
-	snapshotName string) (string, *time.Time, error) {
+	snapshotName string, extraParams interface{}) (string, *cnsvolume.CnsSnapshotInfo, error) {
 	log := logger.GetLogger(ctx)
 
 	log.Debugf("vSphere CSI driver is creating snapshot with description, %q, on volume: %q", snapshotName, volumeID)
-	cnsSnapshotInfo, err := volumeManager.CreateSnapshot(ctx, volumeID, snapshotName)
+	cnsSnapshotInfo, err := volumeManager.CreateSnapshot(ctx, volumeID, snapshotName, extraParams)
 	if err != nil {
 		log.Errorf("failed to create snapshot on volume %q with description %q with error %+v",
 			volumeID, snapshotName, err)
 		return "", nil, err
 	}
 	log.Debugf("Successfully created snapshot %q with description, %q, on volume: %q at timestamp %q",
-		cnsSnapshotInfo.SnapshotID, snapshotName, volumeID, cnsSnapshotInfo.SnapshotCreationTimestamp)
+		cnsSnapshotInfo.SnapshotID, snapshotName, volumeID, cnsSnapshotInfo.SnapshotLatestOperationCompleteTime)
 
 	csiSnapshotID := volumeID + VSphereCSISnapshotIdDelimiter + cnsSnapshotInfo.SnapshotID
 
-	return csiSnapshotID, &cnsSnapshotInfo.SnapshotCreationTimestamp, nil
+	return csiSnapshotID, cnsSnapshotInfo, nil
 }
 
 // DeleteSnapshotUtil is the helper function to delete CNS snapshot for given snapshotId
-func DeleteSnapshotUtil(ctx context.Context, volumeManager cnsvolume.Manager, csiSnapshotID string) error {
+func DeleteSnapshotUtil(ctx context.Context, volumeManager cnsvolume.Manager, csiSnapshotID string,
+	extraParams interface{}) (*cnsvolume.CnsSnapshotInfo, error) {
 	log := logger.GetLogger(ctx)
 
 	cnsVolumeID, cnsSnapshotID, err := ParseCSISnapshotID(csiSnapshotID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	log.Debugf("vSphere CSI driver is deleting snapshot %q on volume: %q", cnsSnapshotID, cnsVolumeID)
-	err = volumeManager.DeleteSnapshot(ctx, cnsVolumeID, cnsSnapshotID)
+	cnsSnapshotInfo, err := volumeManager.DeleteSnapshot(ctx, cnsVolumeID, cnsSnapshotID, extraParams)
 	if err != nil {
-		return logger.LogNewErrorf(log, "failed to delete snapshot %q on volume %q with error %+v",
+		return nil, logger.LogNewErrorf(log, "failed to delete snapshot %q on volume %q with error %+v",
 			cnsSnapshotID, cnsVolumeID, err)
 	}
 	log.Debugf("Successfully deleted snapshot %q on volume %q", cnsSnapshotID, cnsVolumeID)
 
-	return nil
+	return cnsSnapshotInfo, nil
 }
 
 // GetCnsVolumeType is the helper function that determines the volume type based on the volume-id
@@ -1204,4 +1240,57 @@ func isDataStoreCompatible(ctx context.Context, vc *vsphere.VirtualCenter, spec 
 		}
 	}
 	return "", nil
+}
+
+// QueryVolumeCryptoKeyByID retrieves the encryption key ID for a volume.
+func QueryVolumeCryptoKeyByID(
+	ctx context.Context,
+	volumeManager cnsvolume.Manager,
+	volumeID string) (*vim25types.CryptoKeyId, error) {
+
+	result, err := volumeManager.QueryVolumeInfo(ctx, []cnstypes.CnsVolumeId{{Id: volumeID}})
+	if err != nil {
+		return nil, err
+	}
+
+	blockVolumeInfo, ok := result.VolumeInfo.(*cnstypes.CnsBlockVolumeInfo)
+	if !ok {
+		return nil, fmt.Errorf("failed to retrieve CNS volume info")
+	}
+
+	storageObj := blockVolumeInfo.VStorageObject
+
+	diskFileBackingInfo, ok := storageObj.Config.Backing.(*vim25types.BaseConfigInfoDiskFileBackingInfo)
+	if !ok {
+		return nil, fmt.Errorf("failed to retrieve FCD backing info")
+	}
+
+	return diskFileBackingInfo.KeyId, nil
+}
+
+// createCryptoSpec creates a crypto spec based on the requested encryption operation.
+//
+// - Encrypt: Source is not encrypted, target is encrypted.
+// - Decrypt: Source is encrypted, target is not.
+// - NoOp: Both source and target are encrypted with the same key.
+// - ShallowRecrypt: Both source and target are encrypted with different keys.
+func createCryptoSpec(oldKeyID, newKeyID *vim25types.CryptoKeyId) vim25types.BaseCryptoSpec {
+	if oldKeyID == nil && newKeyID == nil {
+		return nil
+	}
+
+	if oldKeyID == nil {
+		return &vim25types.CryptoSpecEncrypt{CryptoKeyId: *newKeyID}
+	}
+
+	if newKeyID == nil {
+		return &vim25types.CryptoSpecDecrypt{}
+	}
+
+	if oldKeyID.KeyId == newKeyID.KeyId &&
+		oldKeyID.ProviderId.Id == newKeyID.ProviderId.Id {
+		return &vim25types.CryptoSpecNoOp{}
+	}
+
+	return &vim25types.CryptoSpecShallowRecrypt{NewKeyId: *newKeyID}
 }

@@ -149,7 +149,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		}()
 
 		pvcUID := string(pvclaim.GetUID())
-		framework.Logf("PVC UUID in GC " + pvcUID)
+		framework.Logf("PVC UUID in GC %q", pvcUID)
 
 		// Verify using CNS Query API if VolumeID retrieved from PV is present.
 		framework.Logf("Invoking QueryCNSVolumeWithResult with VolumeID: %s", fcdIDInCNS)
@@ -194,7 +194,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod1")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+pvcNameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod.Spec.NodeName+"-"+pvcNameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}()
 
@@ -203,7 +203,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 		ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is created or not for Pod1")
-		verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, pod.Spec.NodeName+"-"+pvcNameInSV,
+		verifyCNSFileAccessConfigCRDInSupervisor(ctx, pod.Spec.NodeName+"-"+pvcNameInSV,
 			crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 
 		ginkgo.By("Verify the volume is accessible and Read/write is possible")
@@ -216,7 +216,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		for i := 2; i <= volumeOpsScale; i++ {
 			ginkgo.By("Create Pods concurrently, without waiting them to be running here..")
 			executeCommand := "echo 'Hi' && while true ; do sleep 2 ; done"
-			newPod := fpod.MakePod(namespace, nil, []*v1.PersistentVolumeClaim{pvclaim}, false, executeCommand)
+			newPod := fpod.MakePod(namespace, nil, []*v1.PersistentVolumeClaim{pvclaim},
+				admissionapi.LevelBaseline, executeCommand)
 
 			newPod, err = client.CoreV1().Pods(namespace).Create(ctx, newPod, metav1.CreateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -242,10 +243,10 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		}()
 
 		gcClusterID := strings.Replace(pvcNameInSV, pvcUID, "", -1)
-		framework.Logf("gcClusterId " + gcClusterID)
+		framework.Logf("gcClusterId %q", gcClusterID)
 
 		pvUID := string(persistentvolumes[0].UID)
-		framework.Logf("PV uuid " + pvUID)
+		framework.Logf("PV uuid %q", pvUID)
 
 		for _, multipod := range pods {
 			ginkgo.By(fmt.Sprintf("Wait for pod %s to be up and running", multipod.Name))
@@ -256,7 +257,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			podUID := string(tempPod.UID)
-			framework.Logf("Pod uuid : " + podUID)
+			framework.Logf("Pod uuid : %q", podUID)
 
 			//Add a check to validate CnsVolumeMetadata crd
 			verifyCRDInSupervisorWithWait(ctx, f, pvcNameInSV, crdCNSVolumeMetadatas, crdVersion, crdGroup, true)
@@ -268,7 +269,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 
 			ginkgo.By(fmt.Sprintf("Verifying whether the CnsFileAccessConfig CRD %s is created or not for Pod %s",
 				tempPod.Spec.NodeName+"-"+pvcNameInSV, multipod.Name))
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, tempPod.Spec.NodeName+"-"+pvcNameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, tempPod.Spec.NodeName+"-"+pvcNameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 		}
 
@@ -308,7 +309,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 			ginkgo.By("Verifying whether the CnsFileAccessConfig CRD is Deleted or not for Pod")
-			verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, multiPod.Spec.NodeName+"-"+pvcNameInSV,
+			verifyCNSFileAccessConfigCRDInSupervisor(ctx, multiPod.Spec.NodeName+"-"+pvcNameInSV,
 				crdCNSFileAccessConfig, crdVersion, crdGroup, false)
 		}
 	})
@@ -378,7 +379,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		}()
 
 		for index, claim := range pvclaims {
-			framework.Logf("Waiting for all claims %s to be in bound state - PVC number %s", claim.Name, index)
+			framework.Logf("Waiting for all claims %s to be in bound state - PVC number %d", claim.Name, index)
 			pv, err := fpv.WaitForPVClaimBoundPhase(ctx, client, []*v1.PersistentVolumeClaim{claim},
 				framework.ClaimProvisionTimeout)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -414,7 +415,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 
 		if volHealthCheck {
 			for index, claim := range pvclaims {
-				framework.Logf("poll for health status annotation for volume number = %s", index)
+				framework.Logf("poll for health status annotation for volume number = %d", index)
 				err = pvcHealthAnnotationWatcher(ctx, client, claim, healthStatusAccessible)
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
@@ -424,7 +425,8 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 		for podCount < volumeOpsScale {
 			ginkgo.By("Create Pods concurrently, without waiting them to be running here..")
 			executeCommand := "echo 'Hi' && while true ; do sleep 2 ; done"
-			newPod := fpod.MakePod(namespace, nil, pvclaims, false, executeCommand)
+			newPod := fpod.MakePod(namespace, nil, pvclaims,
+				admissionapi.LevelBaseline, executeCommand)
 			newPod, err = client.CoreV1().Pods(namespace).Create(ctx, newPod, metav1.CreateOptions{})
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			podArray[podCount] = newPod
@@ -460,7 +462,7 @@ var _ = ginkgo.Describe("[rwm-csi-tkg] File Volume Operation storm Test", func()
 				gomega.Expect(fcdIDInCNS).NotTo(gomega.BeEmpty())
 
 				framework.Logf("Searching for file access config crd %s", tempPod.Spec.NodeName+"-"+pvcNameInSV)
-				verifyCNSFileAccessConfigCRDInSupervisor(ctx, f, tempPod.Spec.NodeName+"-"+pvcNameInSV,
+				verifyCNSFileAccessConfigCRDInSupervisor(ctx, tempPod.Spec.NodeName+"-"+pvcNameInSV,
 					crdCNSFileAccessConfig, crdVersion, crdGroup, true)
 				fileAccessCRD = append(fileAccessCRD, tempPod.Spec.NodeName+"-"+pvcNameInSV)
 			}

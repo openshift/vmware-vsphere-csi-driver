@@ -43,8 +43,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Statefulset-Level5", func() {
-	f := framework.NewDefaultFramework("e2e-vsphere-topology-aware-provisioning")
+var _ = ginkgo.Describe("[topology-positive] Topology-Positive", func() {
+	f := framework.NewDefaultFramework("topology-positive")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
 		client                    clientset.Interface
@@ -85,10 +85,9 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		bindingMode = storagev1.VolumeBindingWaitForFirstConsumer
 		topologyLength, leafNode, leafNodeTag0, leafNodeTag1, leafNodeTag2 = 5, 4, 0, 1, 2
 
-		topologyMap := GetAndExpectStringEnvVar(topologyMap)
-		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap,
-			topologyLength)
-		allowedTopologies = createAllowedTopolgies(topologyMap, topologyLength)
+		topologyMap := GetAndExpectStringEnvVar(envTopologyMap)
+		topologyAffinityDetails, topologyCategories = createTopologyMapLevel5(topologyMap)
+		allowedTopologies = createAllowedTopolgies(topologyMap)
 		if os.Getenv(envPandoraSyncWaitTime) != "" {
 			pandoraSyncWaitTime, err = strconv.Atoi(os.Getenv(envPandoraSyncWaitTime))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -185,7 +184,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -265,7 +265,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -362,7 +363,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -457,7 +459,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -566,7 +569,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -743,7 +747,8 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		// Wait for StatefulSet pods to be in up and running state
 		fss.WaitForStatusReadyReplicas(ctx, client, statefulset, replicas)
 		gomega.Expect(fss.CheckMount(ctx, client, statefulset, mountPath)).NotTo(gomega.HaveOccurred())
-		ssPodsBeforeScaleDown := fss.GetPodList(ctx, client, statefulset)
+		ssPodsBeforeScaleDown, err := fss.GetPodList(ctx, client, statefulset)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		gomega.Expect(ssPodsBeforeScaleDown.Items).NotTo(gomega.BeEmpty(),
 			fmt.Sprintf("Unable to get list of Pods from the Statefulset: %v", statefulset.Name))
 		gomega.Expect(len(ssPodsBeforeScaleDown.Items) == int(replicas)).To(gomega.BeTrue(),
@@ -907,8 +912,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on appropriate " +
 			"node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -996,8 +1000,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
-			allowedTopologies)
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
@@ -1127,7 +1130,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		as specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1273,7 +1276,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -1340,7 +1343,7 @@ var _ = ginkgo.Describe("[csi-topology-for-level5] Topology-Provisioning-For-Sta
 		specified in the allowed topologies of SC */
 		ginkgo.By("Verify PV node affinity and that the PODS are running on " +
 			"appropriate node as specified in the allowed topologies of SC")
-		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod, namespace,
+		err = verifyPVnodeAffinityAndPODnodedetailsForStandalonePodLevel5(ctx, client, pod,
 			allowedTopologies)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 

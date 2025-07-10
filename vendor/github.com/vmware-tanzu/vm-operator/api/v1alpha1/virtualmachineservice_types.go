@@ -1,4 +1,5 @@
-// Copyright (c) 2019 VMware, Inc. All Rights Reserved.
+// © Broadcom. All Rights Reserved.
+// The term “Broadcom” refers to Broadcom Inc. and/or its subsidiaries.
 // SPDX-License-Identifier: Apache-2.0
 
 package v1alpha1
@@ -91,6 +92,9 @@ type VirtualMachineServiceSpec struct {
 	// This feature depends on whether the underlying load balancer provider supports specifying
 	// the loadBalancerIP when a load balancer is created.
 	// This field will be ignored if the provider does not support the feature.
+	// Deprecated: This field was under-specified and its meaning varies across implementations.
+	// Using it is non-portable and it may not support dual-stack.
+	// Users are encouraged to use implementation-specific annotations when available.
 	// +optional
 	LoadBalancerIP string `json:"loadBalancerIP,omitempty"`
 
@@ -132,10 +136,11 @@ type VirtualMachineServiceStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:shortName=vmservice
-// +kubebuilder:storageversion
+// +kubebuilder:storageversion:false
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".spec.type"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineService is the Schema for the virtualmachineservices API.
 // A VirtualMachineService represents the desired specification and the observed status of a VirtualMachineService
@@ -154,6 +159,7 @@ func (s *VirtualMachineService) NamespacedName() string {
 }
 
 // +kubebuilder:object:root=true
+// +kubebuilder:deprecatedversion
 
 // VirtualMachineServiceList contains a list of VirtualMachineService.
 type VirtualMachineServiceList struct {
@@ -163,5 +169,5 @@ type VirtualMachineServiceList struct {
 }
 
 func init() {
-	SchemeBuilder.Register(&VirtualMachineService{}, &VirtualMachineServiceList{})
+	objectTypes = append(objectTypes, &VirtualMachineService{}, &VirtualMachineServiceList{})
 }

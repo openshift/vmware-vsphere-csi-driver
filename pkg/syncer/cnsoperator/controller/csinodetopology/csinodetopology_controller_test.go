@@ -23,7 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -45,7 +45,7 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 		testUnexpectedVmName    = "test-unexpected-vm-name"
 		testNodeIDInSpec        = "test-node-id"
 		testSupervisorNamespace = "test-supervisor-namespace"
-		expectedZoneKey         = corev1.LabelZoneFailureDomainStable
+		expectedZoneKey         = corev1.LabelTopologyZone
 		expectedZoneValue       = "zone-1"
 		testCSINodeTopology     = &csinodetopologyv1alpha1.CSINodeTopology{
 			ObjectMeta: metav1.ObjectMeta{
@@ -146,7 +146,7 @@ func TestCSINodeTopologyControllerForTKGSHA(t *testing.T) {
 			supervisorObjs := []runtime.Object{test.vm}
 
 			supervisor_scheme := scheme.Scheme
-			supervisor_scheme.AddKnownTypes(vmoperatortypes.SchemeGroupVersion, test.vm)
+			supervisor_scheme.AddKnownTypes(vmoperatortypes.GroupVersion, test.vm)
 
 			fakeVmOperatorClient := fake.NewClientBuilder().
 				WithScheme(supervisor_scheme).
