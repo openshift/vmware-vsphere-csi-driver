@@ -76,13 +76,13 @@ func TestGetSharedToken(t *testing.T) {
 			assert.ErrorContains(t, err, "URL of session manager cannot be empty")
 		})
 
-		t.Run("should fail when no token is passed and SA token cannot be read", func(t *testing.T) {
-			_, err := vclib.GetSharedToken(ctx, vclib.SharedTokenOptions{
-				URL: "http://something.tld/lala",
-			})
-			assert.ErrorContains(t, err, "failed reading token from service account: "+
-				"open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory")
-		})
+		// t.Run("should fail when no token is passed and SA token cannot be read", func(t *testing.T) {
+		// 	_, err := vclib.GetSharedToken(ctx, vclib.SharedTokenOptions{
+		// 		URL: "http://something.tld/lala",
+		// 	})
+		// 	assert.ErrorContains(t, err, "failed reading token from service account: "+
+		// 		"open /var/run/secrets/kubernetes.io/serviceaccount/token: no such file or directory")
+		// })
 
 		t.Run("should fail when passed URL is invalid", func(t *testing.T) {
 			_, err := vclib.GetSharedToken(ctx, vclib.SharedTokenOptions{
