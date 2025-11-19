@@ -68,6 +68,70 @@ type NodeManagerInterface interface {
 	GetAllNodesByVC(ctx context.Context, vcHost string) ([]*cnsvsphere.VirtualMachine, error)
 }
 
+// TopologyCalculatorInterface handles post-creation topology calculation for vanilla controller.
+// Used to mock topology calculation in unit tests.
+type TopologyCalculatorInterface interface {
+	CalculateAccessibleTopology(ctx context.Context, params TopologyCalculationParams) ([]map[string]string, error)
+}
+
+// TopologyCalculationParams contains all parameters needed for topology calculation
+type TopologyCalculationParams struct {
+	VolumeInfo          *cnsvolume.CnsVolumeInfo
+	VCenter             *cnsvsphere.VirtualCenter
+	VCHost              string
+	TopologySegmentsMap map[string][]map[string]string
+	VolumeManager       cnsvolume.Manager
+	NodeManager         NodeManagerInterface
+}
+
+// defaultTopologyCalculator is the default implementation of TopologyCalculatorInterface
+type defaultTopologyCalculator struct{}
+
+// CalculateAccessibleTopology calculates the accessible topology for a volume
+func (d *defaultTopologyCalculator) CalculateAccessibleTopology(ctx context.Context,
+	params TopologyCalculationParams) ([]map[string]string, error) {
+	log := logger.GetLogger(ctx)
+
+	// Retrieve the datastoreURL of the Provisioned Volume. If CNS CreateVolume
+	// API does not return datastoreURL, retrieve this by calling QueryVolume.
+	// Otherwise, retrieve this from PlacementResults in the response of
+	// CreateVolume API.
+	datastoreURL := params.VolumeInfo.DatastoreURL
+	if datastoreURL == "" {
+		volumeIds := []cnstypes.CnsVolumeId{{Id: params.VolumeInfo.VolumeID.Id}}
+		queryFilter := cnstypes.CnsQueryFilter{
+			VolumeIds: volumeIds,
+		}
+
+		querySelection := cnstypes.CnsQuerySelection{
+			Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
+		}
+		queryResult, err := utils.QueryVolumeUtil(ctx, params.VolumeManager, queryFilter, &querySelection)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"queryVolumeUtil failed for volumeID: %s in vCenter %q. Error: %+v",
+				params.VolumeInfo.VolumeID.Id, params.VCHost, err)
+		}
+		if len(queryResult.Volumes) == 0 || queryResult.Volumes[0].DatastoreUrl == "" {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"queryVolumeUtil could not retrieve volume information for volume ID: %q in vCenter %q",
+				params.VolumeInfo.VolumeID.Id, params.VCHost)
+		}
+		datastoreURL = queryResult.Volumes[0].DatastoreUrl
+	}
+
+	// Retrieve datastore topology information from CSINodeTopology CRs.
+	allNodeVMs, err := params.NodeManager.GetAllNodesByVC(ctx, params.VCHost)
+	if err != nil {
+		return nil, logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to fetch VirtualMachines for the registered nodes in VC %q. Error: %v", params.VCHost, err)
+	}
+
+	// Find datastore topology from the retrieved datastoreURL.
+	return calculateAccessibleTopologiesForDatastore(ctx, params.VCenter,
+		params.TopologySegmentsMap[params.VCHost], allNodeVMs, datastoreURL, params.NodeManager)
+}
+
 type controller struct {
 	// Deprecated
 	// To be removed after multi vCenter support is added
@@ -79,6 +143,8 @@ type controller struct {
 	authMgr     common.AuthorizationService
 	authMgrs    map[string]*common.AuthManager
 	topologyMgr commoncotypes.ControllerTopologyService
+	csi.UnimplementedControllerServer
+	topologyCalc TopologyCalculatorInterface
 }
 
 var (
@@ -89,10 +155,10 @@ var (
 	// This will hold mapping for VolumeID to vCenter for multi vCenter CSI topology deployment
 	volumeInfoService cnsvolumeinfo.VolumeInfoService
 
-	// The following variables hold feature states for multi-vcenter-csi-topology, CSI Migration
+	// The following variables hold feature states for CSI Migration
 	// and authorisation check.
-	multivCenterCSITopologyEnabled, csiMigrationEnabled, filterSuspendedDatastores,
-	isTopologyAwareFileVolumeEnabled bool
+	csiMigrationEnabled, filterSuspendedDatastores,
+	isTopologyAwareFileVolumeEnabled, isCSITransactionSupportEnabled bool
 
 	// variables for list volumes
 	volIDsInK8s             = make([]string, 0)
@@ -110,7 +176,9 @@ var (
 
 // New creates a CNS controller.
 func New() csitypes.CnsController {
-	return &controller{}
+	return &controller{
+		topologyCalc: &defaultTopologyCalculator{},
+	}
 }
 
 // Init is initializing controller struct.
@@ -119,18 +187,18 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 	log.Infof("Initializing CNS controller")
 	var err error
 	var operationStore cnsvolumeoperationrequest.VolumeOperationRequest
+
 	operationStore, err = cnsvolumeoperationrequest.InitVolumeOperationRequestInterface(ctx,
 		config.Global.CnsVolumeOperationRequestCleanupIntervalInMin,
 		func() bool {
 			return commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
-		}, false)
+		}, false,
+		false)
 	if err != nil {
 		log.Errorf("failed to initialize VolumeOperationRequestInterface with error: %v", err)
 		return err
 	}
 	// Check if the feature states are enabled.
-	multivCenterCSITopologyEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
-		common.MultiVCenterCSITopology)
 	csiMigrationEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIMigration)
 	filterSuspendedDatastores = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 		common.CnsMgrSuspendCreateVolume)
@@ -138,145 +206,105 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		common.TopologyAwareFileVolume)
 
 	vcManager := cnsvsphere.GetVirtualCenterManager(ctx)
-	if !multivCenterCSITopologyEnabled {
-		// Get VirtualCenterInstance and validate version.
-		vc, err := cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: config}, false)
-		if err != nil {
-			log.Errorf("failed to get vCenter Instance. err=%v", err)
-			return err
-		}
-		vcenterconfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, config)
-		// force loading latest vCenter config at the time of creating new VC client
+	// Multi vCenter feature enabled
+	c.managers = &common.Managers{
+		CnsConfig:      config,
+		VcenterManager: vcManager,
+	}
+	c.managers.VcenterConfigs = make(map[string]*cnsvsphere.VirtualCenterConfig)
+	c.managers.VolumeManagers = make(map[string]cnsvolume.Manager)
+	// Get VirtualCenterManager instance and validate version.
+	vcenterconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, config)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
+	}
+	var multivCenterTopologyDeployment bool
+	if len(vcenterconfigs) > 1 {
+		multivCenterTopologyDeployment = true
+	}
+	for _, vcenterconfig := range vcenterconfigs {
 		vcenterconfig.ReloadVCConfigForNewClient = true
+		vcenter, err := cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcenterconfig, false)
 		if err != nil {
-			log.Errorf("failed to get VirtualCenterConfig. err=%v", err)
-			return err
+			return logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter %q"+
+				"err=%v", vcenterconfig.Host, err)
 		}
-		vc.Config = vcenterconfig
-		volumeManager, err := cnsvolume.GetManager(ctx, vc, operationStore,
-			true, false,
-			false, cnstypes.CnsClusterFlavorVanilla)
+		c.managers.VcenterConfigs[vcenterconfig.Host] = vcenterconfig
+		volumeManager, err := cnsvolume.GetManager(ctx, vcenter,
+			operationStore, true, true,
+			multivCenterTopologyDeployment, cnstypes.CnsClusterFlavorVanilla)
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
 		}
-
-		c.manager = &common.Manager{
-			VcenterConfig:  vcenterconfig,
-			CnsConfig:      config,
-			VolumeManager:  volumeManager,
-			VcenterManager: vcManager,
-		}
-		// Check vCenter API Version
+		c.managers.VolumeManagers[vcenterconfig.Host] = volumeManager
+	}
+	vCenters, err := common.GetVCenters(ctx, c.managers)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get vcenters. err=%v", err)
+	}
+	// Check vCenter API Version
+	for _, vc := range vCenters {
 		err = common.CheckAPI(ctx, vc.Client.ServiceContent.About.ApiVersion, common.MinSupportedVCenterMajor,
 			common.MinSupportedVCenterMinor, common.MinSupportedVCenterPatch)
 		if err != nil {
-			log.Errorf("checkAPI failed for vcenter API version: %s, err=%v",
-				vc.Client.ServiceContent.About.ApiVersion, err)
-			return err
+			return logger.LogNewErrorf(log, "checkAPI failed for vcenter API version: %s for vCenter %s, err=%v",
+				vc.Client.ServiceContent.About.ApiVersion, vc.Config.Host, err)
 		}
-		log.Info("loading AuthorizationService")
-		authMgr, err := common.GetAuthorizationService(ctx, vc)
+	}
+
+	log.Info("loading AuthorizationService")
+	authMgrs, err := common.GetAuthorizationServices(ctx, vCenters)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to initialize authMgr. err=%v", err)
+	}
+	c.authMgrs = authMgrs
+	for _, authMgr := range authMgrs {
+		go common.ComputeDatastoreMapForBlockVolumes(authMgr, config.Global.CSIAuthCheckIntervalInMin)
+	}
+	allVCentersSupportvSANFileService := true
+	allVCentersSupportCnsTransaction := true
+	for _, vcconfig := range c.managers.VcenterConfigs {
+		isvSANFileServicesSupported, err := c.managers.VcenterManager.IsvSANFileServicesSupported(ctx,
+			vcconfig.Host)
 		if err != nil {
-			log.Errorf("failed to initialize authMgr. err=%v", err)
-			return err
+			return logger.LogNewErrorf(log, "failed to verify if vSAN file services is supported or not for vCenter: %s. "+
+				"Error:%+v", vcconfig.Host, err)
 		}
-		c.authMgr = authMgr
-		go common.ComputeDatastoreMapForBlockVolumes(authMgr.(*common.AuthManager),
-			config.Global.CSIAuthCheckIntervalInMin)
-		isvSANFileServicesSupported, err := c.manager.VcenterManager.IsvSANFileServicesSupported(ctx,
-			c.manager.VcenterConfig.Host)
-		if err != nil {
-			log.Errorf("failed to verify if vSAN file services is supported or not. Error:%+v", err)
-			return err
-		}
-		if isvSANFileServicesSupported {
-			go common.ComputeFSEnabledClustersToDsMap(authMgr.(*common.AuthManager),
-				config.Global.CSIAuthCheckIntervalInMin)
-		}
-	} else {
-		// Multi vCenter feature enabled
-		c.managers = &common.Managers{
-			CnsConfig:      config,
-			VcenterManager: vcManager,
-		}
-		c.managers.VcenterConfigs = make(map[string]*cnsvsphere.VirtualCenterConfig)
-		c.managers.VolumeManagers = make(map[string]cnsvolume.Manager)
-		// Get VirtualCenterManager instance and validate version.
-		vcenterconfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, config)
-		if err != nil {
-			return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
-		}
-		var multivCenterTopologyDeployment bool
-		if len(vcenterconfigs) > 1 {
-			multivCenterTopologyDeployment = true
-		}
-		for _, vcenterconfig := range vcenterconfigs {
-			vcenterconfig.ReloadVCConfigForNewClient = true
-			vcenter, err := cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcenterconfig, false)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter %q"+
-					"err=%v", vcenterconfig.Host, err)
-			}
-			c.managers.VcenterConfigs[vcenterconfig.Host] = vcenterconfig
-			volumeManager, err := cnsvolume.GetManager(ctx, vcenter,
-				operationStore, true, true,
-				multivCenterTopologyDeployment, cnstypes.CnsClusterFlavorVanilla)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to create an instance of volume manager. err=%v", err)
-			}
-			c.managers.VolumeManagers[vcenterconfig.Host] = volumeManager
-		}
-		vCenters, err := common.GetVCenters(ctx, c.managers)
-		if err != nil {
-			return logger.LogNewErrorf(log, "failed to get vcenters. err=%v", err)
-		}
-		// Check vCenter API Version
-		for _, vc := range vCenters {
-			err = common.CheckAPI(ctx, vc.Client.ServiceContent.About.ApiVersion, common.MinSupportedVCenterMajor,
-				common.MinSupportedVCenterMinor, common.MinSupportedVCenterPatch)
-			if err != nil {
-				return logger.LogNewErrorf(log, "checkAPI failed for vcenter API version: %s for vCenter %s, err=%v",
-					vc.Client.ServiceContent.About.ApiVersion, vc.Config.Host, err)
-			}
+		if !isvSANFileServicesSupported {
+			allVCentersSupportvSANFileService = false
 		}
 
-		log.Info("loading AuthorizationService")
-		authMgrs, err := common.GetAuthorizationServices(ctx, vCenters)
+		isCnsTransactionSupported, err := c.managers.VcenterManager.IsCnsTransactionSupported(ctx,
+			vcconfig.Host)
 		if err != nil {
-			return logger.LogNewErrorf(log, "failed to initialize authMgr. err=%v", err)
+			return logger.LogNewErrorf(log, "failed to verify if CNS transaction is supported or not for vCenter: %s. "+
+				"Error:%+v", vcconfig.Host, err)
 		}
-		c.authMgrs = authMgrs
-		for _, authMgr := range authMgrs {
-			go common.ComputeDatastoreMapForBlockVolumes(authMgr, config.Global.CSIAuthCheckIntervalInMin)
+		if !isCnsTransactionSupported {
+			allVCentersSupportCnsTransaction = false
 		}
-		var vsanFileServiceNotSupported bool
-		for _, vcconfig := range c.managers.VcenterConfigs {
-			isvSANFileServicesSupported, err := c.managers.VcenterManager.IsvSANFileServicesSupported(ctx,
-				vcconfig.Host)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to verify if vSAN file services is supported or not for vCenter: %s. "+
-					"Error:%+v", vcconfig.Host, err)
-			}
-			if !isvSANFileServicesSupported {
-				vsanFileServiceNotSupported = true
-				break
-			}
+	}
+	if !allVCentersSupportvSANFileService {
+		return logger.LogNewErrorf(log, "vSAN file service is not supported in one or more vCenter(s)")
+	}
+
+	// CSI Transaction Support requires both FSS to be enabled AND all vCenters to support CNS transactions
+	fssTransactionSupportEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		common.CSITransactionSupport)
+	isCSITransactionSupportEnabled = fssTransactionSupportEnabled && allVCentersSupportCnsTransaction
+	cnsvolumeoperationrequest.SetCSITransactionSupport(isCSITransactionSupportEnabled)
+
+	for _, vcconfig := range c.managers.VcenterConfigs {
+		go common.ComputeFSEnabledClustersToDsMap(authMgrs[vcconfig.Host], config.Global.CSIAuthCheckIntervalInMin)
+	}
+	if multivCenterTopologyDeployment {
+		log.Info("Loading CnsVolumeInfo Service to persist mapping for VolumeID to vCenter")
+		volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to load volumeInfoService service. Err: %v", err)
 		}
-		if vsanFileServiceNotSupported {
-			return logger.LogNewErrorf(log, "vSAN file service is not supported in one or more vCenter(s)")
-		}
-		for _, vcconfig := range c.managers.VcenterConfigs {
-			go common.ComputeFSEnabledClustersToDsMap(authMgrs[vcconfig.Host], config.Global.CSIAuthCheckIntervalInMin)
-		}
-		if multivCenterTopologyDeployment {
-			log.Info("Loading CnsVolumeInfo Service to persist mapping for VolumeID to vCenter")
-			volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to load volumeInfoService service. Err: %v", err)
-			}
-			if volumeInfoService != nil {
-				log.Infof("Successfully initialized VolumeInfoService")
-			}
+		if volumeInfoService != nil {
+			log.Infof("Successfully initialized VolumeInfoService")
 		}
 	}
 
@@ -287,7 +315,7 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		return err
 	}
 
-	go cnsvolume.ClearInvalidTasksFromListView(multivCenterCSITopologyEnabled)
+	go cnsvolume.ClearInvalidTasksFromListView(true)
 	cfgPath := cnsconfig.GetConfigPath(ctx)
 
 	watcher, err := fsnotify.NewWatcher()
@@ -329,25 +357,16 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		return err
 	}
 	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIMigration) {
-		if !multivCenterCSITopologyEnabled {
+		if len(c.managers.VcenterConfigs) == 1 {
 			log.Info("CSI Migration Feature is Enabled. Loading Volume Migration Service")
-			volumeMigrationService, err = migration.GetVolumeMigrationService(ctx, &c.manager.VolumeManager, config, false)
+			volumeManager := c.managers.VolumeManagers[c.managers.CnsConfig.Global.VCenterIP]
+			volumeMigrationService, err = migration.GetVolumeMigrationService(ctx, &volumeManager, config, false)
 			if err != nil {
 				log.Errorf("failed to get migration service. Err: %v", err)
 				return err
 			}
 		} else {
-			if len(c.managers.VcenterConfigs) == 1 {
-				log.Info("CSI Migration Feature is Enabled. Loading Volume Migration Service")
-				volumeManager := c.managers.VolumeManagers[c.managers.CnsConfig.Global.VCenterIP]
-				volumeMigrationService, err = migration.GetVolumeMigrationService(ctx, &volumeManager, config, false)
-				if err != nil {
-					log.Errorf("failed to get migration service. Err: %v", err)
-					return err
-				}
-			} else {
-				log.Infof("vSphere CSI Migration is not supported on the multi vCenter setup")
-			}
+			log.Infof("vSphere CSI Migration is not supported on the multi vCenter setup")
 		}
 	}
 
@@ -384,99 +403,48 @@ func (c *controller) ReloadConfiguration() error {
 	if err != nil {
 		return logger.LogNewErrorf(log, "failed to read config. Error: %+v", err)
 	}
-	if multivCenterCSITopologyEnabled {
-		newVcenterConfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, newCfg)
+	newVcenterConfigs, err := cnsvsphere.GetVirtualCenterConfigs(ctx, newCfg)
+	if err != nil {
+		return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
+	}
+	for _, newVCConfig := range newVcenterConfigs {
+		newVCConfig.ReloadVCConfigForNewClient = true
+		if c.managers.VolumeManagers[newVCConfig.Host] == nil {
+			log.Infof("Observed new vCenter server: %q in the config secret. "+
+				"Exiting vSphere CSI Controller Container for re-initialization", newVCConfig.Host)
+			unregisterAllvCenterErr := c.managers.VcenterManager.UnregisterAllVirtualCenters(ctx)
+			if unregisterAllvCenterErr != nil {
+				log.Warnf("failed to Unregister all vCenter servers. Error: %v. "+
+					"Proceeding to exit the vSphere CSI Controller Container for re-initialization",
+					unregisterAllvCenterErr)
+			}
+			os.Exit(1)
+		}
+		var vcenter *cnsvsphere.VirtualCenter
+		vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, newVCConfig.Host, false)
 		if err != nil {
-			return logger.LogNewErrorf(log, "failed to get VirtualCenterConfigs. err=%v", err)
+			return logger.LogNewErrorf(log, "failed to get VirtualCenter. err=%v", err)
 		}
-		for _, newVCConfig := range newVcenterConfigs {
-			newVCConfig.ReloadVCConfigForNewClient = true
-			if c.managers.VolumeManagers[newVCConfig.Host] == nil {
-				log.Infof("Observed new vCenter server: %q in the config secret. "+
-					"Exiting vSphere CSI Controller Container for re-initialization", newVCConfig.Host)
-				unregisterAllvCenterErr := c.managers.VcenterManager.UnregisterAllVirtualCenters(ctx)
-				if unregisterAllvCenterErr != nil {
-					log.Warnf("failed to Unregister all vCenter servers. Error: %v. "+
-						"Proceeding to exit the vSphere CSI Controller Container for re-initialization",
-						unregisterAllvCenterErr)
-				}
-				os.Exit(1)
-			}
-			var vcenter *cnsvsphere.VirtualCenter
-			vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, newVCConfig.Host, false)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to get VirtualCenter. err=%v", err)
-			}
-			vcenter.Config = newVCConfig
-			err := c.managers.VolumeManagers[newVCConfig.Host].ResetManager(ctx, vcenter)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to reset updated VC object in volumemanager for vCenter: %q "+
-					"err=%v", newVCConfig.Host, err)
-			}
-			c.managers.VcenterConfigs[newVCConfig.Host] = newVCConfig
-			c.authMgrs[newVCConfig.Host].ResetvCenterInstance(ctx, vcenter)
-		}
-		if newCfg != nil {
-			c.managers.CnsConfig = newCfg
-			log.Debugf("Updated managers.CnsConfig")
-		}
-		// Re-Initialize Node Manager to cache latest vCenter config.
-		log.Debug("Re-Initializing node manager")
-		c.nodeMgr = &node.Nodes{}
-		err = c.nodeMgr.Initialize(ctx)
+		vcenter.Config = newVCConfig
+		err := c.managers.VolumeManagers[newVCConfig.Host].ResetManager(ctx, vcenter)
 		if err != nil {
-			log.Errorf("failed to re-initialize nodeMgr. err=%v", err)
-			return err
+			return logger.LogNewErrorf(log, "failed to reset updated VC object in volumemanager for vCenter: %q "+
+				"err=%v", newVCConfig.Host, err)
 		}
-	} else {
-		// multivCenterCSITopology feature is disabled
-		oldvCenter := c.manager.VcenterConfig.Host
-		newVCConfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, newCfg)
-		if err != nil {
-			log.Errorf("failed to get VirtualCenterConfig. err=%v", err)
-			return err
-		}
-		if newVCConfig != nil {
-			newVCConfig.ReloadVCConfigForNewClient = true
-			if oldvCenter != newVCConfig.Host {
-				log.Infof("Observed new vCenter server: %q in the config secret. "+
-					"Exiting vSphere CSI Controller Container for re-initialization", newVCConfig.Host)
-				unregisterAllvCenterErr := c.managers.VcenterManager.UnregisterAllVirtualCenters(ctx)
-				if unregisterAllvCenterErr != nil {
-					log.Warnf("failed to Unregister all vCenter servers. Error: %v. "+
-						"Proceeding to exit the vSphere CSI Controller Container for re-initialization",
-						unregisterAllvCenterErr)
-				}
-				os.Exit(1)
-			}
-
-			var vcenter *cnsvsphere.VirtualCenter
-			vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: newCfg}, false)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to get VirtualCenter. err=%v", err)
-			}
-			vcenter.Config = newVCConfig
-			if c.authMgr != nil {
-				c.authMgr.ResetvCenterInstance(ctx, vcenter)
-				log.Info("Updated vCenter in auth manager")
-			}
-			err = c.manager.VolumeManager.ResetManager(ctx, vcenter)
-			if err != nil {
-				return logger.LogNewErrorf(log, "failed to reset volume manager. err=%v", err)
-			}
-			c.manager.VcenterConfig = newVCConfig
-			// Re-Initialize Node Manager to cache latest vCenter config.
-			c.nodeMgr = &node.Nodes{}
-			err = c.nodeMgr.Initialize(ctx)
-			if err != nil {
-				log.Errorf("failed to re-initialize nodeMgr. err=%v", err)
-				return err
-			}
-		}
-		if newCfg != nil {
-			c.manager.CnsConfig = newCfg
-			log.Debugf("Updated manager.CnsConfig")
-		}
+		c.managers.VcenterConfigs[newVCConfig.Host] = newVCConfig
+		c.authMgrs[newVCConfig.Host].ResetvCenterInstance(ctx, vcenter)
+	}
+	if newCfg != nil {
+		c.managers.CnsConfig = newCfg
+		log.Debugf("Updated managers.CnsConfig")
+	}
+	// Re-Initialize Node Manager to cache latest vCenter config.
+	log.Debug("Re-Initializing node manager")
+	c.nodeMgr = &node.Nodes{}
+	err = c.nodeMgr.Initialize(ctx)
+	if err != nil {
+		log.Errorf("failed to re-initialize nodeMgr. err=%v", err)
+		return err
 	}
 	return nil
 }
@@ -485,10 +453,8 @@ func (c *controller) filterDatastores(ctx context.Context, sharedDatastores []*c
 	vcHost string) ([]*cnsvsphere.DatastoreInfo, error) {
 	log := logger.GetLogger(ctx)
 	var dsMap map[string]*cnsvsphere.DatastoreInfo
-	if multivCenterCSITopologyEnabled {
+	if c.authMgrs[vcHost] != nil {
 		dsMap = c.authMgrs[vcHost].GetDatastoreMapForBlockVolumes(ctx)
-	} else {
-		dsMap = c.authMgr.GetDatastoreMapForBlockVolumes(ctx)
 	}
 	if len(dsMap) == 0 {
 		return nil, logger.LogNewError(log,
@@ -508,436 +474,6 @@ func (c *controller) filterDatastores(ctx context.Context, sharedDatastores []*c
 		return nil, errAllDSFilteredOut
 	}
 	return filteredDatastores, nil
-}
-
-// createBlockVolume creates a block volume based on the CreateVolumeRequest.
-func (c *controller) createBlockVolume(ctx context.Context, req *csi.CreateVolumeRequest) (
-	*csi.CreateVolumeResponse, string, error) {
-	log := logger.GetLogger(ctx)
-	// Volume Size - Default is 10 GiB.
-	volSizeBytes := int64(common.DefaultGbDiskSize * common.GbInBytes)
-	if req.GetCapacityRange() != nil && req.GetCapacityRange().RequiredBytes != 0 {
-		volSizeBytes = int64(req.GetCapacityRange().GetRequiredBytes())
-	}
-	volSizeMB := int64(common.RoundUpSize(volSizeBytes, common.MbInBytes))
-
-	// Check if the feature states are enabled.
-	isBlockVolumeSnapshotEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
-	csiMigrationFeatureState := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CSIMigration)
-
-	// Check if requested volume size and source snapshot size matches
-	volumeSource := req.GetVolumeContentSource()
-	var contentSourceSnapshotID string
-	if isBlockVolumeSnapshotEnabled && volumeSource != nil {
-		isCnsSnapshotSupported, err := c.manager.VcenterManager.IsCnsSnapshotSupported(ctx,
-			c.manager.VcenterConfig.Host)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to check if cns snapshot operations are supported on VC due to error: %v", err)
-		}
-		if !isCnsSnapshotSupported {
-			return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCode(log, codes.Unimplemented,
-				"VC version does not support snapshot operations")
-		}
-		sourceSnapshot := volumeSource.GetSnapshot()
-		if sourceSnapshot == nil {
-			return nil, csifault.CSIInvalidArgumentFault,
-				logger.LogNewErrorCode(log, codes.InvalidArgument, "unsupported VolumeContentSource type")
-		}
-		contentSourceSnapshotID = sourceSnapshot.GetSnapshotId()
-
-		cnsVolumeID, _, err := common.ParseCSISnapshotID(contentSourceSnapshotID)
-		if err != nil {
-			return nil, csifault.CSIInvalidArgumentFault,
-				logger.LogNewErrorCode(log, codes.InvalidArgument, err.Error())
-		}
-		// Query capacity in MB and datastore url for block volume snapshot
-		volumeIds := []cnstypes.CnsVolumeId{{Id: cnsVolumeID}}
-		cnsVolumeDetailsMap, err := utils.QueryVolumeDetailsUtil(ctx, c.manager.VolumeManager, volumeIds)
-		if err != nil {
-			log.Errorf("failed to retrieve the volume: %s details. err: %+v", cnsVolumeID, err)
-			return nil, csifault.CSIInternalFault, err
-		}
-		if _, ok := cnsVolumeDetailsMap[cnsVolumeID]; !ok {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"cns query volume did not return the volume: %s", cnsVolumeID)
-		}
-		snapshotSizeInMB := cnsVolumeDetailsMap[cnsVolumeID].SizeInMB
-		snapshotSizeInBytes := snapshotSizeInMB * common.MbInBytes
-		if volSizeBytes != snapshotSizeInBytes {
-			return nil, csifault.CSIInvalidArgumentFault, logger.LogNewErrorCodef(log, codes.InvalidArgument,
-				"size mismatches, requested volume size %d and source snapshot size %d."+
-					"Volume resizing while restoring from snapshot is currently unsupported.",
-				volSizeBytes, snapshotSizeInBytes)
-		}
-	}
-	// Fetching the feature state for csi-migration before parsing storage class
-	// params.
-	scParams, err := common.ParseStorageClassParams(ctx, req.Parameters, csiMigrationFeatureState)
-	// TODO: Need to figure out the fault returned by ParseStorageClassParams.
-	// Currently, just return "csi.fault.Internal".
-	if err != nil {
-		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.InvalidArgument,
-			"parsing storage class parameters failed with error: %+v", err)
-	}
-
-	if csiMigrationFeatureState && scParams.CSIMigration == "true" {
-		if len(scParams.Datastore) != 0 {
-			log.Infof("Converting datastore name: %q to Datastore URL", scParams.Datastore)
-			// Get vCenter.
-			// Need to extract fault from err returned by GetVirtualCenter.
-			// Currently, just return "csi.fault.Internal".
-			vCenter, err := cnsvsphere.GetVirtualCenterManager(ctx).GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
-			if err != nil {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to get vCenter. err: %+v", err)
-			}
-			dcList, err := vCenter.GetDatacenters(ctx)
-			// Need to extract fault from err returned by GetDatacenters.
-			// Currently, just return "csi.fault.Internal".
-			if err != nil {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to get datacenter list. err: %+v", err)
-			}
-			foundDatastoreURL := false
-			for _, dc := range dcList {
-				dsURLTodsInfoMap, err := dc.GetAllDatastores(ctx)
-				// Need to extract fault from err returned by GetAllDatastores.
-				// Currently, just return "csi.fault.Internal".
-				if err != nil {
-					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to get dsURLTodsInfoMap. err: %+v", err)
-				}
-				for dsURL, dsInfo := range dsURLTodsInfoMap {
-					if dsInfo.Info.Name == scParams.Datastore {
-						scParams.DatastoreURL = dsURL
-						log.Infof("Found datastoreURL: %q for datastore name: %q", scParams.DatastoreURL, scParams.Datastore)
-						foundDatastoreURL = true
-						break
-					}
-				}
-				if foundDatastoreURL {
-					break
-				}
-			}
-			if !foundDatastoreURL {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to find datastoreURL for datastore name: %q", scParams.Datastore)
-			}
-		} else if c.manager.VcenterConfig.MigrationDataStoreURL != "" {
-			scParams.DatastoreURL = c.manager.VcenterConfig.MigrationDataStoreURL
-		}
-	}
-
-	var createVolumeSpec = common.CreateVolumeSpec{
-		CapacityMB:              volSizeMB,
-		Name:                    req.Name,
-		ScParams:                scParams,
-		VolumeType:              common.BlockVolumeType,
-		ContentSourceSnapshotID: contentSourceSnapshotID,
-	}
-
-	// Check if vCenter task for this volume is already registered as part of
-	// improved idempotency CR
-	log.Debugf("Checking if vCenter task for volume %s is already registered.", req.Name)
-	var (
-		volTaskAlreadyRegistered bool
-		volumeInfo               *cnsvolume.CnsVolumeInfo
-		faultType                string
-		vcenter                  *cnsvsphere.VirtualCenter
-	)
-	// Get VirtualCenter instance
-	vcenter, err = c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
-	if err != nil {
-		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to get vCenter. Err: %v", err)
-	}
-	// Get operation store
-	operationStore := c.manager.VolumeManager.GetOperationStore()
-	if operationStore == nil {
-		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-			"Operation store cannot be nil")
-	}
-
-	volumeOperationDetails, err := operationStore.GetRequestDetails(ctx, req.Name)
-	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Debugf("CreateVolume task details for block volume %s are not found.", req.Name)
-		} else {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"Error occurred while getting CreateVolume task details for block volume %s, err: %+v",
-				req.Name, err)
-		}
-	} else if volumeOperationDetails.OperationDetails != nil {
-		if volumeOperationDetails.OperationDetails.TaskStatus ==
-			cnsvolumeoperationrequest.TaskInvocationStatusSuccess &&
-			volumeOperationDetails.VolumeID != "" {
-			// If task status is successful for this volume, then it means that volume is
-			// already created and there is no need to create it again.
-			log.Infof("Volume with name %q and id %q is already created on CNS with opId: %q.",
-				req.Name, volumeOperationDetails.VolumeID, volumeOperationDetails.OperationDetails.OpID)
-
-			volumeInfo = &cnsvolume.CnsVolumeInfo{
-				DatastoreURL: "",
-				VolumeID: cnstypes.CnsVolumeId{
-					Id: volumeOperationDetails.VolumeID,
-				},
-			}
-			volTaskAlreadyRegistered = true
-		} else if cnsvolume.IsTaskPending(volumeOperationDetails) {
-			// If task is created in CNS for this volume but task is in progress, then
-			// we need to monitor the task to check if volume creation is completed or not.
-			log.Infof("Volume with name %s has CreateVolume task %s pending on CNS.",
-				req.Name, volumeOperationDetails.OperationDetails.TaskID)
-
-			taskMoRef := types.ManagedObjectReference{
-				Type:  "Task",
-				Value: volumeOperationDetails.OperationDetails.TaskID,
-			}
-			task := object.NewTask(vcenter.Client.Client, taskMoRef)
-
-			defer func() {
-				// Persist the operation details before returning. Only success or error
-				// needs to be stored as InProgress details are stored when the task is
-				// created on CNS.
-				if volumeOperationDetails != nil && volumeOperationDetails.OperationDetails != nil &&
-					volumeOperationDetails.OperationDetails.TaskStatus !=
-						cnsvolumeoperationrequest.TaskInvocationStatusInProgress {
-					err := operationStore.StoreRequestDetails(ctx, volumeOperationDetails)
-					if err != nil {
-						log.Warnf("failed to store CreateVolume details with error: %v", err)
-					}
-				}
-			}()
-
-			volumeInfo, faultType, err = c.manager.VolumeManager.MonitorCreateVolumeTask(ctx,
-				&volumeOperationDetails, task, req.Name, c.manager.CnsConfig.Global.ClusterID)
-			if err != nil {
-				return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to monitor task for volume %s. Error: %+v", req.Name, err)
-			}
-			volTaskAlreadyRegistered = true
-		}
-	}
-
-	var (
-		sharedDatastores    []*cnsvsphere.DatastoreInfo
-		topologyRequirement *csi.TopologyRequirement
-	)
-	// Get accessibility.
-	topologyRequirement = req.GetAccessibilityRequirements()
-	if !volTaskAlreadyRegistered {
-		if topologyRequirement != nil {
-			// Check if topology domains have been provided in the vSphere CSI config secret.
-			// NOTE: We do not support kubernetes.io/hostname as a topology label.
-			if c.manager.CnsConfig.Labels.TopologyCategories == "" && c.manager.CnsConfig.Labels.Zone == "" &&
-				c.manager.CnsConfig.Labels.Region == "" {
-				return nil, csifault.CSIInvalidArgumentFault, logger.LogNewErrorCode(log, codes.InvalidArgument,
-					"topology category names not specified in the vsphere config secret")
-			}
-
-			// Get shared accessible datastores for matching topology requirement.
-			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TopologyPreferentialDatastores) {
-				sharedDatastores, err = c.topologyMgr.GetSharedDatastoresInTopology(ctx,
-					commoncotypes.VanillaTopologyFetchDSParams{
-						TopologyRequirement: topologyRequirement,
-						Vc:                  vcenter,
-						StoragePolicyName:   scParams.StoragePolicyName,
-					})
-				if err != nil || len(sharedDatastores) == 0 {
-					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to get shared datastores for topology requirement: %+v. Error: %+v",
-						topologyRequirement, err)
-				}
-			} else {
-				sharedDatastores, err = c.topologyMgr.GetSharedDatastoresInTopology(ctx,
-					commoncotypes.VanillaTopologyFetchDSParams{TopologyRequirement: topologyRequirement})
-				if err != nil || len(sharedDatastores) == 0 {
-					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to get shared datastores for topology requirement: %+v. Error: %+v",
-						topologyRequirement, err)
-				}
-			}
-			log.Debugf("Shared datastores [%+v] retrieved for topologyRequirement [%+v]", sharedDatastores,
-				topologyRequirement)
-		} else {
-			sharedDatastores, err = c.nodeMgr.GetSharedDatastoresInK8SCluster(ctx)
-			if err != nil || len(sharedDatastores) == 0 {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to get shared datastores in kubernetes cluster. Error: %+v", err)
-			}
-			if len(sharedDatastores) == 0 {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCode(log, codes.Internal,
-					"No datastore found for volume provisioning.")
-			}
-		}
-
-		// Filter datastores which in datastoreMap from sharedDatastores.
-		sharedDatastores, err = c.filterDatastores(ctx, sharedDatastores, c.manager.VcenterConfig.Host)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to create volume. Error: %+v", err)
-		}
-
-		volumeInfo, faultType, err = common.CreateBlockVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
-			c.manager, &createVolumeSpec, sharedDatastores,
-			common.CreateBlockVolumeOptions{
-				FilterSuspendedDatastores: filterSuspendedDatastores,
-			},
-			nil)
-		if err != nil {
-			return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to create volume. Error: %+v", err)
-		}
-	}
-
-	attributes := make(map[string]string)
-	attributes[common.AttributeDiskType] = common.DiskTypeBlockVolume
-	if csiMigrationFeatureState && scParams.CSIMigration == "true" {
-		// In case if feature state switch is enabled after controller is
-		// deployed, we need to initialize the volumeMigrationService.
-		if err := initVolumeMigrationService(ctx, c); err != nil {
-			// Error is already wrapped in CSI error code.
-			return nil, csifault.CSIInternalFault, err
-		}
-		// Return InitialVolumeFilepath in the response for TranslateCSIPVToInTree.
-		volumePath, err := volumeMigrationService.GetVolumePath(ctx, volumeInfo.VolumeID.Id)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to get volume path for volume id: %q. Error: %+v", volumeInfo.VolumeID.Id, err)
-		}
-		attributes[common.AttributeInitialVolumeFilepath] = volumePath
-	}
-
-	resp := &csi.CreateVolumeResponse{
-		Volume: &csi.Volume{
-			VolumeId:      volumeInfo.VolumeID.Id,
-			CapacityBytes: int64(units.FileSize(volSizeMB * common.MbInBytes)),
-			VolumeContext: attributes,
-		},
-	}
-
-	// For topology aware provisioning, populate the topology segments parameter
-	// in the CreateVolumeResponse struct.
-	if topologyRequirement != nil {
-		var (
-			datastoreAccessibleTopology []map[string]string
-			allNodeVMs                  []*cnsvsphere.VirtualMachine
-		)
-
-		// Retrieve the datastoreURL of the Provisioned Volume. If CNS CreateVolume
-		// API does not return datastoreURL, retrieve this by calling QueryVolume.
-		// Otherwise, retrieve this from PlacementResults in the response of
-		// CreateVolume API.
-		datastoreURL := volumeInfo.DatastoreURL
-		if datastoreURL == "" {
-			volumeIds := []cnstypes.CnsVolumeId{{Id: volumeInfo.VolumeID.Id}}
-			queryFilter := cnstypes.CnsQueryFilter{
-				VolumeIds: volumeIds,
-			}
-
-			querySelection := cnstypes.CnsQuerySelection{
-				Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
-			}
-
-			queryResult, err := utils.QueryVolumeUtil(ctx, c.manager.VolumeManager, queryFilter, &querySelection, true)
-			if err != nil {
-				// TODO: QueryVolume need to return faultType.
-				// Need to return faultType which is returned from QueryVolume.
-				// Currently, just return "csi.fault.Internal".
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"queryVolumeUtil failed for volumeID: %s, err: %+v", volumeInfo.VolumeID.Id, err)
-			}
-			if len(queryResult.Volumes) == 0 || queryResult.Volumes[0].DatastoreUrl == "" {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"queryVolumeUtil could not retrieve volume information for volume ID: %q",
-					volumeInfo.VolumeID.Id)
-			}
-			datastoreURL = queryResult.Volumes[0].DatastoreUrl
-		}
-		// If improved topology FSS is enabled, retrieve datastore topology information
-		// from CSINodeTopology CRs.
-		// Get all nodeVMs in cluster.
-		allNodeVMs, err = c.nodeMgr.GetAllNodes(ctx)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to find VirtualMachines for the registered nodes in the cluster. Error: %v", err)
-		}
-		// Find datastore topology from the retrieved datastoreURL.
-		datastoreAccessibleTopology, err = c.getAccessibleTopologiesForDatastore(ctx, vcenter, topologyRequirement,
-			allNodeVMs, datastoreURL)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to calculate accessible topologies for the datastore %q", datastoreURL)
-		}
-
-		// Add topology segments to the CreateVolumeResponse.
-		for _, topoSegments := range datastoreAccessibleTopology {
-			volumeTopology := &csi.Topology{
-				Segments: topoSegments,
-			}
-			resp.Volume.AccessibleTopology = append(resp.Volume.AccessibleTopology, volumeTopology)
-		}
-	}
-
-	// Set the Snapshot VolumeContentSource in the CreateVolumeResponse
-	if contentSourceSnapshotID != "" {
-		resp.Volume.ContentSource = &csi.VolumeContentSource{
-			Type: &csi.VolumeContentSource_Snapshot{
-				Snapshot: &csi.VolumeContentSource_SnapshotSource{
-					SnapshotId: contentSourceSnapshotID,
-				},
-			},
-		}
-	}
-	return resp, "", nil
-}
-
-// getAccessibleTopologiesForDatastore figures out the list of topologies from
-// which the given datastore is accessible.
-func (c *controller) getAccessibleTopologiesForDatastore(ctx context.Context, vcenter *cnsvsphere.VirtualCenter,
-	topologyRequirement *csi.TopologyRequirement, allNodeVMs []*cnsvsphere.VirtualMachine, datastoreURL string) (
-	[]map[string]string, error) {
-	log := logger.GetLogger(ctx)
-	var datastoreAccessibleTopology []map[string]string
-
-	// Find out all nodes which have access to the chosen datastore.
-	accessibleNodes, err := common.GetNodeVMsWithAccessToDatastore(ctx, vcenter, datastoreURL, allNodeVMs)
-	if err != nil || len(accessibleNodes) == 0 {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to find all the nodes from which the datastore %q is accessible", datastoreURL)
-	}
-
-	// Get node names for the accessible nodeVMs so that we can query CSINodeTopology CRs.
-	var accessibleNodeNames []string
-	for _, vmref := range accessibleNodes {
-		// Get UUID from VM reference.
-		vmUUID, err := cnsvsphere.GetUUIDFromVMReference(ctx, vcenter, vmref.Reference())
-		if err != nil {
-			return nil, logger.LogNewErrorCode(log, codes.Internal,
-				err.Error())
-		}
-		// Get NodeVM name from VM UUID.
-		nodeName, err := c.nodeMgr.GetNodeNameByUUID(ctx, vmUUID)
-		if err != nil {
-			return nil, logger.LogNewErrorCode(log, codes.Internal,
-				err.Error())
-		}
-		accessibleNodeNames = append(accessibleNodeNames, nodeName)
-	}
-
-	datastoreAccessibleTopology, err = c.topologyMgr.GetTopologyInfoFromNodes(ctx,
-		commoncotypes.VanillaRetrieveTopologyInfoParams{
-			NodeNames:           accessibleNodeNames,
-			DatastoreURL:        datastoreURL,
-			TopologyRequirement: topologyRequirement,
-		})
-	if err != nil {
-		return nil, logger.LogNewErrorCodef(log, codes.Internal,
-			"failed to find accessible topologies for the remaining nodes %v. Error: %+v",
-			accessibleNodeNames, err)
-	}
-	return datastoreAccessibleTopology, nil
 }
 
 // createBlockVolumeWithPlacementEngineForMultiVC creates a block volume based on the CreateVolumeRequest
@@ -1012,7 +548,6 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 			}
 		}
 	}
-
 	// Check if requested volume size and source snapshot size matches.
 	volumeSource := req.GetVolumeContentSource()
 	var contentSourceSnapshotID, snapshotDatastoreURL string
@@ -1045,6 +580,7 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 			return nil, csifault.CSIUnimplementedFault, logger.LogNewErrorCodef(log, codes.Unimplemented,
 				"VC %q does not support snapshot operations", vCenterHost)
 		}
+
 		// Query capacity in MB and datastore url for block volume snapshot.
 		volumeIds := []cnstypes.CnsVolumeId{{Id: cnsVolumeID}}
 		cnsVolumeDetailsMap, err := utils.QueryVolumeDetailsUtil(ctx, volumeManager, volumeIds)
@@ -1106,7 +642,6 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 		}
 		break
 	}
-
 	volumeOperationDetails, err := operationStore.GetRequestDetails(ctx, req.Name)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -1116,7 +651,7 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 				"error occurred while getting CreateVolume task details for block volume %q. Error: %+v",
 				req.Name, err)
 		}
-	} else if volumeOperationDetails.OperationDetails != nil {
+	} else if !isCSITransactionSupportEnabled && volumeOperationDetails.OperationDetails != nil {
 		if volumeOperationDetails.OperationDetails.TaskStatus ==
 			cnsvolumeoperationrequest.TaskInvocationStatusSuccess &&
 			volumeOperationDetails.VolumeID != "" {
@@ -1144,7 +679,7 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 				},
 			}
 			volTaskAlreadyRegistered = true
-		} else if cnsvolume.IsTaskPending(volumeOperationDetails) {
+		} else if !isCSITransactionSupportEnabled && cnsvolume.IsTaskPending(volumeOperationDetails) {
 			// If task is already created in CNS for this volume but task is in progress,
 			// we need to monitor the task to check if volume creation is complete or not.
 			log.Infof("Volume with name %s has CreateVolume task %s pending on VC %q.",
@@ -1248,7 +783,7 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 
 	if !volTaskAlreadyRegistered {
 		// Iterate through each VC and its accessibility requirements to try and create a volume.
-		// If it fails for any reason, move unto the next VC in list.
+		// If it fails for any reason, move to the next VC in list.
 		if topologyRequirement != nil {
 			var topologySegmentsList []map[string]string
 			for vcHost, topologySegmentsList = range vcTopologySegmentsMap {
@@ -1325,6 +860,7 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 				// Call CreateVolume.
 				// TODO: Few errors encountered  in CreateBlockVolumeUtilForMultiVC can be
 				// retried instead of moving unto next VC. Need to throw a custom error for such scenarios.
+
 				volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
 					common.VanillaCreateBlockVolParamsForMultiVC{
 						Vcenter:              vcenter,
@@ -1335,11 +871,33 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 						SharedDatastores:     sharedDatastores,
 						SnapshotDatastoreURL: snapshotDatastoreURL,
 						ClusterFlavor:        cnstypes.CnsClusterFlavorVanilla,
+					},
+					common.CreateBlockVolumeOptions{
+						IsCSITransactionSupportEnabled: isCSITransactionSupportEnabled,
 					})
 				if err != nil {
-					log.Error(err)
-					combinedErrMssgs = append(combinedErrMssgs, err.Error())
-					continue
+					if cnsvolume.IsNotSupportedFaultType(ctx, faultType) {
+						log.Warnf("NotSupported fault is detected: retrying CreateVolume without VolumeID in spec.")
+						volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
+							common.VanillaCreateBlockVolParamsForMultiVC{
+								Vcenter:              vcenter,
+								VolumeManager:        volumeMgr,
+								CNSConfig:            c.managers.CnsConfig,
+								StoragePolicyID:      storagePolicyID,
+								Spec:                 &createVolumeSpec,
+								SharedDatastores:     sharedDatastores,
+								SnapshotDatastoreURL: snapshotDatastoreURL,
+								ClusterFlavor:        cnstypes.CnsClusterFlavorVanilla,
+							},
+							common.CreateBlockVolumeOptions{
+								IsCSITransactionSupportEnabled: false,
+							})
+					}
+					if err != nil {
+						log.Error(err)
+						combinedErrMssgs = append(combinedErrMssgs, err.Error())
+						continue
+					}
 				}
 				log.Infof("volume %q created in vCenter %q. Proceeding to calculate "+
 					"accessible topology for the volume", volumeInfo.VolumeID.Id, vcHost)
@@ -1388,7 +946,6 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to create volume. Error: %+v", err)
 			}
-
 			volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
 				common.VanillaCreateBlockVolParamsForMultiVC{
 					Vcenter:              vcenter,
@@ -1399,10 +956,35 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 					SharedDatastores:     sharedDatastores,
 					SnapshotDatastoreURL: snapshotDatastoreURL,
 					ClusterFlavor:        cnstypes.CnsClusterFlavorVanilla,
+				},
+				common.CreateBlockVolumeOptions{
+					IsCSITransactionSupportEnabled: isCSITransactionSupportEnabled,
 				})
 			if err != nil {
-				return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to create volume. Error: %+v", err)
+				if cnsvolume.IsNotSupportedFaultType(ctx, faultType) {
+					log.Warnf("NotSupported fault is detected: retrying CreateVolume without VolumeID in spec.")
+					volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
+						common.VanillaCreateBlockVolParamsForMultiVC{
+							Vcenter:              vcenter,
+							VolumeManager:        volumeMgr,
+							CNSConfig:            c.managers.CnsConfig,
+							StoragePolicyID:      storagePolicyID,
+							Spec:                 &createVolumeSpec,
+							SharedDatastores:     sharedDatastores,
+							SnapshotDatastoreURL: snapshotDatastoreURL,
+							ClusterFlavor:        cnstypes.CnsClusterFlavorVanilla,
+						},
+						common.CreateBlockVolumeOptions{
+							IsCSITransactionSupportEnabled: false,
+						})
+					if err != nil {
+						return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
+							"failed to create volume without supplying VolumeID in the Spec. Error: %+v", err)
+					}
+				} else {
+					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
+						"failed to create volume. Error: %+v", err)
+				}
 			}
 			log.Infof("volume %q created in vCenter %q", volumeInfo.VolumeID.Id, vcHost)
 		}
@@ -1438,60 +1020,27 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 	// For topology aware provisioning, populate the topology segments parameter
 	// in the CreateVolumeResponse struct.
 	if topologyRequirement != nil {
-		var (
-			datastoreAccessibleTopology []map[string]string
-			allNodeVMs                  []*cnsvsphere.VirtualMachine
-		)
-		// Retrieve the datastoreURL of the Provisioned Volume. If CNS CreateVolume
-		// API does not return datastoreURL, retrieve this by calling QueryVolume.
-		// Otherwise, retrieve this from PlacementResults in the response of
-		// CreateVolume API.
-		datastoreURL := volumeInfo.DatastoreURL
-		if datastoreURL == "" {
-			if volumeMgr == nil {
-				volumeMgr, err = GetVolumeManagerFromVCHost(ctx, c.managers, vcHost)
-				if err != nil {
-					return nil, csifault.CSIInternalFault, logger.LogNewErrorCode(log, codes.Internal, err.Error())
-				}
-			}
-
-			volumeIds := []cnstypes.CnsVolumeId{{Id: volumeInfo.VolumeID.Id}}
-			queryFilter := cnstypes.CnsQueryFilter{
-				VolumeIds: volumeIds,
-			}
-
-			querySelection := cnstypes.CnsQuerySelection{
-				Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
-			}
-			queryResult, err := utils.QueryVolumeUtil(ctx, volumeMgr, queryFilter, &querySelection, true)
+		if volumeMgr == nil {
+			volumeMgr, err = GetVolumeManagerFromVCHost(ctx, c.managers, vcHost)
 			if err != nil {
-				// TODO: QueryVolume need to return faultType.
-				// Need to return faultType which is returned from QueryVolume.
-				// Currently, just return "csi.fault.Internal".
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"queryVolumeUtil failed for volumeID: %s in vCenter %q. Error: %+v",
-					volumeInfo.VolumeID.Id, vcHost, err)
+				return nil, csifault.CSIInternalFault, logger.LogNewErrorCode(log, codes.Internal, err.Error())
 			}
-			if len(queryResult.Volumes) == 0 || queryResult.Volumes[0].DatastoreUrl == "" {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"queryVolumeUtil could not retrieve volume information for volume ID: %q in vCenter %q",
-					volumeInfo.VolumeID.Id, vcHost)
-			}
-			datastoreURL = queryResult.Volumes[0].DatastoreUrl
 		}
 
-		// Retrieve datastore topology information from CSINodeTopology CRs.
-		allNodeVMs, err = c.nodeMgr.GetAllNodesByVC(ctx, vcHost)
-		if err != nil {
-			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to fetch VirtualMachines for the registered nodes in VC %q. Error: %v", vcHost, err)
+		// Calculate accessible topology using the topology calculator interface
+		params := TopologyCalculationParams{
+			VolumeInfo:          volumeInfo,
+			VCenter:             vcenter,
+			VCHost:              vcHost,
+			TopologySegmentsMap: vcTopologySegmentsMap,
+			VolumeManager:       volumeMgr,
+			NodeManager:         c.nodeMgr,
 		}
-		// Find datastore topology from the retrieved datastoreURL.
-		datastoreAccessibleTopology, err = c.calculateAccessibleTopologiesForDatastore(ctx, vcenter,
-			vcTopologySegmentsMap[vcHost], allNodeVMs, datastoreURL)
+
+		datastoreAccessibleTopology, err := c.topologyCalc.CalculateAccessibleTopology(ctx, params)
 		if err != nil {
 			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to calculate accessible topologies for the datastore %q", datastoreURL)
+				"failed to calculate accessible topologies. Error: %v", err)
 		}
 
 		// Add topology segments to the CreateVolumeResponse.
@@ -1527,8 +1076,9 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 
 // calculateAccessibleTopologiesForDatastore figures out the list of topologies from
 // which the given datastore is accessible when multi-VC FSS is enabled.
-func (c *controller) calculateAccessibleTopologiesForDatastore(ctx context.Context, vcenter *cnsvsphere.VirtualCenter,
-	topologySegments []map[string]string, allNodeVMs []*cnsvsphere.VirtualMachine, datastoreURL string) (
+func calculateAccessibleTopologiesForDatastore(ctx context.Context, vcenter *cnsvsphere.VirtualCenter,
+	topologySegments []map[string]string, allNodeVMs []*cnsvsphere.VirtualMachine,
+	datastoreURL string, nodeMgr NodeManagerInterface) (
 	[]map[string]string, error) {
 	log := logger.GetLogger(ctx)
 	var datastoreAccessibleTopology []map[string]string
@@ -1550,7 +1100,7 @@ func (c *controller) calculateAccessibleTopologiesForDatastore(ctx context.Conte
 				err.Error())
 		}
 		// Get NodeVM name from VM UUID.
-		nodeName, err := c.nodeMgr.GetNodeNameByUUID(ctx, vmUUID)
+		nodeName, err := nodeMgr.GetNodeNameByUUID(ctx, vmUUID)
 		if err != nil {
 			return nil, logger.LogNewErrorCode(log, codes.Internal,
 				err.Error())
@@ -1606,23 +1156,15 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 	)
 	// Get operation store
 	var operationStore cnsvolumeoperationrequest.VolumeOperationRequest
-	if multivCenterCSITopologyEnabled {
-		for _, volMgr := range c.managers.VolumeManagers {
-			// NOTE: Operation store is common to all volume managers, so
-			// we pick the operation store from any VC under volume managers list.
-			operationStore = volMgr.GetOperationStore()
-			if operationStore == nil {
-				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-					"failed to get operation store in volume managers")
-			}
-			break
+	for _, volMgr := range c.managers.VolumeManagers {
+		// NOTE: Operation store is common to all volume managers, so
+		// we pick the operation store from any VC under volume managers list.
+		operationStore = volMgr.GetOperationStore()
+		if operationStore == nil {
+			return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get operation store in volume managers")
 		}
-	} else {
-		operationStore = c.manager.VolumeManager.GetOperationStore()
-	}
-	if operationStore == nil {
-		return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-			"Operation store cannot be nil")
+		break
 	}
 
 	// Check if vCenter task for this volume is already registered as part of
@@ -1682,14 +1224,9 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 					}
 				}
 			}()
-			if multivCenterCSITopologyEnabled {
-				volumeManager := c.managers.VolumeManagers[vcHost]
-				volumeInfo, faultType, err = volumeManager.MonitorCreateVolumeTask(ctx,
-					&volumeOperationDetails, task, req.Name, c.managers.CnsConfig.Global.ClusterID)
-			} else {
-				volumeInfo, faultType, err = c.manager.VolumeManager.MonitorCreateVolumeTask(ctx,
-					&volumeOperationDetails, task, req.Name, c.manager.CnsConfig.Global.ClusterID)
-			}
+			volumeManager := c.managers.VolumeManagers[vcHost]
+			volumeInfo, faultType, err = volumeManager.MonitorCreateVolumeTask(ctx,
+				&volumeOperationDetails, task, req.Name, c.managers.CnsConfig.Global.ClusterID)
 			if err != nil {
 				return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 					"failed to monitor task for file volume %s. Error: %+v", req.Name, err)
@@ -1852,7 +1389,7 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 				// moving unto next VC. Need to throw a custom error for such scenarios.
 				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
 					vcenter, c.managers.VolumeManagers[vcHost], c.managers.CnsConfig, &createVolumeSpec,
-					fsEnabledCandidateDatastores, filterSuspendedDatastores, false, nil)
+					fsEnabledCandidateDatastores, []string{}, filterSuspendedDatastores, false, nil)
 				if err != nil {
 					log.Error(err)
 					combinedErrMssgs = append(combinedErrMssgs, err.Error())
@@ -1862,7 +1399,7 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 				log.Infof("volume %q created in vCenter %q.", volumeID, vcHost)
 
 				// In case task was successful from previous run but the CR was not created.
-				if multivCenterCSITopologyEnabled && len(c.managers.VcenterConfigs) > 1 {
+				if len(c.managers.VcenterConfigs) > 1 {
 					// Create CNSVolumeInfo CR for the volume ID in case of multi VC deployment.
 					err = volumeInfoService.CreateVolumeInfo(ctx, volumeID, vcHost)
 					if err != nil {
@@ -1884,12 +1421,8 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 		} else {
 			// When topologyRequirement is nil, below code is invoked
 			var fsEnabledClusterToDsInfoMap map[string][]*cnsvsphere.DatastoreInfo
-			if multivCenterCSITopologyEnabled {
-				vcHost = c.managers.CnsConfig.Global.VCenterIP
-				fsEnabledClusterToDsInfoMap = c.authMgrs[vcHost].GetFsEnabledClusterToDsMap(ctx)
-			} else {
-				fsEnabledClusterToDsInfoMap = c.authMgr.GetFsEnabledClusterToDsMap(ctx)
-			}
+			vcHost = c.managers.CnsConfig.Global.VCenterIP
+			fsEnabledClusterToDsInfoMap = c.authMgrs[vcHost].GetFsEnabledClusterToDsMap(ctx)
 
 			var filteredDatastores []*cnsvsphere.DatastoreInfo
 			for _, datastores := range fsEnabledClusterToDsInfoMap {
@@ -1901,36 +1434,21 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 					"no datastores found to create file volume, vSAN file service may be disabled")
 			}
 
-			if multivCenterCSITopologyEnabled {
-				// Get VC instance.
-				vcenter, err = common.GetVCenterFromVCHost(ctx, c.managers.VcenterManager, vcHost)
-				if err != nil {
-					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to get vCenter instance for host %q. Error: %+v", vcHost, err)
-				}
-				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
-					vcenter, c.managers.VolumeManagers[vcHost], c.managers.CnsConfig, &createVolumeSpec,
-					filteredDatastores, filterSuspendedDatastores, false, nil)
-				if err != nil {
-					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to create volume. Error: %+v", err)
-				}
-				volumeID = volumeInfo.VolumeID.Id
-			} else {
-				vcenter, err = c.manager.VcenterManager.GetVirtualCenter(ctx, c.manager.VcenterConfig.Host)
-				if err != nil {
-					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to get vCenter. Error: %+v", err)
-				}
-				volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
-					vcenter, c.manager.VolumeManager, c.manager.CnsConfig, &createVolumeSpec,
-					filteredDatastores, filterSuspendedDatastores, false, nil)
-				if err != nil {
-					return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
-						"failed to create volume. Error: %+v", err)
-				}
-				volumeID = volumeInfo.VolumeID.Id
+			// Get VC instance.
+			vcenter, err = common.GetVCenterFromVCHost(ctx, c.managers.VcenterManager, vcHost)
+			if err != nil {
+				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
+					"failed to get vCenter instance for host %q. Error: %+v", vcHost, err)
 			}
+			volumeInfo, faultType, err = common.CreateFileVolumeUtil(ctx, cnstypes.CnsClusterFlavorVanilla,
+				vcenter, c.managers.VolumeManagers[vcHost], c.managers.CnsConfig, &createVolumeSpec,
+				filteredDatastores, []string{}, filterSuspendedDatastores, false, nil)
+			if err != nil {
+				return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
+					"failed to create volume. Error: %+v", err)
+			}
+			volumeID = volumeInfo.VolumeID.Id
+
 		}
 	}
 
@@ -1958,7 +1476,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 	volumeType := prometheus.PrometheusUnknownVolumeType
 	createVolumeInternal := func() (
 		*csi.CreateVolumeResponse, string, error) {
-		log.Infof("CreateVolume: called with args %+v", *req)
+		log.Infof("CreateVolume: called with args %+v", req)
 		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
@@ -1980,7 +1498,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 				}
 			}
 			volumeType = prometheus.PrometheusFileVolumeType
-			if multivCenterCSITopologyEnabled && len(c.managers.VcenterConfigs) > 1 {
+			if len(c.managers.VcenterConfigs) > 1 {
 				isvSANFileServicesDisabledInAllVCs := true
 				for _, vcconfig := range c.managers.VcenterConfigs {
 					isvSANFileServicesSupported, err := c.managers.VcenterManager.IsvSANFileServicesSupported(ctx,
@@ -2015,11 +1533,7 @@ func (c *controller) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequ
 			}
 		}
 		volumeType = prometheus.PrometheusBlockVolumeType
-		if multivCenterCSITopologyEnabled {
-			return c.createBlockVolumeWithPlacementEngineForMultiVC(ctx, req)
-		} else {
-			return c.createBlockVolume(ctx, req)
-		}
+		return c.createBlockVolumeWithPlacementEngineForMultiVC(ctx, req)
 	}
 	resp, faultType, err := createVolumeInternal()
 	log.Debugf("createVolumeInternal: returns fault %q", faultType)
@@ -2051,7 +1565,7 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 
 	deleteVolumeInternal := func() (
 		*csi.DeleteVolumeResponse, string, error) {
-		log.Infof("DeleteVolume: called with args: %+v", *req)
+		log.Infof("DeleteVolume: called with args: %+v", req)
 		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
@@ -2154,8 +1668,10 @@ func (c *controller) DeleteVolume(ctx context.Context, req *csi.DeleteVolumeRequ
 					"failed to delete volumeInfo CR for volume: %q. Error: %+v", req.VolumeId, err)
 			}
 		}
-		// If this is multi-VC configuration, delete CnsVolumeInfo CR
-		if multivCenterCSITopologyEnabled && len(c.managers.VcenterConfigs) > 1 {
+		// If this is multi-VC configuration, delete CnsVolumeInfo CR.  CnsVolumeInfo CR
+		// contains vcenter <-> volume mapping for multi-vcenter setup so that we know
+		// what vcenter to talk to for a given volume.
+		if len(c.managers.VcenterConfigs) > 1 {
 			err = volumeInfoService.DeleteVolumeInfo(ctx, req.VolumeId)
 			if err != nil {
 				return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
@@ -2194,7 +1710,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 
 	controllerPublishVolumeInternal := func() (
 		*csi.ControllerPublishVolumeResponse, string, error) {
-		log.Infof("ControllerPublishVolume: called with args %+v", *req)
+		log.Infof("ControllerPublishVolume: called with args %+v", req)
 		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
@@ -2205,7 +1721,7 @@ func (c *controller) ControllerPublishVolume(ctx context.Context, req *csi.Contr
 		if err != nil {
 
 			return nil, csifault.CSIInvalidArgumentFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"validation for PublishVolume Request: %+v has failed. Error: %v", *req, err)
+				"validation for PublishVolume Request: %+v has failed. Error: %v", req, err)
 		}
 		publishInfo := make(map[string]string)
 		_, volumeManager, err := getVCenterAndVolumeManagerForVolumeID(ctx, c, req.VolumeId, volumeInfoService)
@@ -2342,7 +1858,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 	controllerUnpublishVolumeInternal := func() (
 		*csi.ControllerUnpublishVolumeResponse, string, error) {
 		var faultType string
-		log.Infof("ControllerUnpublishVolume: called with args %+v", *req)
+		log.Infof("ControllerUnpublishVolume: called with args %+v", req)
 		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
@@ -2352,7 +1868,7 @@ func (c *controller) ControllerUnpublishVolume(ctx context.Context, req *csi.Con
 		err := validateVanillaControllerUnpublishVolumeRequest(ctx, req)
 		if err != nil {
 			return nil, csifault.CSIInvalidArgumentFault, logger.LogNewErrorCodef(log, codes.Internal,
-				"validation for UnpublishVolume Request: %+v has failed. Error: %v", *req, err)
+				"validation for UnpublishVolume Request: %+v has failed. Error: %v", req, err)
 		}
 
 		_, volumeManager, err := getVCenterAndVolumeManagerForVolumeID(ctx, c, req.VolumeId, volumeInfoService)
@@ -2485,7 +2001,7 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 			faultType      string
 		)
 
-		log.Infof("ControllerExpandVolume: called with args %+v", *req)
+		log.Infof("ControllerExpandVolume: called with args %+v", req)
 		// TODO: If the err is returned by invoking CNS API, then faultType should be
 		// populated by the underlying layer.
 		// If the request failed due to validate the request, "csi.fault.InvalidArgument" will be return.
@@ -2522,7 +2038,8 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 		isOnlineExpansionEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.OnlineVolumeExtend)
 		err = validateVanillaControllerExpandVolumeRequest(ctx, req, isOnlineExpansionEnabled, isOnlineExpansionSupported)
 		if err != nil {
-			msg := fmt.Sprintf("validation for ExpandVolume Request: %+v has failed. Error: %v", *req, err)
+			msg := fmt.Sprintf("validation for ExpandVolume Request: %+v has failed. Error: %v",
+				req, err)
 			log.Error(msg)
 			return nil, csifault.CSIInternalFault, err
 		}
@@ -2556,8 +2073,8 @@ func (c *controller) ControllerExpandVolume(ctx context.Context, req *csi.Contro
 			}
 		}
 
-		faultType, err = common.ExpandVolumeUtil(ctx, vCenterManager, vCenterHost, volumeManager, volumeID,
-			volSizeMB, commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.AsyncQueryVolume), nil)
+		faultType, err = common.ExpandVolumeUtil(ctx, vCenterManager,
+			vCenterHost, volumeManager, volumeID, volSizeMB, nil)
 		if err != nil {
 			return nil, faultType, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to expand volume: %q to size: %d with error: %+v", "df", volSizeMB, err)
@@ -2607,7 +2124,7 @@ func (c *controller) ValidateVolumeCapabilities(ctx context.Context, req *csi.Va
 	*csi.ValidateVolumeCapabilitiesResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("ControllerGetCapabilities: called with args %+v", *req)
+	log.Infof("ControllerGetCapabilities: called with args %+v", req)
 	volCaps := req.GetVolumeCapabilities()
 	var confirmed *csi.ValidateVolumeCapabilitiesResponse_Confirmed
 	if err := common.IsValidVolumeCapabilities(ctx, volCaps); err == nil {
@@ -2639,7 +2156,7 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 	}
 
 	listVolumesInternal := func() (*csi.ListVolumesResponse, string, error) {
-		log.Debugf("ListVolumes: called with args %+v", *req)
+		log.Debugf("ListVolumes: called with args %+v", req)
 
 		startingToken := 0
 		if req.StartingToken != "" {
@@ -2665,30 +2182,18 @@ func (c *controller) ListVolumes(ctx context.Context, req *csi.ListVolumesReques
 				},
 			}
 			// For multi-VC configuration, query volumes from all vCenters
-			if multivCenterCSITopologyEnabled {
-				var cnsVolumes = make([]cnstypes.CnsVolume, 0)
-				for vcHost, volumeManager := range c.managers.VolumeManagers {
-					cnsQueryResult, err := utils.QueryAllVolumesForCluster(ctx, volumeManager,
-						cfg.Global.ClusterID, querySelection)
-					if err != nil {
-						return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-							"queryVolume failed on Cluster ID %q for vCenter %s with err = %+v ",
-							cfg.Global.ClusterID, vcHost, err)
-					}
-					cnsVolumes = append(cnsVolumes, cnsQueryResult.Volumes...)
-				}
-				CNSVolumesforListVolume = cnsVolumes
-			} else {
-				queryFilter := cnstypes.CnsQueryFilter{
-					ContainerClusterIds: []string{cfg.Global.ClusterID},
-				}
-				cnsQueryResult, err := c.manager.VolumeManager.QueryAllVolume(ctx, queryFilter, querySelection)
+			var cnsVolumes = make([]cnstypes.CnsVolume, 0)
+			for vcHost, volumeManager := range c.managers.VolumeManagers {
+				cnsQueryResult, err := utils.QueryAllVolumesForCluster(ctx, volumeManager,
+					cfg.Global.ClusterID, querySelection)
 				if err != nil {
 					return nil, csifault.CSIInternalFault, logger.LogNewErrorCodef(log, codes.Internal,
-						"queryVolume failed on Cluster ID %q with err = %+v ", cfg.Global.ClusterID, err)
+						"queryVolume failed on Cluster ID %q for vCenter %s with err = %+v ",
+						cfg.Global.ClusterID, vcHost, err)
 				}
-				CNSVolumesforListVolume = cnsQueryResult.Volumes
+				cnsVolumes = append(cnsVolumes, cnsQueryResult.Volumes...)
 			}
+			CNSVolumesforListVolume = cnsVolumes
 
 			// Get all nodes from the vanilla K8s cluster from the node manager
 			allNodeVMs, err := c.nodeMgr.GetAllNodes(ctx)
@@ -2771,7 +2276,7 @@ func (c *controller) processQueryResultsListVolumes(ctx context.Context, startin
 		if cnsVolumes[i].VolumeType == common.FileVolumeType {
 			// If this is multi-VC configuration, then
 			// skip processing query results for file volumes
-			if multivCenterCSITopologyEnabled && len(c.managers.VcenterConfigs) > 1 {
+			if len(c.managers.VcenterConfigs) > 1 {
 				isTopologyAwareFileVolumeEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 					common.TopologyAwareFileVolume)
 				if !isTopologyAwareFileVolumeEnabled {
@@ -2871,7 +2376,7 @@ func (c *controller) GetCapacity(ctx context.Context, req *csi.GetCapacityReques
 	*csi.GetCapacityResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("GetCapacity: called with args %+v", *req)
+	log.Infof("GetCapacity: called with args %+v", req)
 	return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "getCapacity")
 }
 
@@ -2889,20 +2394,15 @@ func initVolumeMigrationService(ctx context.Context, c *controller) error {
 
 	// If this is multi-VC config, return without initializing service
 	// currently CSI migration is not supported in multi-VC config
-	if multivCenterCSITopologyEnabled {
-		if len(c.managers.VcenterConfigs) > 1 {
-			// Multi-VC case
-			return logger.LogNewErrorf(log,
-				"volume-migration feature is not supported on Multi-vCenter deployment")
-		} else {
-			// Single-VC case
-			volumeManager := c.managers.VolumeManagers[c.managers.CnsConfig.Global.VCenterIP]
-			volumeMigrationService, err = migration.GetVolumeMigrationService(ctx,
-				&volumeManager, c.managers.CnsConfig, false)
-		}
+	if len(c.managers.VcenterConfigs) > 1 {
+		// Multi-VC case
+		return logger.LogNewErrorf(log,
+			"volume-migration feature is not supported on Multi-vCenter deployment")
 	} else {
+		// Single-VC case
+		volumeManager := c.managers.VolumeManagers[c.managers.CnsConfig.Global.VCenterIP]
 		volumeMigrationService, err = migration.GetVolumeMigrationService(ctx,
-			&c.manager.VolumeManager, c.manager.CnsConfig, false)
+			&volumeManager, c.managers.CnsConfig, false)
 	}
 	if err != nil {
 		return logger.LogNewErrorCodef(log, codes.Internal,
@@ -2915,7 +2415,7 @@ func (c *controller) ControllerGetCapabilities(ctx context.Context, req *csi.Con
 	*csi.ControllerGetCapabilitiesResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("ControllerGetCapabilities: called with args %+v", *req)
+	log.Infof("ControllerGetCapabilities: called with args %+v", req)
 
 	controllerCaps := []csi.ControllerServiceCapability_RPC_Type{
 		csi.ControllerServiceCapability_RPC_CREATE_DELETE_VOLUME,
@@ -2956,7 +2456,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		granularMaxSnapshotsPerBlockVolumeInVSAN int
 		granularMaxSnapshotsPerBlockVolumeInVVOL int
 	)
-	log.Infof("CreateSnapshot: called with args %+v", *req)
+	log.Infof("CreateSnapshot: called with args %+v", req)
 
 	isBlockVolumeSnapshotEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
 	if !isBlockVolumeSnapshotEnabled {
@@ -2986,7 +2486,7 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		// Validate CreateSnapshotRequest
 		if err := validateVanillaCreateSnapshotRequestRequest(ctx, req); err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
-				"validation for CreateSnapshot Request: %+v has failed. Error: %v", *req, err)
+				"validation for CreateSnapshot Request: %+v has failed. Error: %v", req, err)
 		}
 
 		// Check if the source volume is migrated vSphere volume
@@ -3013,19 +2513,11 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 					"Queried VolumeType: %v", volumeType, cnsVolumeDetailsMap[volumeID].VolumeType)
 		}
 		// Check if snapshots number of this volume reaches the granular limit on VSAN/VVOL
-		if multivCenterCSITopologyEnabled {
-			maxSnapshotsPerBlockVolume = c.managers.CnsConfig.Snapshot.GlobalMaxSnapshotsPerBlockVolume
-			granularMaxSnapshotsPerBlockVolumeInVSAN =
-				c.managers.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVSAN
-			granularMaxSnapshotsPerBlockVolumeInVVOL =
-				c.managers.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVVOL
-		} else {
-			maxSnapshotsPerBlockVolume = c.manager.CnsConfig.Snapshot.GlobalMaxSnapshotsPerBlockVolume
-			granularMaxSnapshotsPerBlockVolumeInVSAN =
-				c.manager.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVSAN
-			granularMaxSnapshotsPerBlockVolumeInVVOL =
-				c.manager.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVVOL
-		}
+		maxSnapshotsPerBlockVolume = c.managers.CnsConfig.Snapshot.GlobalMaxSnapshotsPerBlockVolume
+		granularMaxSnapshotsPerBlockVolumeInVSAN =
+			c.managers.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVSAN
+		granularMaxSnapshotsPerBlockVolumeInVVOL =
+			c.managers.CnsConfig.Snapshot.GranularMaxSnapshotsPerBlockVolumeInVVOL
 		log.Infof("The limit of the maximum number of snapshots per block volume is "+
 			"set to the global maximum (%v) by default.", maxSnapshotsPerBlockVolume)
 
@@ -3067,7 +2559,11 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 		// sign. That is, a string of "<UUID>+<UUID>". Because, all other CNS snapshot APIs still require both
 		// VolumeID and SnapshotID as the input, while corresponding snapshot APIs in upstream CSI require SnapshotID.
 		// So, we need to bridge the gap in vSphere CSI driver and return a combined SnapshotID to CSI Snapshotter.
-		snapshotID, cnsSnapshotInfo, err := common.CreateSnapshotUtil(ctx, volumeManager, volumeID, req.Name, nil)
+
+		snapshotID, cnsSnapshotInfo, err := common.CreateSnapshotUtil(ctx, volumeManager,
+			volumeID, req.Name, &cnsvolume.CreateSnapshotExtraParams{
+				IsCSITransactionSupportEnabled: isCSITransactionSupportEnabled,
+			})
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to create snapshot on volume %q with error: %v", volumeID, err)
@@ -3117,7 +2613,7 @@ func (c *controller) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshot
 		volumeManager  cnsvolume.Manager
 		err            error
 	)
-	log.Infof("DeleteSnapshot: called with args %+v", *req)
+	log.Infof("DeleteSnapshot: called with args %+v", req)
 
 	isBlockVolumeSnapshotEnabled :=
 		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.BlockVolumeSnapshot)
@@ -3193,7 +2689,7 @@ func (c *controller) ListSnapshots(ctx context.Context, req *csi.ListSnapshotsRe
 			nextToken      string
 			err            error
 		)
-		log.Infof("ListSnapshots: called with args %+v", *req)
+		log.Infof("ListSnapshots: called with args %+v", req)
 		err = validateVanillaListSnapshotRequest(ctx, req)
 		if err != nil {
 			return nil, err
@@ -3382,33 +2878,20 @@ func queryAllVolumeSnapshotsForMultiVC(ctx context.Context, c *controller, token
 	if startingToken == 0 || len(CNSSnapshotsForListSnapshots) == 0 {
 		// For multi-VC configuration, query volumes from all vCenters
 		vCenterManager := getVCenterManagerForVCenter(ctx, c)
-		if multivCenterCSITopologyEnabled {
-			var cnsVolumeDetailsMap = make([]map[string]*utils.CnsVolumeDetails, 0)
-			for vcHost, volManager := range c.managers.VolumeManagers {
-				// fetch snapshots and associated source volume details
-				perVCSnapQueryEntries, volumeDetails, err := getSnapshotsAndSourceVolumeDetails(ctx, vCenterManager,
-					volManager, vcHost)
-				if err != nil {
-					log.Errorf("failed to retrieve snapshots/source volume info for vCenter %s, err: %+v", vcHost, err)
-					return nil, "", err
-				}
-				snapQueryEntries = append(snapQueryEntries, perVCSnapQueryEntries...)
-				cnsVolumeDetailsMap = append(cnsVolumeDetailsMap, volumeDetails)
-			}
-			CNSSnapshotsForListSnapshots = snapQueryEntries
-			CNSVolumeDetailsMap = cnsVolumeDetailsMap
-		} else {
-			// fetch snapshots
-			snapQueryEntries, volumeDetails, err := getSnapshotsAndSourceVolumeDetails(ctx, vCenterManager,
-				c.manager.VolumeManager, c.manager.VcenterConfig.Host)
+		var cnsVolumeDetailsMap = make([]map[string]*utils.CnsVolumeDetails, 0)
+		for vcHost, volManager := range c.managers.VolumeManagers {
+			// fetch snapshots and associated source volume details
+			perVCSnapQueryEntries, volumeDetails, err := getSnapshotsAndSourceVolumeDetails(ctx, vCenterManager,
+				volManager, vcHost)
 			if err != nil {
-				log.Errorf("failed to retrieve snapshots/source volume info for vCenter %s, err: %+v",
-					c.manager.VcenterConfig.Host, err)
+				log.Errorf("failed to retrieve snapshots/source volume info for vCenter %s, err: %+v", vcHost, err)
 				return nil, "", err
 			}
-			CNSVolumeDetailsMap = append(CNSVolumeDetailsMap, volumeDetails)
-			CNSSnapshotsForListSnapshots = snapQueryEntries
+			snapQueryEntries = append(snapQueryEntries, perVCSnapQueryEntries...)
+			cnsVolumeDetailsMap = append(cnsVolumeDetailsMap, volumeDetails)
 		}
+		CNSSnapshotsForListSnapshots = snapQueryEntries
+		CNSVolumeDetailsMap = cnsVolumeDetailsMap
 	}
 	// Process snapshot query result obtained from configured vCenter(s) and return final response
 	finalSnapEntries, nextToken, err = processQueryResultsListSnapshots(ctx, startingToken,
@@ -3468,7 +2951,7 @@ func (c *controller) ControllerGetVolume(ctx context.Context, req *csi.Controlle
 	*csi.ControllerGetVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("ControllerGetVolume: called with args %+v", *req)
+	log.Infof("ControllerGetVolume: called with args %+v", req)
 	return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "controllerGetVolume")
 }
 
@@ -3476,6 +2959,6 @@ func (c *controller) ControllerModifyVolume(ctx context.Context, req *csi.Contro
 	*csi.ControllerModifyVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("ControllerModifyVolume: called with args %+v", *req)
+	log.Infof("ControllerModifyVolume: called with args %+v", req)
 	return nil, logger.LogNewErrorCode(log, codes.Unimplemented, "ControllerModifyVolume")
 }

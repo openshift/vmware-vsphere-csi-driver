@@ -81,7 +81,7 @@ func (vs *vSphere) queryCNSVolumeWithResult(fcdID string) (*cnstypes.CnsQueryRes
 	}
 	req := cnstypes.CnsQueryVolume{
 		This:   cnsVolumeManagerInstance,
-		Filter: queryFilter,
+		Filter: &queryFilter,
 	}
 
 	err := connectCns(ctx, vs)
@@ -467,7 +467,7 @@ func (vs *vSphere) waitForMetadataToBeDeleted(volumeID string, entityType string
 // waitForCNSVolumeToBeDeleted executes QueryVolume API on vCenter and verifies
 // volume entries are deleted from vCenter Database
 func (vs *vSphere) waitForCNSVolumeToBeDeleted(volumeID string) error {
-	err := wait.PollUntilContextTimeout(context.Background(), poll, 2*pollTimeout, true,
+	err := wait.PollUntilContextTimeout(context.Background(), poll, cnsVolumeDeleteTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			queryResult, err := vs.queryCNSVolumeWithResult(volumeID)
 			if err != nil {

@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2024-2024 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package types
 
@@ -92,4 +80,98 @@ type PbmProfileDetails struct {
 
 func init() {
 	types.Add("pbm:PbmProfileDetails", reflect.TypeOf((*PbmProfileDetails)(nil)).Elem())
+}
+
+type ArrayOfPbmProfileDetails struct {
+	PbmProfileDetails []PbmProfileDetails `xml:"PbmProfileDetails,omitempty" json:"_value"`
+}
+
+func init() {
+	types.Add("pbm:ArrayOfPbmProfileDetails", reflect.TypeOf((*ArrayOfPbmProfileDetails)(nil)).Elem())
+}
+
+type PbmQueryProfileDetails PbmQueryProfileDetailsRequestType
+
+func init() {
+	types.Add("pbm:PbmQueryProfileDetails", reflect.TypeOf((*PbmQueryProfileDetails)(nil)).Elem())
+}
+
+type PbmQueryProfileDetailsRequestType struct {
+	This            types.ManagedObjectReference `xml:"_this" json:"_this"`
+	ProfileCategory string                       `xml:"profileCategory" json:"profileCategory"`
+	FetchAllFields  bool                         `xml:"fetchAllFields" json:"fetchAllFields"`
+}
+
+func init() {
+	types.Add("pbm:PbmQueryProfileDetailsRequestType", reflect.TypeOf((*PbmQueryProfileDetailsRequestType)(nil)).Elem())
+}
+
+type PbmQueryProfileDetailsResponse struct {
+	Returnval []PbmProfileDetails `xml:"returnval,omitempty" json:"returnval,omitempty"`
+}
+
+type PbmResolveK8sCompliantNames PbmResolveK8sCompliantNamesRequestType
+
+func init() {
+	types.Add("pbm:PbmResolveK8sCompliantNames", reflect.TypeOf((*PbmResolveK8sCompliantNames)(nil)).Elem())
+}
+
+type PbmResolveK8sCompliantNamesRequestType struct {
+	This types.ManagedObjectReference `xml:"_this" json:"_this"`
+}
+
+func init() {
+	types.Add("pbm:PbmResolveK8sCompliantNamesRequestType", reflect.TypeOf((*PbmResolveK8sCompliantNamesRequestType)(nil)).Elem())
+}
+
+type PbmResolveK8sCompliantNamesResponse struct {
+}
+
+type PbmUpdateK8sCompliantNames PbmUpdateK8sCompliantNamesRequestType
+
+func init() {
+	types.Add("pbm:PbmUpdateK8sCompliantNames", reflect.TypeOf((*PbmUpdateK8sCompliantNames)(nil)).Elem())
+}
+
+type PbmUpdateK8sCompliantNamesRequestType struct {
+	This                 types.ManagedObjectReference   `xml:"_this" json:"_this"`
+	K8sCompliantNameSpec PbmProfileK8sCompliantNameSpec `xml:"k8sCompliantNameSpec" json:"k8sCompliantNameSpec"`
+}
+
+func init() {
+	types.Add("pbm:PbmUpdateK8sCompliantNamesRequestType", reflect.TypeOf((*PbmUpdateK8sCompliantNamesRequestType)(nil)).Elem())
+}
+
+type PbmUpdateK8sCompliantNamesResponse struct {
+}
+
+type PbmValidateProfileK8sCompliantName PbmValidateProfileK8sCompliantNameRequestType
+
+func init() {
+	types.Add("pbm:PbmValidateProfileK8sCompliantName", reflect.TypeOf((*PbmValidateProfileK8sCompliantName)(nil)).Elem())
+}
+
+type PbmValidateProfileK8sCompliantNameRequestType struct {
+	This             types.ManagedObjectReference `xml:"_this" json:"_this"`
+	K8sCompliantName string                       `xml:"k8sCompliantName" json:"k8sCompliantName"`
+}
+
+func init() {
+	types.Add("pbm:PbmValidateProfileK8sCompliantNameRequestType", reflect.TypeOf((*PbmValidateProfileK8sCompliantNameRequestType)(nil)).Elem())
+}
+
+type PbmK8sCompliantNameValidationResult struct {
+	types.DynamicData
+
+	K8sCompliantName string                      `xml:"k8sCompliantName" json:"k8sCompliantName"`
+	Valid            bool                        `xml:"valid" json:"valid"`
+	Fault            *types.LocalizedMethodFault `xml:"fault,omitempty" json:"fault,omitempty"`
+}
+
+func init() {
+	types.Add("pbm:PbmK8sCompliantNameValidationResult", reflect.TypeOf((*PbmK8sCompliantNameValidationResult)(nil)).Elem())
+}
+
+type PbmValidateProfileK8sCompliantNameResponse struct {
+	Returnval PbmK8sCompliantNameValidationResult `xml:"returnval" json:"returnval"`
 }

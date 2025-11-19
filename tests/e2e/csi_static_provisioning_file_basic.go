@@ -41,8 +41,6 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
-	"github.com/vmware/govmomi/vim25/types"
-	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 )
 
 var _ = ginkgo.Describe("[csi-file-vanilla] Basic File Volume Static Provisioning", func() {
@@ -112,7 +110,8 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic File Volume Static Provisionin
 	// 8. Delete POD.
 	// 9. Delete PVC.
 	// 10. Verify PV is deleted automatically.
-	ginkgo.It("Verify basic static provisioning workflow for file volume", func() {
+	ginkgo.It("[ef-file-vanilla] Verify basic static provisioning workflow for file volume", ginkgo.Label(p1,
+		file, vanilla, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -216,7 +215,8 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic File Volume Static Provisionin
 	// 7. Wait for the volume entry to be created in CNS.
 	// 8. Delete PV2.
 	// 9. Wait for PV2 to be deleted, and also entry is deleted from CNS.
-	ginkgo.It("Verify static provisioning for file volume workflow using same PV name twice", func() {
+	ginkgo.It("[ef-file-vanilla] Verify static provisioning for file volume workflow using"+
+		" same PV name twice", ginkgo.Label(p1, file, vanilla, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -312,40 +312,3 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic File Volume Static Provisionin
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 })
-
-func getFileShareCreateSpec(datastore types.ManagedObjectReference) *cnstypes.CnsVolumeCreateSpec {
-	netPermissions := vsanfstypes.VsanFileShareNetPermission{
-		Ips:         "*",
-		Permissions: vsanfstypes.VsanFileShareAccessTypeREAD_WRITE,
-		AllowRoot:   true,
-	}
-	containerCluster := &cnstypes.CnsContainerCluster{
-		ClusterType:   string(cnstypes.CnsClusterTypeKubernetes),
-		ClusterId:     e2eVSphere.Config.Global.ClusterID,
-		VSphereUser:   e2eVSphere.Config.Global.User,
-		ClusterFlavor: string(cnstypes.CnsClusterFlavorVanilla),
-	}
-	var containerClusterArray []cnstypes.CnsContainerCluster
-	containerClusterArray = append(containerClusterArray, *containerCluster)
-	createSpec := &cnstypes.CnsVolumeCreateSpec{
-		Name:       "testFileSharex",
-		VolumeType: "FILE",
-		Datastores: []types.ManagedObjectReference{datastore},
-		BackingObjectDetails: &cnstypes.CnsVsanFileShareBackingDetails{
-			CnsFileBackingDetails: cnstypes.CnsFileBackingDetails{
-				CnsBackingObjectDetails: cnstypes.CnsBackingObjectDetails{
-					CapacityInMb: fileSizeInMb,
-				},
-			},
-		},
-		Metadata: cnstypes.CnsVolumeMetadata{
-			ContainerCluster:      *containerCluster,
-			ContainerClusterArray: containerClusterArray,
-		},
-		CreateSpec: &cnstypes.CnsVSANFileCreateSpec{
-			SoftQuotaInMb: fileSizeInMb,
-			Permission:    []vsanfstypes.VsanFileShareNetPermission{netPermissions},
-		},
-	}
-	return createSpec
-}

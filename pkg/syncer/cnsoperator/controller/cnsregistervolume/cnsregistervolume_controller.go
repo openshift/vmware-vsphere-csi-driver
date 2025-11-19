@@ -18,6 +18,7 @@ package cnsregistervolume
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -40,9 +41,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/util"
 
 	clientConfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 
+	clientset "k8s.io/client-go/kubernetes"
 	apis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
 	storagepolicyusagev1alpha2 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/storagepolicy/v1alpha2"
@@ -59,8 +63,9 @@ import (
 )
 
 const (
-	defaultMaxWorkerThreadsForRegisterVolume = 40
-	staticPvNamePrefix                       = "static-pv-"
+	workerThreadsEnvVar     = "WORKER_THREADS_REGISTER_VOLUME"
+	defaultMaxWorkerThreads = 40
+	staticPvNamePrefix      = "static-pv-"
 )
 
 var (
@@ -69,14 +74,16 @@ var (
 	// Initialized to 1 second for new instances and for instances whose latest
 	// reconcile operation succeeded.
 	// If the reconcile fails, backoff is incremented exponentially.
-	backOffDuration         map[string]time.Duration
+	backOffDuration         map[apitypes.NamespacedName]time.Duration
 	backOffDurationMapMutex = sync.Mutex{}
 
 	topologyMgr                 commoncotypes.ControllerTopologyService
 	clusterComputeResourceMoIds []string
 	// workloadDomainIsolationEnabled determines if the workload domain
 	// isolation feature is available on a supervisor cluster.
-	workloadDomainIsolationEnabled bool
+	workloadDomainIsolationEnabled          bool
+	isTKGSHAEnabled                         bool
+	isMultipleClustersPerVsphereZoneEnabled bool
 )
 
 // Add creates a new CnsRegisterVolume Controller and adds it to the Manager,
@@ -91,34 +98,41 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	}
 	workloadDomainIsolationEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 		common.WorkloadDomainIsolation)
+	isTKGSHAEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
+	isMultipleClustersPerVsphereZoneEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		common.MultipleClustersPerVsphereZone)
 
 	var volumeInfoService cnsvolumeinfo.VolumeInfoService
-	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
-			var err error
-			clusterComputeResourceMoIds, err = common.GetClusterComputeResourceMoIds(ctx)
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
+		var err error
+		clusterComputeResourceMoIds, _, err = common.GetClusterComputeResourceMoIds(ctx)
+		if err != nil {
+			log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
+			return err
+		}
+		if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
+			topologyMgr, err = commonco.ContainerOrchestratorUtility.InitTopologyServiceInController(ctx)
 			if err != nil {
-				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
+				log.Errorf("failed to init topology manager. err: %v", err)
 				return err
 			}
-			if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
-				topologyMgr, err = commonco.ContainerOrchestratorUtility.InitTopologyServiceInController(ctx)
-				if err != nil {
-					log.Errorf("failed to init topology manager. err: %v", err)
-					return err
-				}
-				log.Info("Creating CnsVolumeInfo Service to persist mapping for VolumeID to storage policy info")
-				volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
-				if err != nil {
-					return logger.LogNewErrorf(log, "error initializing volumeInfoService. Error: %+v", err)
-				}
-				log.Infof("Successfully initialized VolumeInfoService")
-			} else {
-				if len(clusterComputeResourceMoIds) > 1 {
-					log.Infof("Not initializing the CnsRegisterVolume Controller as stretched supervisor is detected.")
-					return nil
-				}
+			log.Info("Creating CnsVolumeInfo Service to persist mapping for VolumeID to storage policy info")
+			volumeInfoService, err = cnsvolumeinfo.InitVolumeInfoService(ctx)
+			if err != nil {
+				return logger.LogNewErrorf(log, "error initializing volumeInfoService. Error: %+v", err)
 			}
+			log.Infof("Successfully initialized VolumeInfoService")
+		} else {
+			if len(clusterComputeResourceMoIds) > 1 {
+				log.Infof("Not initializing the CnsRegisterVolume Controller as stretched supervisor is detected.")
+				return nil
+			}
+		}
+	}
+	if isMultipleClustersPerVsphereZoneEnabled {
+		err := commonco.ContainerOrchestratorUtility.StartZonesInformer(ctx, nil, metav1.NamespaceAll)
+		if err != nil {
+			return logger.LogNewErrorf(log, "failed to start zone informer. Error: %v", err)
 		}
 	}
 	// Initializes kubernetes client.
@@ -152,7 +166,8 @@ func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationIn
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	ctx, log := logger.GetNewContextWithLogger()
 
-	maxWorkerThreads := getMaxWorkerThreadsToReconcileCnsRegisterVolume(ctx)
+	maxWorkerThreads := util.GetMaxWorkerThreads(ctx,
+		workerThreadsEnvVar, defaultMaxWorkerThreads)
 	// Create a new controller.
 	c, err := controller.New("cnsregistervolume-controller", mgr,
 		controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
@@ -161,7 +176,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		return err
 	}
 
-	backOffDuration = make(map[string]time.Duration)
+	backOffDuration = make(map[apitypes.NamespacedName]time.Duration)
 
 	// Watch for changes to primary resource CnsRegisterVolume.
 	err = c.Watch(source.Kind(
@@ -202,7 +217,6 @@ type ReconcileCnsRegisterVolume struct {
 func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	request reconcile.Request) (reconcile.Result, error) {
 	log := logger.GetLogger(ctx)
-	isTKGSHAEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA)
 	// Fetch the CnsRegisterVolume instance.
 	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
 	err := r.client.Get(ctx, request.NamespacedName, instance)
@@ -219,17 +233,17 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	// Initialize backOffDuration for the instance, if required.
 	backOffDurationMapMutex.Lock()
 	var timeout time.Duration
-	if _, exists := backOffDuration[instance.Name]; !exists {
-		backOffDuration[instance.Name] = time.Second
+	if _, exists := backOffDuration[request.NamespacedName]; !exists {
+		backOffDuration[request.NamespacedName] = time.Second
 	}
-	timeout = backOffDuration[instance.Name]
+	timeout = backOffDuration[request.NamespacedName]
 	backOffDurationMapMutex.Unlock()
 
 	// If the CnsRegisterVolume instance is already registered, remove the
 	// instance from the queue.
 	if instance.Status.Registered {
 		backOffDurationMapMutex.Lock()
-		delete(backOffDuration, instance.Name)
+		delete(backOffDuration, request.NamespacedName)
 		backOffDurationMapMutex.Unlock()
 		return reconcile.Result{}, nil
 	}
@@ -272,7 +286,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 	log.Debugf("CNS Volume create spec is: %+v", createSpec)
 	volInfo, _, err := r.volumeManager.CreateVolume(ctx, createSpec, nil)
 	if err != nil {
-		msg := "failed to create CNS volume"
+		msg := fmt.Sprintf("failed to create CNS volume. Error: %v", err)
 		log.Errorf(msg)
 		setInstanceError(ctx, r, instance, msg)
 		return reconcile.Result{RequeueAfter: timeout}, nil
@@ -326,17 +340,55 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 
 	if syncer.IsPodVMOnStretchSupervisorFSSEnabled {
 		if workloadDomainIsolationEnabled || len(clusterComputeResourceMoIds) > 1 {
-			azClustersMap := topologyMgr.GetAZClustersMap(ctx)
-			isAccessible := isDatastoreAccessibleToAZClusters(ctx, vc, azClustersMap, volume.DatastoreUrl)
-			if !isAccessible {
-				log.Errorf("Volume: %s present on datastore: %s is not accessible to any of the AZ clusters: %v",
-					volumeID, volume.DatastoreUrl, azClustersMap)
-				setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to any of the AZ clusters")
-				_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
-				if err != nil {
-					log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+			if isMultipleClustersPerVsphereZoneEnabled {
+				// Get zones assigned to the namespace
+				zoneMaps := commonco.ContainerOrchestratorUtility.GetZonesForNamespace(request.Namespace)
+
+				// Convert map keys to slice
+				zones := make([]string, 0, len(zoneMaps))
+				for zone := range zoneMaps {
+					zones = append(zones, zone)
 				}
-				return reconcile.Result{RequeueAfter: timeout}, nil
+				// Get active clusters in the requested zones
+				activeClusters, err := commonco.ContainerOrchestratorUtility.
+					GetActiveClustersForNamespaceInRequestedZones(ctx, request.Namespace, zones)
+				if err != nil {
+					msg := fmt.Sprintf("Failed to get active clusters for CnsRegisterVolume request. error: %+v", err)
+					log.Error(msg)
+					setInstanceError(ctx, r, instance, msg)
+					return reconcile.Result{RequeueAfter: timeout}, nil
+				}
+				// Check if volume is accessible in any of the active clusters
+				if !isDatastoreAccessibleToAZClusters(ctx, vc,
+					map[string][]string{"dummy-zone-key": activeClusters}, volume.DatastoreUrl) {
+					log.Errorf("Volume: %s present on datastore: %s is not accessible to any of the active "+
+						"cluster on the namespace: %v", volumeID, volume.DatastoreUrl, activeClusters)
+					setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to any of "+
+						"the active cluster on the namespace")
+
+					// Attempt volume cleanup
+					if _, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false); err != nil {
+						log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+						return reconcile.Result{RequeueAfter: timeout}, nil
+					}
+					// permanent failure and not requeue.
+					return reconcile.Result{}, nil
+				}
+			} else {
+				azClustersMap := topologyMgr.GetAZClustersMap(ctx)
+				isAccessible := isDatastoreAccessibleToAZClusters(ctx, vc, azClustersMap, volume.DatastoreUrl)
+				if !isAccessible {
+					log.Errorf("Volume: %s present on datastore: %s is not accessible to any of the AZ clusters: %v",
+						volumeID, volume.DatastoreUrl, azClustersMap)
+					setInstanceError(ctx, r, instance, "Volume in the spec is not accessible to any of the AZ clusters")
+					_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+					if err != nil {
+						log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+						return reconcile.Result{RequeueAfter: timeout}, nil
+					}
+					// permanent failure and not requeue.
+					return reconcile.Result{}, nil
+				}
 			}
 		}
 	} else {
@@ -350,8 +402,10 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
 			if err != nil {
 				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
-			return reconcile.Result{RequeueAfter: timeout}, nil
+			// permanent failure and not requeue.
+			return reconcile.Result{}, nil
 		}
 	}
 	// Verify if storage policy is empty.
@@ -464,6 +518,66 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		}
 	}
 
+	// Check if PVC already exists and has valid DataSourceRef
+	// Do this check before creating a PV. Otherwise, PVC will be bound to PV after PV
+	// is created even if validation fails
+	pvc, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	if err != nil {
+		log.Errorf("Failed to check existing PVC %s/%s with DataSourceRef: %+v", instance.Namespace,
+			instance.Spec.PvcName, err)
+		setInstanceError(ctx, r, instance, fmt.Sprintf("Failed to check existing PVC %s/%s with DataSourceRef: %+v",
+			instance.Namespace, instance.Spec.PvcName, err))
+		return reconcile.Result{RequeueAfter: timeout}, nil
+	}
+
+	// Do this check before creating a PV. Otherwise, PVC will be bound to PV after PV
+	// is created even if validation fails
+	if pvc != nil {
+		log.Infof("PVC: %s already exists. Validate if there is topology annotation on PVC",
+			instance.Spec.PvcName)
+
+		// Validate that existing PVC's storage class matches the one found by storage policy mapping
+		if pvc.Spec.StorageClassName != nil && *pvc.Spec.StorageClassName != storageClassName {
+			msg := fmt.Sprintf("PVC %s has storage class %s, but volume maps to storage class %s",
+				instance.Spec.PvcName, *pvc.Spec.StorageClassName, storageClassName)
+			log.Error(msg)
+			setInstanceError(ctx, r, instance, msg)
+			// Untag the CNS volume which was created previously.
+			_, delErr := common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+			if delErr != nil {
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, delErr)
+			}
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		} else if pvc.Spec.StorageClassName == nil {
+			msg := fmt.Sprintf("PVC %s has no storage class specified, but requires storage class %s",
+				instance.Spec.PvcName, storageClassName)
+			log.Error(msg)
+			setInstanceError(ctx, r, instance, msg)
+			// Untag the CNS volume which was created previously.
+			_, delErr := common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+			if delErr != nil {
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, delErr)
+			}
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+
+		// Validate topology compatibility if PVC exists and can be reused
+		if topologyMgr != nil {
+			err = validatePVCTopologyCompatibility(ctx, pvc, volume.DatastoreUrl, topologyMgr, vc)
+			if err != nil {
+				msg := fmt.Sprintf("PVC topology validation failed: %v", err)
+				log.Error(msg)
+				setInstanceError(ctx, r, instance, msg)
+				// Untag the CNS volume which was created previously.
+				_, delErr := common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+				if delErr != nil {
+					log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, delErr)
+				}
+				return reconcile.Result{RequeueAfter: timeout}, nil
+			}
+		}
+	}
+
 	capacityInMb := volume.BackingObjectDetails.GetCnsBackingObjectDetails().CapacityInMb
 	accessMode := instance.Spec.AccessMode
 	// Set accessMode to ReadWriteOnce if DiskURLPath is used for import.
@@ -507,67 +621,69 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		setInstanceError(ctx, r, instance, "Duplicate Request")
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
-	// Create PVC mapping to above created PV.
-	log.Infof("Creating PVC: %s", instance.Spec.PvcName)
-	pvcSpec, err := getPersistentVolumeClaimSpec(ctx, instance.Spec.PvcName, instance.Namespace, capacityInMb,
-		storageClassName, accessMode, pvName, datastoreAccessibleTopology)
-	if err != nil {
-		msg := fmt.Sprintf("Failed to create spec for PVC: %q. Error: %v", instance.Spec.PvcName, err)
-		log.Errorf(msg)
-		setInstanceError(ctx, r, instance, msg)
-		return reconcile.Result{RequeueAfter: timeout}, nil
-	}
-	log.Debugf("PVC spec is: %+v", pvcSpec)
-	pvc, err := k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Create(ctx,
-		pvcSpec, metav1.CreateOptions{})
-	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			log.Infof("PVC: %s already exists", instance.Spec.PvcName)
-			pvc, err = k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Get(ctx,
-				instance.Spec.PvcName, metav1.GetOptions{})
+
+	if pvc != nil {
+		if pvc.Status.Phase == v1.ClaimBound && pvc.Spec.VolumeName != pvName {
+			// This is handle cases where PVC with this name already exists and
+			// is bound. This happens when a new CnsRegisterVolume instance is
+			// created to import a new volume with PVC name which is already
+			// created and is bound.
+			msg := fmt.Sprintf("Another PVC: %s already exists in namespace: %s which is Bound to a different PV",
+				instance.Spec.PvcName, instance.Namespace)
+			log.Errorf(msg)
+			setInstanceError(ctx, r, instance, msg)
+			// Untag the CNS volume which was created previously.
+			_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
 			if err != nil {
-				msg := fmt.Sprintf("Failed to get PVC: %s on namespace: %s", instance.Spec.PvcName, instance.Namespace)
-				log.Errorf(msg)
-				setInstanceError(ctx, r, instance, msg)
-				return reconcile.Result{RequeueAfter: timeout}, nil
-			}
-			if pvc.Status.Phase == v1.ClaimBound && pvc.Spec.VolumeName != pvName {
-				// This is handle cases where PVC with this name already exists and
-				// is bound. This happens when a new CnsRegisterVolume instance is
-				// created to import a new volume with PVC name which is already
-				// created and is bound.
-				msg := fmt.Sprintf("Another PVC: %s already exists in namespace: %s which is Bound to a different PV",
-					instance.Spec.PvcName, instance.Namespace)
-				log.Errorf(msg)
-				setInstanceError(ctx, r, instance, msg)
-				// Untag the CNS volume which was created previously.
-				_, err = common.DeleteVolumeUtil(ctx, r.volumeManager, volumeID, false)
+				log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
+			} else {
+				// Delete PV created above.
+				err = k8sclient.CoreV1().PersistentVolumes().Delete(ctx, pvName, *metav1.NewDeleteOptions(0))
 				if err != nil {
-					log.Errorf("Failed to untag CNS volume: %s with error: %+v", volumeID, err)
-				} else {
-					// Delete PV created above.
-					err = k8sclient.CoreV1().PersistentVolumes().Delete(ctx, pvName, *metav1.NewDeleteOptions(0))
-					if err != nil {
-						log.Errorf("Failed to delete PV: %s with error: %+v", pvName, err)
-					}
+					log.Errorf("Failed to delete PV: %s with error: %+v", pvName, err)
 				}
-				return reconcile.Result{RequeueAfter: timeout}, nil
 			}
-		} else {
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+
+		if pvc.Spec.DataSourceRef != nil {
+			apiGroup := ""
+			if pvc.Spec.DataSourceRef.APIGroup != nil {
+				apiGroup = *pvc.Spec.DataSourceRef.APIGroup
+			}
+			log.Infof("PVC %s in namespace %s has valid DataSourceRef with apiGroup: %s, kind: %s, name: %s",
+				pvc.Name, pvc.Namespace, apiGroup, pvc.Spec.DataSourceRef.Kind, pvc.Spec.DataSourceRef.Name)
+		}
+	} else {
+		// Create PVC mapping to above created PV.
+		log.Infof("Creating PVC: %s", instance.Spec.PvcName)
+		pvcSpec, err := getPersistentVolumeClaimSpec(ctx, instance.Spec.PvcName, instance.Namespace, capacityInMb,
+			storageClassName, accessMode, pvName, datastoreAccessibleTopology, instance)
+		if err != nil {
+			msg := fmt.Sprintf("Failed to create spec for PVC: %q. Error: %v", instance.Spec.PvcName, err)
+			log.Errorf(msg)
+			setInstanceError(ctx, r, instance, msg)
+			return reconcile.Result{RequeueAfter: timeout}, nil
+		}
+		log.Debugf("PVC spec is: %+v", pvcSpec)
+		pvc, err = k8sclient.CoreV1().PersistentVolumeClaims(instance.Namespace).Create(ctx,
+			pvcSpec, metav1.CreateOptions{})
+		if err != nil {
 			log.Errorf("Failed to create PVC with spec: %+v. Error: %+v", pvcSpec, err)
-			setInstanceError(ctx, r, instance,
-				fmt.Sprintf("Failed to create PVC: %s for volume with err: %+v", instance.Spec.PvcName, err))
+			errMsg := fmt.Sprintf("Failed to create PVC: %s for volume with err: %+v", instance.Spec.PvcName, err)
+			setInstanceError(ctx, r, instance, errMsg)
 			// Delete PV created above.
 			err = k8sclient.CoreV1().PersistentVolumes().Delete(ctx, pvName, *metav1.NewDeleteOptions(0))
 			if err != nil {
 				log.Errorf("Delete PV %s failed with error: %+v", pvName, err)
+				combinedErrMsg := fmt.Sprintf("%s. Additionally, cleanup failed: Delete PV %s failed with error: %+v",
+					errMsg, pvName, err)
+				setInstanceError(ctx, r, instance, combinedErrMsg)
 			}
-			setInstanceError(ctx, r, instance,
-				fmt.Sprintf("Delete PV %s failed with error: %+v", pvName, err))
 			return reconcile.Result{RequeueAfter: timeout}, nil
+		} else {
+			log.Infof("PVC: %s is created successfully", instance.Spec.PvcName)
 		}
-	} else {
-		log.Infof("PVC: %s is created successfully", instance.Spec.PvcName)
 	}
 	// Watch for PVC to be bound.
 	isBound, err := isPVCBound(ctx, k8sclient, pvc, time.Duration(1*time.Minute))
@@ -578,7 +694,7 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 			capacityInBytes := capacityInMb * common.MbInBytes
 			capacity := resource.NewQuantity(capacityInBytes, resource.BinarySI)
 			err = r.volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, instance.Namespace,
-				volume.StoragePolicyId, storageClassName, vc.Config.Host, capacity)
+				volume.StoragePolicyId, storageClassName, vc.Config.Host, capacity, false)
 			if err != nil {
 				log.Errorf("failed to store volumeID %q namespace %s StoragePolicyID %q StorageClassName %q and vCenter %q "+
 					"in CNSVolumeInfo CR. Error: %+v", volumeID, instance.Namespace, volume.StoragePolicyId,
@@ -686,10 +802,139 @@ func (r *ReconcileCnsRegisterVolume) Reconcile(ctx context.Context,
 		return reconcile.Result{RequeueAfter: timeout}, nil
 	}
 	backOffDurationMapMutex.Lock()
-	delete(backOffDuration, instance.Name)
+	delete(backOffDuration, request.NamespacedName)
 	backOffDurationMapMutex.Unlock()
 	log.Info(msg)
 	return reconcile.Result{}, nil
+}
+
+// validatePVCTopologyCompatibility checks if the existing PVC's topology annotation is compatible
+// with the volume's actual placement zone.
+func validatePVCTopologyCompatibility(ctx context.Context, pvc *v1.PersistentVolumeClaim,
+	volumeDatastoreURL string, topologyMgr commoncotypes.ControllerTopologyService,
+	vc *cnsvsphere.VirtualCenter) error {
+	log := logger.GetLogger(ctx)
+
+	// Check if PVC has topology annotation
+	topologyAnnotation, exists := pvc.Annotations[common.AnnVolumeAccessibleTopology]
+	if !exists || topologyAnnotation == "" {
+		// No topology annotation on PVC, skip validation
+		log.Debugf("PVC %s/%s has no topology annotation, skipping topology validation",
+			pvc.Namespace, pvc.Name)
+		return nil
+	}
+
+	// Parse PVC topology annotation
+	var pvcTopologySegments []map[string]string
+	err := json.Unmarshal([]byte(topologyAnnotation), &pvcTopologySegments)
+	if err != nil {
+		return fmt.Errorf("failed to parse topology annotation on PVC %s/%s: %v",
+			pvc.Namespace, pvc.Name, err)
+	}
+
+	// Get volume topology from datastore URL
+	volumeTopologySegments, err := topologyMgr.GetTopologyInfoFromNodes(ctx,
+		commoncotypes.WCPRetrieveTopologyInfoParams{
+			DatastoreURL:        volumeDatastoreURL,
+			StorageTopologyType: "",
+			TopologyRequirement: nil,
+			Vc:                  vc,
+		})
+	if err != nil {
+		return fmt.Errorf("failed to get topology for volume datastore %s: %v", volumeDatastoreURL, err)
+	}
+
+	// Check if volume topology segments are compatible with PVC topology segments
+	if isTopologyCompatible(pvcTopologySegments, volumeTopologySegments) {
+		log.Infof("PVC %s/%s topology annotation is compatible with volume placement",
+			pvc.Namespace, pvc.Name)
+		return nil
+	}
+
+	// No compatible topology found
+	return fmt.Errorf("PVC %s/%s topology annotation %s is not compatible with volume placement in zones %+v",
+		pvc.Namespace, pvc.Name, topologyAnnotation, volumeTopologySegments)
+}
+
+// isTopologyCompatible checks if volume topology segments are compatible with PVC topology segments.
+// Returns true if at least one volume topology segment is satisfied by the PVC topology segments.
+func isTopologyCompatible(pvcTopologySegments, volumeTopologySegments []map[string]string) bool {
+	// If PVC does not have any topology segments, any topology associated with the volume
+	// would satisfy the requirements
+	if len(pvcTopologySegments) == 0 {
+		return true
+	}
+
+	// For each volume topology segment, check if it exists in PVC topology segments
+	for _, volumeSegment := range volumeTopologySegments {
+		for _, pvcSegment := range pvcTopologySegments {
+			// Check if the volume segment satisfies the PVC's topology requirements
+			segmentCompatible := false
+			for key, volumeValue := range volumeSegment {
+				if pvcValue, exists := pvcSegment[key]; exists && pvcValue == volumeValue {
+					segmentCompatible = true
+					break
+				}
+			}
+			if segmentCompatible {
+				return true // Found at least one compatible segment
+			}
+		}
+	}
+	return false // No compatible segments found
+}
+
+// checkExistingPVCDataSourceRef checks if a PVC already exists and validates its DataSourceRef.
+// Returns the PVC if it exists with no DataSourceRef or it exists with a supported DataSourceRef.
+// If PVC exists but has an unsupported DataSourceRef, return (nil, error).
+// If PVC does not exist, return (nil, nil) so that it will be created later.
+func checkExistingPVCDataSourceRef(ctx context.Context, k8sclient clientset.Interface,
+	pvcName, namespace string) (*v1.PersistentVolumeClaim, error) {
+	log := logger.GetLogger(ctx)
+
+	// Try to get the existing PVC
+	existingPVC, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			// PVC doesn't exist, return nil (we'll create a new one)
+			return nil, nil
+		}
+		// Some other error occurred
+		return nil, fmt.Errorf("failed to check existing PVC %s in namespace %s: %+v", pvcName, namespace, err)
+	}
+
+	// PVC exists, check if it has DataSourceRef
+	if existingPVC.Spec.DataSourceRef == nil {
+		log.Infof("Existing PVC %s in namespace %s has no DataSourceRef, can reuse", pvcName, namespace)
+		return existingPVC, nil
+	}
+
+	// Check if DataSourceRef matches supported types
+	apiGroup := ""
+	if existingPVC.Spec.DataSourceRef.APIGroup != nil {
+		apiGroup = *existingPVC.Spec.DataSourceRef.APIGroup
+	}
+
+	for _, supportedType := range supportedDataSourceTypes {
+		if supportedType.apiGroup == apiGroup && supportedType.kind == existingPVC.Spec.DataSourceRef.Kind {
+			log.Infof("Existing PVC %s in namespace %s has valid DataSourceRef (apiGroup: %s, kind: %s), can reuse",
+				pvcName, namespace, apiGroup, existingPVC.Spec.DataSourceRef.Kind)
+			return existingPVC, nil
+		}
+	}
+
+	// Check if DataSourceRef is VolumeSnapshot
+	if existingPVC.Spec.DataSourceRef.Kind == "VolumeSnapshot" &&
+		existingPVC.Spec.DataSourceRef.APIGroup != nil &&
+		*existingPVC.Spec.DataSourceRef.APIGroup == "snapshot.storage.k8s.io" {
+		log.Infof("WARNING: Existing PVC %s in namespace %s has valid VolumeSnapshot DataSourceRef, "+
+			"however, it is not supported for CNSRegisterVolume", pvcName, namespace)
+	}
+
+	// DataSourceRef is not supported
+	return nil, fmt.Errorf("existing PVC %s in namespace %s has unsupported DataSourceRef for CNSRegisterVolume. "+
+		"APIGroup: %s, Kind: %s is not supported. Supported types: %+v",
+		pvcName, namespace, apiGroup, existingPVC.Spec.DataSourceRef.Kind, supportedDataSourceTypes)
 }
 
 // validateCnsRegisterVolumeSpec validates the input params of
@@ -785,17 +1030,22 @@ func recordEvent(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	instance *cnsregistervolumev1alpha1.CnsRegisterVolume, eventtype string, msg string) {
 	log := logger.GetLogger(ctx)
 	log.Debugf("Event type is %s", eventtype)
+	namespacedName := apitypes.NamespacedName{
+		Name:      instance.Name,
+		Namespace: instance.Namespace,
+	}
 	switch eventtype {
 	case v1.EventTypeWarning:
 		// Double backOff duration.
 		backOffDurationMapMutex.Lock()
-		backOffDuration[instance.Name] = backOffDuration[instance.Name] * 2
+		backOffDuration[namespacedName] = min(backOffDuration[namespacedName]*2,
+			cnsoperatortypes.MaxBackOffDurationForReconciler)
 		r.recorder.Event(instance, v1.EventTypeWarning, "CnsRegisterVolumeFailed", msg)
 		backOffDurationMapMutex.Unlock()
 	case v1.EventTypeNormal:
 		// Reset backOff duration to one second.
 		backOffDurationMapMutex.Lock()
-		backOffDuration[instance.Name] = time.Second
+		backOffDuration[namespacedName] = time.Second
 		r.recorder.Event(instance, v1.EventTypeNormal, "CnsRegisterVolumeSucceeded", msg)
 		backOffDurationMapMutex.Unlock()
 	}

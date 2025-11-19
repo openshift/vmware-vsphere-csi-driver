@@ -89,6 +89,11 @@ func validateGuestClusterCreateVolumeRequest(ctx context.Context, req *csi.Creat
 				return logger.LogNewErrorCodef(log, codes.InvalidArgument,
 					"Volume parameter %s is not a valid GC CSI parameter", param)
 			}
+		case common.AttributePvcNamespace:
+		case common.AttributePvcName:
+		case common.AttributePvName:
+		case common.AttributeStorageClassName:
+			log.Debugf("Attribute: %s, Value: %s", param, val)
 		default:
 			return logger.LogNewErrorCodef(log, codes.InvalidArgument,
 				"Volume parameter %s is not a valid GC CSI parameter", param)
@@ -181,7 +186,7 @@ func checkPVCCondition(ctx context.Context, pvc *v1.PersistentVolumeClaim,
 			pvc.Namespace, condition.Type)
 		if condition.Type == reqCondition {
 			pvcSize := pvc.Spec.Resources.Requests[v1.ResourceName(v1.ResourceStorage)]
-			if pvcSize == *reqSize {
+			if pvcSize.Value() == reqSize.Value() {
 				log.Infof("PersistentVolumeClaim %s in namespace %s is in %s condition and "+
 					"its request size is %s", pvc.Name, pvc.Namespace, condition.Type, reqSize.String())
 				return true
@@ -213,7 +218,8 @@ func getAccessMode(accessMode csi.VolumeCapability_AccessMode_Mode) v1.Persisten
 // getPersistentVolumeClaimSpecWithStorageClass return the PersistentVolumeClaim spec with specified storage class
 func getPersistentVolumeClaimSpecWithStorageClass(pvcName string, namespace string, diskSize string,
 	storageClassName string, pvcAccessMode v1.PersistentVolumeAccessMode, annotations map[string]string,
-	labels map[string]string, finalizers []string, volumeSnapshotName string) *v1.PersistentVolumeClaim {
+	labels map[string]string, finalizers []string, volumeSnapshotName string,
+	isLinkedCloneRequest bool) *v1.PersistentVolumeClaim {
 	claim := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        pvcName,
@@ -243,6 +249,10 @@ func getPersistentVolumeClaimSpecWithStorageClass(pvcName string, namespace stri
 			Name:     volumeSnapshotName,
 		}
 		claim.Spec.DataSource = localObjectReference
+	}
+
+	if isLinkedCloneRequest {
+		claim.Annotations[common.AttributeIsLinkedClone] = "true"
 	}
 	return claim
 }

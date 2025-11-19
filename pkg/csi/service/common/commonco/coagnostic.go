@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	v1 "k8s.io/api/core/v1"
+
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	storagev1 "k8s.io/api/storage/v1"
 	restclient "k8s.io/client-go/rest"
@@ -46,6 +48,7 @@ type COCommonInterface interface {
 	// IsPVCSIFSSEnabled checks if feature state switch is enabled in the PVCSI
 	IsPVCSIFSSEnabled(ctx context.Context, featureName string) bool
 	// EnableFSS helps enable feature state switch in the FSS config map
+	// This method is added for Unit tests coverage
 	EnableFSS(ctx context.Context, featureName string) error
 	// DisableFSS helps disable feature state switch in the FSS config map
 	// This method is added for Unit tests coverage
@@ -93,6 +96,11 @@ type COCommonInterface interface {
 	// GetPVNameFromCSIVolumeID retrieves the pv name from the volumeID.
 	// This method will not return pv name in case of in-tree migrated volumes
 	GetPVNameFromCSIVolumeID(volumeID string) (string, bool)
+	// GetPVCNameFromCSIVolumeID returns `pvc name` and `pvc namespace` for the given volumeID using volumeIDToPvcMap.
+	GetPVCNameFromCSIVolumeID(volumeID string) (string, string, bool)
+	// GetVolumeIDFromPVCName returns volumeID the given pvcName using pvcToVolumeIDMap.
+	// PVC name is its namespaced name.
+	GetVolumeIDFromPVCName(pvcName string) (string, bool)
 	// InitializeCSINodes creates CSINode instances for each K8s node with the appropriate topology keys.
 	InitializeCSINodes(ctx context.Context) error
 	// StartZonesInformer starts a dynamic informer which listens on Zones CR in
@@ -101,6 +109,22 @@ type COCommonInterface interface {
 	// GetZonesForNamespace fetches the zones associated with a namespace when
 	// WorkloadDomainIsolation is supported in supervisor.
 	GetZonesForNamespace(ns string) map[string]struct{}
+	// PreLinkedCloneCreateAction updates the PVC label with the values specified in map
+	PreLinkedCloneCreateAction(ctx context.Context, pvcNamespace string, pvcName string) error
+	// GetLinkedCloneVolumeSnapshotSourceUUID retrieves the source of the LinkedClone.
+	GetLinkedCloneVolumeSnapshotSourceUUID(ctx context.Context, pvcName string, pvcNamespace string) (string, error)
+	// GetVolumeSnapshotPVCSource retrieves the PVC from which the VolumeSnapshot was taken.
+	GetVolumeSnapshotPVCSource(ctx context.Context, volumeSnapshotNamespace string, volumeSnapshotName string) (
+		*v1.PersistentVolumeClaim, error)
+	// IsLinkedCloneRequest checks if the pvc is a linked clone request
+	IsLinkedCloneRequest(ctx context.Context, pvcName string, pvcNamespace string) (bool, error)
+	// UpdatePersistentVolumeLabel Updates the PV label with the specified key value.
+	UpdatePersistentVolumeLabel(ctx context.Context, pvName string, key string, value string) error
+	GetActiveClustersForNamespaceInRequestedZones(ctx context.Context, ns string, zones []string) ([]string, error)
+	// GetPvcObjectByName return PVC object for the given PVC name
+	GetPvcObjectByName(ctx context.Context, pvcName string, namespace string) (*v1.PersistentVolumeClaim, error)
+	HandleLateEnablementOfCapability(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, capability,
+		gcPort, gcEndpoint string)
 }
 
 // GetContainerOrchestratorInterface returns orchestrator object for a given

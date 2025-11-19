@@ -184,7 +184,7 @@ func deleteVolumeSnapshotContentWithPandoraWait(ctx context.Context, snapc *snap
 func waitForVolumeSnapshotContentToBeDeletedWithPandoraWait(ctx context.Context, snapc *snapclient.Clientset,
 	name string, pandoraSyncWaitTime int) error {
 	var err error
-	waitErr := wait.PollUntilContextTimeout(ctx, poll, 2*pollTimeout, true,
+	waitErr := wait.PollUntilContextTimeout(ctx, poll, vscDeleteTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			_, err = snapc.SnapshotV1().VolumeSnapshotContents().Get(ctx, name, metav1.GetOptions{})
 			if err != nil {
@@ -700,10 +700,11 @@ func verifyVolumeRestoreOperation(ctx context.Context, client clientset.Interfac
 	}
 	gomega.Expect(volHandle2).NotTo(gomega.BeEmpty())
 
+	var pod *v1.Pod
 	if verifyPodCreation {
 		// Create a Pod to use this PVC, and verify volume has been attached
 		ginkgo.By("Creating pod to attach PV to the node")
-		pod, err := createPod(ctx, client, namespace, nil,
+		pod, err = createPod(ctx, client, namespace, nil,
 			[]*v1.PersistentVolumeClaim{pvclaim2}, false, execRWXCommandPod1)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
@@ -753,7 +754,7 @@ func verifyVolumeRestoreOperation(ctx context.Context, client clientset.Interfac
 		gomega.Expect(strings.Contains(output, "Hello message from test into Pod1")).NotTo(gomega.BeFalse())
 		return pvclaim2, persistentvolumes2, pod
 	}
-	return pvclaim2, persistentvolumes2, nil
+	return pvclaim2, persistentvolumes2, pod
 }
 
 // createPVCAndQueryVolumeInCNS creates PVc with a given storage class on a given namespace
@@ -855,7 +856,7 @@ func getRestConfigClientForGuestCluster2(guestClusterRestConfig *rest.Config) *r
 
 // createDynamicVolumeSnapshot util creates dynamic volume snapshot for a volume
 func createDynamicVolumeSnapshotWithoutSnapClass(ctx context.Context, namespace string,
-	snapc *snapclient.Clientset, volumeSnapshotClass *snapV1.VolumeSnapshotClass,
+	snapc *snapclient.Clientset,
 	pvclaim *v1.PersistentVolumeClaim, volHandle string, diskSize string,
 	performCnsQueryVolumeSnapshot bool) (*snapV1.VolumeSnapshot,
 	*snapV1.VolumeSnapshotContent, bool, bool, string, string, error) {

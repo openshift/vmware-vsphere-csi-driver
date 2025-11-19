@@ -38,6 +38,12 @@ const (
 	// AttributeDiskType is a PersistentVolume's attribute.
 	AttributeDiskType = "type"
 
+	// LinkedClonePVCLabel indicates if the PVC is a linked clone
+	LinkedClonePVCLabel = "linked-clone"
+
+	// VolumeContextAttributeLinkedCloneVolumeSnapshotSourceUID is a PersistentVolume's attribute.
+	VolumeContextAttributeLinkedCloneVolumeSnapshotSourceUID = "linked-clone-source-uid"
+
 	// AttributeDatastoreURL represents URL of the datastore in the StorageClass.
 	// For Example: DatastoreURL: "ds:///vmfs/volumes/5c9bb20e-009c1e46-4b85-0200483b2a97/".
 	AttributeDatastoreURL = "datastoreurl"
@@ -83,6 +89,15 @@ const (
 
 	// AttributeStorageClassName represents name of the Storage Class.
 	AttributeStorageClassName = "csi.storage.k8s.io/sc/name"
+
+	// AttributeIsLinkedClone represents if this is a linked clone request
+	AttributeIsLinkedClone = "csi.vsphere.volume/fast-provisioning"
+
+	// AttributeIsLinkedCloneKey represents if this is a linked clone request
+	AttributeIsLinkedCloneKey = "csi.vsphere.k8s.io/linked-clone"
+
+	// LinkedCloneCountLabel represents linkedclone count label
+	LinkedCloneCountLabel = "csi.vsphere.volume/linked-clone-count"
 
 	// HostMoidAnnotationKey represents the Node annotation key that has the value
 	// of VC's ESX host moid of this node.
@@ -345,8 +360,11 @@ const (
 	// KubeSystemNamespace is the namespace for system resources.
 	KubeSystemNamespace = "kube-system"
 
-	// WCPCapabilityConfigMapName is the name of the configmap where WCP component's FSS values are stored.
-	WCPCapabilityConfigMapName = "wcp-cluster-capabilities"
+	// WCPCapabilitiesCRName is the name of the CR where WCP component's capabilities are stored
+	WCPCapabilitiesCRName = "supervisor-capabilities"
+
+	// AnnKeyLinkedClone is the linked clone annotation on the PVC
+	AnnKeyLinkedClone = "csi.vsphere.volume/fast-provisioning"
 )
 
 // Supported container orchestrators.
@@ -359,16 +377,10 @@ const (
 const (
 	// Default interval to check if the feature is enabled or not.
 	DefaultFeatureEnablementCheckInterval = 1 * time.Minute
-	// VolumeHealth is the feature flag name for volume health.
-	VolumeHealth = "volume-health"
-	// VolumeExtend is feature flag name for volume expansion.
-	VolumeExtend = "volume-extend"
 	// OnlineVolumeExtend guards the feature for online volume expansion.
 	OnlineVolumeExtend = "online-volume-extend"
 	// CSIMigration is feature flag for migrating in-tree vSphere volumes to CSI.
 	CSIMigration = "csi-migration"
-	// AsyncQueryVolume is feature flag for using async query volume API.
-	AsyncQueryVolume = "async-query-volume"
 	// CSISVFeatureStateReplication is feature flag for SV feature state
 	// replication feature.
 	CSISVFeatureStateReplication = "csi-sv-feature-states-replication"
@@ -384,10 +396,6 @@ const (
 	// BlockVolumeSnapshot is the feature to support CSI Snapshots for block
 	// volume on vSphere CSI driver.
 	BlockVolumeSnapshot = "block-volume-snapshot"
-	// SiblingReplicaBoundPvcCheck is the feature to check whether a PVC of
-	// a given replica can be placed on a node such that it does not have PVCs
-	// of any of its sibling replicas.
-	SiblingReplicaBoundPvcCheck = "sibling-replica-bound-pvc-check"
 	// CSIWindowsSupport is the feature to support csi block volumes for windows
 	// node.
 	CSIWindowsSupport = "csi-windows-support"
@@ -400,13 +408,6 @@ const (
 	PVtoBackingDiskObjectIdMapping = "pv-to-backingdiskobjectid-mapping"
 	// Block Create Volume for datastores that are in suspended mode
 	CnsMgrSuspendCreateVolume = "cnsmgr-suspend-create-volume"
-	// TopologyPreferentialDatastores is the feature gate for preferential
-	// datastore deployment in topology aware environments.
-	TopologyPreferentialDatastores = "topology-preferential-datastores"
-	// MaxPVSCSITargetsPerVM enables support for 255 volumes per node vm
-	MaxPVSCSITargetsPerVM = "max-pvscsi-targets-per-vm"
-	// MultiVCenterCSITopology is the feature gate for enabling multi vCenter topology support for vSphere CSI driver.
-	MultiVCenterCSITopology = "multi-vcenter-csi-topology"
 	// CSIInternalGeneratedClusterID enables support to generate unique cluster
 	// ID internally if user doesn't provide it in vSphere config secret.
 	CSIInternalGeneratedClusterID = "csi-internal-generated-cluster-id"
@@ -417,8 +418,6 @@ const (
 	PodVMOnStretchedSupervisor = "PodVM_On_Stretched_Supervisor_Supported"
 	// StorageQuotaM2 enables support for snapshot quota feature
 	StorageQuotaM2 = "storage-quota-m2"
-	// VdppOnStretchedSupervisor enables support for vDPp workloads on stretched SV clusters
-	VdppOnStretchedSupervisor = "vdpp-on-stretched-supervisor"
 	// CSIDetachOnSupervisor enables CSI to detach the disk from the podvm in a supervisor environment
 	CSIDetachOnSupervisor = "CSI_Detach_Supported"
 	// CnsUnregisterVolume enables the creation of CRD and controller for CnsUnregisterVolume API.
@@ -429,20 +428,53 @@ const (
 	// WorkloadDomainIsolationFSS is FSS for Workload Domain isolation feature
 	// Used in PVCSI
 	WorkloadDomainIsolationFSS = "workload-domain-isolation"
+	// MultipleClustersPerVsphereZone hold WCP capability name which determines if
+	// multiple vsphere cluster per zone feature is available on a supervisor cluster.
+	MultipleClustersPerVsphereZone = "supports_multiple_clusters_per_zone"
 	// VPCCapabilitySupervisor is a supervisor capability indicating if VPC FSS is enabled
 	VPCCapabilitySupervisor = "VPC_Supported"
-	// WCP_VMService_BYOK_FSS enables Bring Your Own Key (BYOK) capabilities.
-	WCP_VMService_BYOK = "WCP_VMService_BYOK"
+	// BYOKEncryption enables Bring Your Own Key (BYOK) encryption capabilities.
+	BYOKEncryption = "supports_BYOK_encryption"
 	// SVPVCSnapshotProtectionFinalizer is FSS that controls add/remove
 	// CNS finalizer on supervisor PVC/Snapshots from PVCSI
 	SVPVCSnapshotProtectionFinalizer = "sv-pvc-snapshot-protection-finalizer"
+	// FileVolumesWithVmService is an FSS to support file volumes with VM service VMs.
+	FileVolumesWithVmService = "supports_file_volumes_with_VM_service_VMs"
+	// SharedDiskFss is an FSS that tells whether shared disks are supported or not
+	SharedDiskFss = "supports_shared_disks_with_VM_service_VMs"
+	// FCDTransactionSupport is the wcp capability that tells whether transaction is supported in CSI
+	FCDTransactionSupport = "supports_FCD_transaction"
+	// CSITransactionSupport is an FSS for transaction support
+	CSITransactionSupport = "csi-transaction-support"
+	// VolFromSnapshotOnTargetDs is a FSS that tells whether creation of volumes from
+	// snapshots on different datastores feature is supported in CSI.
+	VolFromSnapshotOnTargetDs = "supports_vol_from_snapshot_on_target_ds"
+	// StoragePolicyReservation feature is assumed to be enabled in CSI when
+	// "supports_mobility_non_disruptive_import" capability is enabled in supervisor.
+	StoragePolicyReservationSupport = "supports_mobility_non_disruptive_import"
+	// LinkedCloneSupport is an FSS that tells whether LinkedClone feature is supported in CSI.
+	LinkedCloneSupport = "supports_FCD_linked_clone"
+	// LinkedCloneSupportFSS is an FSS for LinkedClone support in pvcsi
+	LinkedCloneSupportFSS = "linked-clone-support"
+	// WCPVMServiceVMSnapshots is a supervisor capability indicating
+	// if supports_VM_service_VM_snapshots FSS is enabled
+	WCPVMServiceVMSnapshots = "supports_VM_service_VM_snapshots"
 )
 
 var WCPFeatureStates = map[string]struct{}{
-	PodVMOnStretchedSupervisor: {},
-	CSIDetachOnSupervisor:      {},
-	WorkloadDomainIsolation:    {},
-	VPCCapabilitySupervisor:    {},
+	PodVMOnStretchedSupervisor:      {},
+	CSIDetachOnSupervisor:           {},
+	WorkloadDomainIsolation:         {},
+	VPCCapabilitySupervisor:         {},
+	VolFromSnapshotOnTargetDs:       {},
+	SharedDiskFss:                   {},
+	LinkedCloneSupport:              {},
+	StoragePolicyReservationSupport: {},
+	WCPVMServiceVMSnapshots:         {},
+	BYOKEncryption:                  {},
+	FCDTransactionSupport:           {},
+	MultipleClustersPerVsphereZone:  {},
+	FileVolumesWithVmService:        {},
 }
 
 // WCPFeatureStatesSupportsLateEnablement contains capabilities that can be enabled later
@@ -450,5 +482,20 @@ var WCPFeatureStates = map[string]struct{}{
 // During FSS check if driver detects that the capabilities is disabled in the cached configmap,
 // it will re-fetch the configmap and update the cached configmap.
 var WCPFeatureStatesSupportsLateEnablement = map[string]struct{}{
-	WorkloadDomainIsolation: {},
+	WorkloadDomainIsolation:        {},
+	LinkedCloneSupport:             {},
+	MultipleClustersPerVsphereZone: {},
+	WCPVMServiceVMSnapshots:        {},
+	BYOKEncryption:                 {},
+	SharedDiskFss:                  {},
+	FileVolumesWithVmService:       {},
+}
+
+// WCPFeatureAssociatedWithPVCSI contains FSS name used in PVCSI and associated WCP Capability name on a
+// supervisor cluster. Add entry in this map only for PVCSI feature for which there is any associated Capability
+// on supervisor cluster. If PVCSI feature is enabled, then we need to check if associated Capability is enabled
+// or not on the supervisor cluster to decide if effective value of this FSS is enabled or disabled.
+var WCPFeatureStateAssociatedWithPVCSI = map[string]string{
+	WorkloadDomainIsolationFSS: WorkloadDomainIsolation,
+	LinkedCloneSupportFSS:      LinkedCloneSupport,
 }

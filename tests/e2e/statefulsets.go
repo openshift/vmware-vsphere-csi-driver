@@ -170,11 +170,14 @@ var _ = ginkgo.Describe("statefulset", func() {
 	7. clean up the statefulset
 	*/
 
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] [stretched-svc] Statefulset "+
-		"testing with default podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
+	ginkgo.It("[ef-vanilla-block][ef-stretched-svc][cf-wcp][csi-block-vanilla][csi-supervisor]"+
+		"[csi-block-vanilla-parallelized][stretched-svc] Statefulset testing with default "+
+		"podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
+
 		defer cancel()
-		var totalQuotaUsedBefore, storagePolicyQuotaBefore, storagePolicyUsageBefore *resource.Quantity
+		var totalQuotaUsedBefore, pvc_storagePolicyQuotaBefore, pvc_storagePolicyUsageBefore *resource.Quantity
+		var islatebinding bool
 
 		ginkgo.By("Creating StorageClass for Statefulset")
 		// decide which test setup is available to run
@@ -197,10 +200,12 @@ var _ = ginkgo.Describe("statefulset", func() {
 		}
 
 		restConfig := getRestConfigClient()
-		if supervisorCluster && isQuotaValidationSupported {
-			totalQuotaUsedBefore, _, storagePolicyQuotaBefore, _, storagePolicyUsageBefore, _ =
+		//if quotaValidation is supported in VC then this block will be executed
+		if isQuotaValidationSupported && supervisorCluster {
+			//Reads quota Details for PVC  before workload creation
+			totalQuotaUsedBefore, _, pvc_storagePolicyQuotaBefore, _, pvc_storagePolicyUsageBefore, _ =
 				getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
-					storagePolicyName, namespace, pvcUsage, volExtensionName)
+					storageClassName, namespace, pvcUsage, volExtensionName, islatebinding)
 		}
 
 		ginkgo.By("Creating service")
@@ -254,11 +259,23 @@ var _ = ginkgo.Describe("statefulset", func() {
 			}
 		}
 
-		if supervisorCluster && isQuotaValidationSupported {
-			validateQuotaUsageAfterResourceCreation(ctx, restConfig,
-				storagePolicyName, namespace, pvcUsage, volExtensionName,
-				diskSize1Gi*3, totalQuotaUsedBefore, storagePolicyQuotaBefore,
-				storagePolicyUsageBefore)
+		diskInGb := (diskSize1Gi / 1024) * 3
+		diskInGbStr := convertInt64ToStrGbFormat(diskInGb)
+
+		//if quotaValidation is supported in VC then this block will be executed
+		if isQuotaValidationSupported && supervisorCluster {
+			var expectedTotalStorage []string
+			expectedTotalStorage = append(expectedTotalStorage, diskInGbStr)
+			//Verifies the expected quota details once the workloads are created
+			_, quotavalidationStatus := validateTotalQuota(ctx, restConfig, storageClassName, namespace,
+				expectedTotalStorage, totalQuotaUsedBefore, islatebinding)
+			gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
+
+			sp_quota_pvc_status, sp_usage_pvc_status := validateQuotaUsageAfterResourceCreation(ctx, restConfig,
+				storageClassName, namespace, pvcUsage,
+				volExtensionName, []string{diskInGbStr}, totalQuotaUsedBefore, pvc_storagePolicyQuotaBefore,
+				pvc_storagePolicyUsageBefore, islatebinding)
+			gomega.Expect(sp_quota_pvc_status && sp_usage_pvc_status).NotTo(gomega.BeFalse())
 
 		}
 
@@ -347,7 +364,7 @@ var _ = ginkgo.Describe("statefulset", func() {
 				if volumespec.PersistentVolumeClaim != nil {
 					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
 					ginkgo.By("Verify scale up operation should not introduced new volume")
-					gomega.Expect(contains(volumesBeforeScaleDown, pv.Spec.CSI.VolumeHandle)).To(gomega.BeTrue())
+					gomega.Expect(isValuePresentInTheList(volumesBeforeScaleDown, pv.Spec.CSI.VolumeHandle)).To(gomega.BeTrue())
 					ginkgo.By(fmt.Sprintf("Verify volume: %s is attached to the node: %s",
 						pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName))
 					var vmUUID string
@@ -400,8 +417,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 		8. Delete all PVCs from the tests namespace.
 		9. Delete the storage class.
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] Statefulset "+
-		"testing with parallel podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
+	ginkgo.It("[ef-vanilla-block][ef-wcp][csi-block-vanilla][csi-supervisor][csi-block-vanilla-parallelized] Statefulset "+
+		"testing with parallel podManagementPolicy", ginkgo.Label(p0, vanilla, block, wcp, core, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
@@ -599,8 +616,9 @@ var _ = ginkgo.Describe("statefulset", func() {
 			10. scale down statefulset to 0
 			11. delete statefulset and all PVC's and SC's
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] [csi-block-vanilla-parallelized] [csi-vcp-mig] Verify online volume "+
-		"expansion on statefulset", ginkgo.Label(p0, vanilla, block, wcp, core), func() {
+	ginkgo.It("[ef-vanilla-block][ef-wcp][csi-block-vanilla][csi-supervisor][csi-block-vanilla-parallelized]"+
+		"[csi-vcp-mig]Verify online volume expansion on statefulset", ginkgo.Label(p1, vanilla, block, wcp,
+		vcptocsiTest, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var pvcSizeBeforeExpansion int64
@@ -809,8 +827,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 	  12. Inncrease the CSI driver  replica to 3
 
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-supervisor] ListVolumeResponse "+
-		"Validation", ginkgo.Label(p1, listVolume, block, vanilla, wcp, core), func() {
+	ginkgo.It("[ef-wcp][csi-block-vanilla][csi-supervisor][pq-vanilla-block] ListVolumeResponse "+
+		"Validation", ginkgo.Label(p1, listVolume, block, vanilla, wcp, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var svcMasterPswd string
@@ -991,8 +1009,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 		5. Scale up replica to 5.
 		6. Exit MM and clean up all pods and PVs.
 	*/
-	ginkgo.It("[csi-supervisor] Test MM workflow on statefulset", ginkgo.Label(
-		p1, block, wcp, core), func() {
+	ginkgo.It("[ef-f-wcp][csi-supervisor] Test MM workflow on statefulset", ginkgo.Label(p1, block, wcp,
+		disruptive, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var mmTimeout int32 = 300
@@ -1099,8 +1117,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 	7. clean up the data
 	*/
 
-	ginkgo.It("[stretched-svc] Statefulset-parallel-podManagementPolicy-wffc",
-		ginkgo.Label(p0, vanilla, block, wcp, core), func() {
+	ginkgo.It("[ef-stretched-svc][stretched-svc] Statefulset-parallel-podManagementPolicy-wffc",
+		ginkgo.Label(p0, block, stretchedSvc, vc70), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			ginkgo.By("Creating StorageClass for Statefulset")
@@ -1173,7 +1191,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 	7. clean up the data
 	*/
 
-	ginkgo.It("[stretched-svc] statefulset-nodeAffinity", ginkgo.Label(p0, wcp, core), func() {
+	ginkgo.It("[ef-stretched-svc][stretched-svc] statefulset-nodeAffinity", ginkgo.Label(p0, block, stretchedSvc,
+		vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
@@ -1245,7 +1264,8 @@ var _ = ginkgo.Describe("statefulset", func() {
 	4. Verify allowed topology details on PV
 	6. clean up the data
 	*/
-	ginkgo.It("[stretched-svc] statefulset-pod-Affinity", ginkgo.Label(p0, wcp, core), func() {
+	ginkgo.It("[ef-stretched-svc][stretched-svc] statefulset-pod-Affinity", ginkgo.Label(p0, block, stretchedSvc,
+		vc80), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		ginkgo.By("Creating StorageClass for Statefulset")
@@ -1288,24 +1308,3 @@ var _ = ginkgo.Describe("statefulset", func() {
 	})
 
 })
-
-// check whether the slice contains an element
-func contains(volumes []string, volumeID string) bool {
-	for _, volumeUUID := range volumes {
-		if volumeUUID == volumeID {
-			return true
-		}
-	}
-	return false
-}
-
-// CreateStatefulSet creates a StatefulSet from the manifest at manifestPath in the given namespace.
-func CreateStatefulSet(ns string, ss *apps.StatefulSet, c clientset.Interface) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	framework.Logf("Creating statefulset %v/%v with %d replicas and selector %+v",
-		ss.Namespace, ss.Name, *(ss.Spec.Replicas), ss.Spec.Selector)
-	_, err := c.AppsV1().StatefulSets(ns).Create(ctx, ss, metav1.CreateOptions{})
-	framework.ExpectNoError(err)
-	fss.WaitForRunningAndReady(ctx, c, *ss.Spec.Replicas, ss)
-}

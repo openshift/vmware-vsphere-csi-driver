@@ -24,7 +24,7 @@ import (
 	"strings"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
+	vmoperatorv1alpha5 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/property"
 	"github.com/vmware/govmomi/vim25/mo"
@@ -35,10 +35,10 @@ import (
 	"google.golang.org/grpc/status"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"k8s.io/client-go/dynamic"
+	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
+	api "k8s.io/kubernetes/pkg/apis/core"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
-
 	spv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool/cns/v1alpha1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -62,12 +62,14 @@ func validateCreateBlockReqParam(paramName, value string) bool {
 		paramName == common.AttributePvcName ||
 		paramName == common.AttributePvcNamespace ||
 		paramName == common.AttributeStorageClassName ||
+		paramName == common.AttributeIsLinkedCloneKey ||
 		(paramName == common.AttributeHostLocal && strings.EqualFold(value, "true"))
 }
 
 const (
-	spTypePrefix = "cns.vmware.com/"
-	spTypeKey    = spTypePrefix + "StoragePoolType"
+	spTypePrefix          = "cns.vmware.com/"
+	spTypeKey             = spTypePrefix + "StoragePoolType"
+	vmwareSystemVMUUIDAnn = "vmware-system-vm-uuid"
 )
 
 // validateCreateFileReqParam is a helper function used to validate the parameter
@@ -80,10 +82,11 @@ func validateCreateFileReqParam(paramName, value string) bool {
 		paramName == common.AttributePvName ||
 		paramName == common.AttributePvcName ||
 		paramName == common.AttributePvcNamespace ||
-		paramName == common.AttributeStorageClassName
+		paramName == common.AttributeStorageClassName ||
+		paramName == common.AttributeIsLinkedCloneKey
 }
 
-// ValidateCreateVolumeRequest is the helper function to validate
+// validateWCPCreateVolumeRequest is the helper function to validate
 // CreateVolumeRequest for WCP CSI driver.
 // Function returns error if validation fails otherwise returns nil.
 // TODO: Need to remove AttributeHostLocal after external provisioner stops
@@ -101,7 +104,7 @@ func validateWCPCreateVolumeRequest(ctx context.Context, req *csi.CreateVolumeRe
 			return status.Error(codes.InvalidArgument, msg)
 		}
 	}
-	return common.ValidateCreateVolumeRequest(ctx, req)
+	return validateCreateVolumeRequestInWcp(ctx, req)
 }
 
 // validateWCPDeleteVolumeRequest is the helper function to validate
@@ -115,7 +118,7 @@ func validateWCPDeleteVolumeRequest(ctx context.Context, req *csi.DeleteVolumeRe
 // ControllerPublishVolumeRequest for WCP CSI driver. Function returns error if
 // validation fails otherwise returns nil.
 func validateWCPControllerPublishVolumeRequest(ctx context.Context, req *csi.ControllerPublishVolumeRequest) error {
-	return common.ValidateControllerPublishVolumeRequest(ctx, req)
+	return validateControllerPublishVolumeRequesInWcp(ctx, req)
 }
 
 // validateWCPControllerUnpublishVolumeRequest is the helper function to
@@ -131,7 +134,7 @@ func validateWCPControllerUnpublishVolumeRequest(ctx context.Context, req *csi.C
 func validateWCPControllerExpandVolumeRequest(ctx context.Context, req *csi.ControllerExpandVolumeRequest,
 	manager *common.Manager, isOnlineExpansionEnabled bool) error {
 	log := logger.GetLogger(ctx)
-	if err := common.ValidateControllerExpandVolumeRequest(ctx, req); err != nil {
+	if err := validateControllerExpandVolumeRequestInWcp(ctx, req); err != nil {
 		return err
 	}
 
@@ -162,12 +165,12 @@ func validateWCPControllerExpandVolumeRequest(ctx context.Context, req *csi.Cont
 			return logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to get config with error: %+v", err)
 		}
-		vmOperatorClient, err := k8s.NewClientForGroup(ctx, cfg, vmoperatorv1alpha4.GroupName)
+		vmOperatorClient, err := k8s.NewClientForGroup(ctx, cfg, vmoperatorv1alpha5.GroupName)
 		if err != nil {
 			return logger.LogNewErrorCodef(log, codes.Internal,
-				"failed to get client for group %s with error: %+v", vmoperatorv1alpha4.GroupName, err)
+				"failed to get client for group %s with error: %+v", vmoperatorv1alpha5.GroupName, err)
 		}
-		vmList, err := utils.GetVirtualMachineListAllApiVersions(ctx, "", vmOperatorClient)
+		vmList, err := utils.ListVirtualMachines(ctx, vmOperatorClient, "")
 		if err != nil {
 			return logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to list virtualmachines with error: %+v", err)
@@ -280,37 +283,6 @@ func GetsvMotionPlanFromK8sCloudOperatorService(ctx context.Context,
 
 	log.Infof("Got storage vMotion plan: %v from K8sCloudOperator gRPC service", res.SvMotionPlan)
 	return res.SvMotionPlan, nil
-}
-
-// getVMUUIDFromK8sCloudOperatorService gets the vmuuid from K8sCloudOperator
-// gRPC service.
-func getVMUUIDFromK8sCloudOperatorService(ctx context.Context, volumeID string, nodeName string) (string, error) {
-	log := logger.GetLogger(ctx)
-	conn, err := getK8sCloudOperatorClientConnection(ctx)
-	if err != nil {
-		log.Errorf("Failed to establish the connection to k8s cloud operator service "+
-			"when processing attach for volumeID: %s. Error: %+v", volumeID, err)
-		return "", err
-	}
-	defer conn.Close()
-
-	// Create a client stub for k8s cloud operator gRPC service.
-	client := k8scloudoperator.NewK8SCloudOperatorClient(conn)
-
-	// Call GetPodVMUUIDAnnotation method on the client stub.
-	res, err := client.GetPodVMUUIDAnnotation(ctx,
-		&k8scloudoperator.PodListenerRequest{
-			VolumeID: volumeID,
-			NodeName: nodeName,
-		})
-	if err != nil {
-		msg := fmt.Sprintf("Failed to get the pod vmuuid annotation from the k8s cloud operator service. Error: %+v", err)
-		log.Error(msg)
-		return "", err
-	}
-
-	log.Infof("Got vmuuid: %s annotation from K8sCloudOperator gRPC service", res.VmuuidAnnotation)
-	return res.VmuuidAnnotation, nil
 }
 
 // getHostMOIDFromK8sCloudOperatorService gets the host-moid from
@@ -427,23 +399,24 @@ func getDatastoreURLFromStoragePool(ctx context.Context, spName string) (string,
 	}
 
 	// create a new StoragePool client.
-	spclient, err := dynamic.NewForConfig(cfg)
+	c, err := k8s.NewClientForGroup(ctx, cfg, spv1alpha1.SchemeGroupVersion.Group)
 	if err != nil {
 		return "", fmt.Errorf("failed to create StoragePool client using config. Err: %+v", err)
 	}
-	spResource := spv1alpha1.SchemeGroupVersion.WithResource("storagepools")
 
+	sp := &spv1alpha1.StoragePool{}
 	// Get StoragePool with spName.
-	sp, err := spclient.Resource(spResource).Get(ctx, spName, metav1.GetOptions{})
+	err = c.Get(ctx, types.NamespacedName{Name: spName}, sp)
 	if err != nil {
 		return "", fmt.Errorf("failed to get StoragePool with name %s: %+v", spName, err)
 	}
 
 	// extract the datastoreUrl field.
-	datastoreURL, found, err := unstructured.NestedString(sp.Object, "spec", "parameters", "datastoreUrl")
-	if !found || err != nil {
+	datastoreURL, found := sp.Spec.Parameters["datastoreUrl"]
+	if !found {
 		return "", fmt.Errorf("failed to find datastoreUrl in StoragePool %s", spName)
 	}
+
 	return datastoreURL, nil
 }
 
@@ -457,31 +430,30 @@ func getStoragePoolInfo(ctx context.Context, spName string) ([]string, string, e
 	}
 
 	// Create a new StoragePool client.
-	spClient, err := dynamic.NewForConfig(cfg)
+	c, err := k8s.NewClientForGroup(ctx, cfg, spv1alpha1.SchemeGroupVersion.Group)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create StoragePool client using config. Err: %+v", err)
 	}
-	spResource := spv1alpha1.SchemeGroupVersion.WithResource("storagepools")
 
 	// Get StoragePool with spName.
-	sp, err := spClient.Resource(spResource).Get(ctx, spName, metav1.GetOptions{})
+	sp := &spv1alpha1.StoragePool{}
+	err = c.Get(ctx, types.NamespacedName{Name: spName}, sp)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to get StoragePool with name %s: %+v", spName, err)
 	}
 
 	// Extract the accessibleNodes field.
-	accessibleNodes, found, err := unstructured.NestedStringSlice(sp.Object, "status", "accessibleNodes")
-	if !found || err != nil {
-		return nil, "", fmt.Errorf("failed to find datastoreUrl in StoragePool %s", spName)
+	if len(sp.Status.AccessibleNodes) == 0 {
+		return nil, "", fmt.Errorf("failed to find accessible nodes in StoragePool %s", spName)
 	}
 
 	// Get the storage pool type.
-	poolType, found, err := unstructured.NestedString(sp.Object, "metadata", "labels", spTypeKey)
-	if !found || err != nil {
+	poolType, found := sp.ObjectMeta.Labels[spTypeKey]
+	if !found {
 		return nil, "", fmt.Errorf("failed to find pool type in StoragePool %s", spName)
 	}
 
-	return accessibleNodes, poolType, nil
+	return sp.Status.AccessibleNodes, poolType, nil
 }
 
 // isValidAccessibilityRequirements validates if the given accessibility
@@ -543,7 +515,9 @@ func checkTopologyKeysFromAccessibilityReqs(topologyRequirement *csi.TopologyReq
 
 // GetVolumeToHostMapping returns a map containing VM MoID to host MoID and VolumeID
 // and VM MoID. This map is constructed by fetching all virtual machines belonging to each host.
-func (c *controller) GetVolumeToHostMapping(ctx context.Context) (map[string]string, map[string]string, error) {
+// Look up for VMs will be performed in the supplied list of clusterComputeResourceMoIds
+func (c *controller) GetVolumeToHostMapping(ctx context.Context,
+	clusterComputeResourceMoIds []string) (map[string]string, map[string]string, error) {
 	log := logger.GetLogger(ctx)
 	vmMoIDToHostMoID := make(map[string]string)
 	volumeIDVMMap := make(map[string]string)
@@ -555,29 +529,30 @@ func (c *controller) GetVolumeToHostMapping(ctx context.Context) (map[string]str
 		return nil, nil, fmt.Errorf("failed to get vCenter from Manager, err: %v", err)
 	}
 
-	// Get all the hosts belonging to the cluster
-	hostSystems, err := vc.GetHostsByCluster(ctx, c.manager.CnsConfig.Global.ClusterID)
-	if err != nil {
-		log.Errorf("failed to get hosts for cluster %v, err:%v", c.manager.CnsConfig.Global.ClusterID, err)
-		return nil, nil, fmt.Errorf("failed to get hosts for cluster %v, err:%v", c.manager.CnsConfig.Global.ClusterID, err)
-	}
-
-	// Get all the virtual machines belonging to all the hosts
-	vms, err := vc.GetAllVirtualMachines(ctx, hostSystems)
-	if err != nil {
-		log.Errorf("failed to get VM MoID err: %v", err)
-		return nil, nil, fmt.Errorf("failed to get VM MoID err: %v", err)
-	}
-
 	var vmRefs []vimtypes.ManagedObjectReference
-	var vmMoList []mo.VirtualMachine
-
-	for _, vm := range vms {
-		vmRefs = append(vmRefs, vm.Reference())
+	for _, clusterMoId := range clusterComputeResourceMoIds {
+		// Get all the hosts belonging to the cluster
+		hostSystems, err := vc.GetHostsByCluster(ctx, clusterMoId)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to get hosts for cluster %s: %v", clusterMoId, err)
+			log.Error(errMsg)
+			return nil, nil, fmt.Errorf("%s", errMsg)
+		}
+		// Get all the virtual machines belonging to all the hosts
+		vms, err := vc.GetAllVirtualMachines(ctx, hostSystems)
+		if err != nil {
+			errMsg := fmt.Sprintf("failed to get VMs from cluster %s: %v", clusterMoId, err)
+			log.Error(errMsg)
+			return nil, nil, fmt.Errorf("%s", errMsg)
+		}
+		for _, vm := range vms {
+			vmRefs = append(vmRefs, vm.Reference())
+		}
 	}
 	properties := []string{"runtime.host", "config.hardware"}
 	pc := property.DefaultCollector(vc.Client.Client)
 	// Obtain host MoID and virtual disk ID
+	var vmMoList []mo.VirtualMachine
 	err = pc.Retrieve(ctx, vmRefs, properties, &vmMoList)
 	if err != nil {
 		log.Errorf("Error while retrieving host properties, err: %v", err)
@@ -682,4 +657,296 @@ func getVolumeIDToVMMap(ctx context.Context, volumeIDs []string, vmMoidToHostMoi
 		response.Entries = append(response.Entries, entry)
 	}
 	return response, nil
+}
+
+// IsFileVolumeRequest checks whether the request is to create a CNS file volume.
+func isFileVolumeRequestInWcp(ctx context.Context, capabilities []*csi.VolumeCapability) bool {
+	for _, capability := range capabilities {
+		if capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY ||
+			capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER ||
+			capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER {
+			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.SharedDiskFss) {
+				if _, ok := capability.GetAccessType().(*csi.VolumeCapability_Block); !ok {
+					return true
+				}
+			} else {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// IsSharedRawBlockRequest returns true if the given volume has Block capability and
+// can be accessed by multiple nodes.
+func isSharedRawBlockRequest(ctx context.Context, capabilities []*csi.VolumeCapability) bool {
+	for _, capability := range capabilities {
+		if capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY ||
+			capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER ||
+			capability.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER {
+			if _, ok := capability.GetAccessType().(*csi.VolumeCapability_Block); ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isValidVolumeCapabilities helps validate the given volume capabilities
+// based on volume type.
+func isValidVolumeCapabilitiesInWcp(ctx context.Context, volCaps []*csi.VolumeCapability) error {
+	// File volume
+	if isFileVolumeRequestInWcp(ctx, volCaps) {
+		return validateVolumeCapabilitiesInWcp(ctx, volCaps, common.MultiNodeVolumeCaps, common.FileVolumeType)
+	}
+
+	// Raw block volume
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.SharedDiskFss) &&
+		isSharedRawBlockRequest(ctx, volCaps) {
+		return validateVolumeCapabilitiesInWcp(ctx, volCaps, common.MultiNodeVolumeCaps, common.BlockVolumeType)
+	}
+
+	// Block volume
+	return validateVolumeCapabilitiesInWcp(ctx, volCaps, common.BlockVolumeCaps, common.BlockVolumeType)
+}
+
+// validateVolumeCapabilitiesInWcp validates the access mode in given volume
+// capabilities in validAccessModes for WCP cluster.
+func validateVolumeCapabilitiesInWcp(ctx context.Context, volCaps []*csi.VolumeCapability,
+	validAccessModes []csi.VolumeCapability_AccessMode_Mode, volumeType string) error {
+
+	log := logger.GetLogger(ctx)
+	isSharedDiskEnabled := commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.SharedDiskFss)
+
+	// Validate if all capabilities of the volume are supported.
+	for _, volCap := range volCaps {
+		found := false
+		for _, validAccessMode := range validAccessModes {
+			if volCap.AccessMode.GetMode() == validAccessMode {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("%s access mode is not supported for %q volumes",
+				csi.VolumeCapability_AccessMode_Mode_name[int32(volCap.AccessMode.GetMode())], volumeType)
+		}
+
+		if isSharedDiskEnabled && volumeType == common.BlockVolumeType {
+			if volCap.GetBlock() != nil {
+				log.Debugf("Raw Block volume. FsType should be empty")
+				// For raw bloack volume, fsType should be empty
+				if volCap.GetMount() == nil {
+					return nil
+				}
+				if volCap.GetMount() != nil && volCap.GetMount().FsType != "" {
+					return fmt.Errorf("raw block volume mode is not supported with fsType %s",
+						volCap.GetMount().FsType)
+				}
+				return nil
+			}
+		}
+
+		if volCap.AccessMode.Mode == csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER {
+			// For ReadWriteOnce access mode we only support following filesystems:
+			// ext3, ext4, xfs for Linux and ntfs for Windows.
+			if volCap.GetMount() != nil && !(volCap.GetMount().FsType == common.Ext4FsType ||
+				volCap.GetMount().FsType == common.Ext3FsType || volCap.GetMount().FsType == common.XFSType ||
+				strings.ToLower(volCap.GetMount().FsType) == common.NTFSFsType || volCap.GetMount().FsType == "") {
+				return fmt.Errorf("fstype %s not supported for ReadWriteOnce volume creation",
+					volCap.GetMount().FsType)
+			}
+		} else if volCap.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_READER_ONLY ||
+			volCap.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_SINGLE_WRITER ||
+			volCap.AccessMode.Mode == csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER {
+			// For ReadWriteMany or ReadOnlyMany access modes we only support nfs or nfs4 filesystem.
+			// external-provisioner sets default fstype as ext4 when none is specified in StorageClass,
+			// but we overwrite it to nfs4 while mounting the volume.
+			if volCap.GetMount() != nil && !(volCap.GetMount().FsType == common.NfsV4FsType ||
+				volCap.GetMount().FsType == common.NfsFsType || volCap.GetMount().FsType == common.Ext4FsType ||
+				volCap.GetMount().FsType == "") {
+				return fmt.Errorf("fstype %s not supported for ReadWriteMany or ReadOnlyMany volume creation",
+					volCap.GetMount().FsType)
+			} else if !isSharedDiskEnabled && volCap.GetBlock() != nil {
+				// Raw Block volumes are not supported with ReadWriteMany or ReadOnlyMany access modes,
+				return fmt.Errorf("block volume mode is not supported for ReadWriteMany or ReadOnlyMany " +
+					"volume creation")
+			}
+		}
+	}
+	return nil
+}
+
+// validateCreateVolumeRequestInWcp is the helper function to validate
+// CreateVolumeRequest for all block controllers.
+// Function returns error if validation fails otherwise returns nil.
+func validateCreateVolumeRequestInWcp(ctx context.Context, req *csi.CreateVolumeRequest) error {
+	log := logger.GetLogger(ctx)
+	// Volume Name.
+	volName := req.GetName()
+	if len(volName) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume name is a required parameter")
+	}
+	// Validate Volume Capabilities.
+	volCaps := req.GetVolumeCapabilities()
+	if len(volCaps) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume capabilities not provided")
+	}
+	if err := isValidVolumeCapabilitiesInWcp(ctx, volCaps); err != nil {
+		return logger.LogNewErrorCodef(log, codes.InvalidArgument, "volume capability not supported. Err: %+v", err)
+	}
+	return nil
+}
+
+// validateControllerExpandVolumeRequest is the helper function to validate
+// ControllerExpandVolumeRequest for all block controllers.
+// Function returns error if validation fails otherwise returns nil.
+func validateControllerExpandVolumeRequestInWcp(ctx context.Context, req *csi.ControllerExpandVolumeRequest) error {
+	log := logger.GetLogger(ctx)
+	// Check for required parameters.
+	if len(req.GetVolumeId()) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume id is a required parameter")
+	} else if req.GetCapacityRange() == nil {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "capacity range is a required parameter")
+	} else if req.GetCapacityRange().GetRequiredBytes() < 0 || req.GetCapacityRange().GetLimitBytes() < 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "capacity ranges values cannot be negative")
+	}
+	// Validate Volume Capabilities.
+	volCaps := req.GetVolumeCapability()
+	if volCaps == nil {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume capabilities is a required parameter")
+	}
+
+	if isFileVolumeRequestInWcp(ctx, []*csi.VolumeCapability{volCaps}) {
+		return logger.LogNewErrorCode(log, codes.Unimplemented,
+			"volume expansion is only supported for block volume type")
+	}
+
+	return nil
+}
+
+// validateControllerPublishVolumeRequestInWcp is the helper function to validate
+// ControllerPublishVolumeRequest for all block controllers.
+// Function returns error if validation fails otherwise returns nil.
+func validateControllerPublishVolumeRequesInWcp(ctx context.Context, req *csi.ControllerPublishVolumeRequest) error {
+	log := logger.GetLogger(ctx)
+	// Check for required parameters.
+	if len(req.VolumeId) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume ID is a required parameter")
+	} else if len(req.NodeId) == 0 {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "node ID is a required parameter")
+	}
+	volCap := req.GetVolumeCapability()
+	if volCap == nil {
+		return logger.LogNewErrorCode(log, codes.InvalidArgument, "volume capability not provided")
+	}
+	caps := []*csi.VolumeCapability{volCap}
+	if err := isValidVolumeCapabilitiesInWcp(ctx, caps); err != nil {
+		return logger.LogNewErrorCodef(log, codes.InvalidArgument, "volume capability not supported. Err: %+v", err)
+	}
+	return nil
+}
+
+var newK8sClient = k8s.NewClient
+
+// getPodVMUUID returns the UUID of the VM(running on the node) on which the pod that is trying to
+// use the volume is scheduled.
+func getPodVMUUID(ctx context.Context, volumeID, nodeName string) (string, error) {
+	log := logger.GetLogger(ctx)
+	// get the PVC using the cache in the orchestrator
+	pvcName, pvcNamespace, ok := commonco.ContainerOrchestratorUtility.GetPVCNameFromCSIVolumeID(volumeID)
+	if !ok {
+		return "", logger.LogNewErrorCodef(log, codes.Internal,
+			"failed to get PVC name from volumeID %q", volumeID)
+	}
+
+	log.Infof("found pvc %q in namespace %q for CSI volume %q", pvcName, pvcNamespace, volumeID)
+	c, err := newK8sClient(ctx)
+	if err != nil {
+		return "", logger.LogNewErrorCode(log, codes.Internal, "failed to create kubernetes client")
+	}
+
+	// --field-selector spec.nodeName=<nodeName>,status.phase=Pending
+	list, err := c.CoreV1().Pods(pvcNamespace).List(ctx, metav1.ListOptions{
+		FieldSelector: fields.AndSelectors(
+			fields.SelectorFromSet(fields.Set{"spec.nodeName": nodeName}),
+			fields.SelectorFromSet(fields.Set{"status.phase": string(api.PodPending)}),
+		).String(),
+	})
+	if err != nil {
+		return "", logger.LogNewErrorCodef(log, codes.Internal,
+			"listing pods in the namespace %q failed with err %s", pvcNamespace, err)
+	}
+
+	for _, pod := range list.Items {
+		log.Debugf("Checking pod %q in namespace %q for PVC %q", pod.Name, pod.Namespace, pvcName)
+		for _, volume := range pod.Spec.Volumes {
+			if volume.VolumeSource.PersistentVolumeClaim == nil ||
+				volume.VolumeSource.PersistentVolumeClaim.ClaimName != pvcName {
+				continue
+			}
+
+			log.Infof("found pod %s in namespace %s using PVC %s running on node %s",
+				pod.Name, pod.Namespace, pvcName, nodeName)
+			if val, ok := pod.Annotations[vmwareSystemVMUUIDAnn]; ok {
+				log.Infof("%s annotation with value %s found on pod %s", vmwareSystemVMUUIDAnn, val, pod.Name)
+				return val, nil
+			} else {
+				return "", logger.LogNewErrorCodef(log, codes.NotFound,
+					"%q annotation not found on pod %q", vmwareSystemVMUUIDAnn, pod.Name)
+			}
+		}
+	}
+	return "", logger.LogNewErrorCodef(log, codes.NotFound,
+		"failed to find pod for pvc %q in the namespace %q", pvcName, pvcNamespace)
+}
+
+// GetAccessibleTopologies returns a list of CSI topology segments based on the clusters where the volume is accessible.
+func GetAccessibleTopologies(volumeClusters []vimtypes.ManagedObjectReference,
+	azClusterMap map[string][]string) []*csi.Topology {
+	zoneSet := make(map[string]struct{})
+	for _, clusterRef := range volumeClusters {
+		for zone, clusters := range azClusterMap {
+			for _, azCluster := range clusters {
+				if azCluster == clusterRef.Value {
+					zoneSet[zone] = struct{}{}
+					break
+				}
+			}
+		}
+	}
+	var topologies []*csi.Topology
+	for zone := range zoneSet {
+		topologies = append(topologies, &csi.Topology{
+			Segments: map[string]string{
+				v1.LabelTopologyZone: zone,
+			},
+		})
+	}
+	return topologies
+}
+
+// GetZonesFromAccessibilityRequirements returns zones from the supplied topologyRequirement received in the
+// CreateVolume Request
+func GetZonesFromAccessibilityRequirements(ctx context.Context,
+	topologyRequirement *csi.TopologyRequirement) ([]string, error) {
+	log := logger.GetLogger(ctx)
+	if topologyRequirement == nil {
+		return nil, fmt.Errorf("topologyRequirement can't we nil")
+	}
+	zoneKey := "topology.kubernetes.io/zone"
+	var zones []string
+	// Process Preferred topologies
+	// We use external provisioner with --strict-topology
+	// for strict-topology Requisite = Preferred = Selected node topology
+	// so only traversing Preferred topologyRequirement
+	for _, topology := range topologyRequirement.Preferred {
+		if zone, ok := topology.Segments[zoneKey]; ok {
+			zones = append(zones, zone)
+		}
+	}
+	if len(zones) == 0 {
+		return nil, logger.LogNewErrorCodef(log, codes.Internal, "failed to retrieve zones for e nil")
+	}
+	return zones, nil
 }

@@ -108,6 +108,12 @@ const (
 	ImageUnavailableReason = "ImageUnavailable"
 )
 
+const (
+	// VirtualMachinePublishRequestManagedByLabelKey is the label key to identify VirtualMachinePublishRequest that
+	// is created as a part of the VirtualMachineGroupPublishRequest.
+	VirtualMachinePublishRequestManagedByLabelKey = GroupName + "/virtualmachinepublishrequest-managed-by"
+)
+
 // VirtualMachinePublishRequestSource is the source of a publication request,
 // typically a VirtualMachine resource.
 type VirtualMachinePublishRequestSource struct {
@@ -334,7 +340,6 @@ type VirtualMachinePublishRequestStatus struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vmpub
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 
 // VirtualMachinePublishRequest defines the information necessary to publish a

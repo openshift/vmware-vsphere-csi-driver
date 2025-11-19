@@ -232,6 +232,11 @@ type VirtualMachineSpec struct {
 	// +optional
 	ClassName string `json:"className,omitempty"`
 
+	// +optional
+
+	// Affinity describes the VM's scheduling constraints.
+	Affinity *VirtualMachineAffinitySpec `json:"affinity,omitempty"`
+
 	// StorageClass describes the name of a Kubernetes StorageClass resource
 	// used to configure this VM's storage-related attributes.
 	//
@@ -400,6 +405,21 @@ type VirtualMachineSpec struct {
 	// behavior. In other words, please be careful when choosing to upgrade a
 	// VM to a newer hardware version.
 	MinHardwareVersion int32 `json:"minHardwareVersion,omitempty"`
+
+	// +optional
+
+	// GroupName indicates the name of the VirtualMachineGroup to which this
+	// VM belongs.
+	//
+	// VMs that belong to a group do not drive their own placement, rather that
+	// is handled by the group.
+	//
+	// When this field is set to a valid group that contains this VM as a
+	// member, an owner reference to that group is added to this VM.
+	//
+	// When this field is deleted or changed, any existing owner reference to
+	// the previous group will be removed from this VM.
+	GroupName string `json:"groupName,omitempty"`
 }
 
 // VirtualMachineReservedSpec describes a set of VM configuration options
@@ -550,16 +570,36 @@ type VirtualMachine struct {
 	Status VirtualMachineStatus `json:"status,omitempty"`
 }
 
-func (vm *VirtualMachine) NamespacedName() string {
+func (vm VirtualMachine) NamespacedName() string {
 	return vm.Namespace + "/" + vm.Name
 }
 
-func (vm *VirtualMachine) GetConditions() []metav1.Condition {
+func (vm VirtualMachine) GetConditions() []metav1.Condition {
 	return vm.Status.Conditions
 }
 
 func (vm *VirtualMachine) SetConditions(conditions []metav1.Condition) {
 	vm.Status.Conditions = conditions
+}
+
+func (vm VirtualMachine) GetMemberKind() string {
+	return "VirtualMachine"
+}
+
+func (vm VirtualMachine) GetGroupName() string {
+	return vm.Spec.GroupName
+}
+
+func (vm *VirtualMachine) SetGroupName(value string) {
+	vm.Spec.GroupName = value
+}
+
+func (vm VirtualMachine) GetPowerState() VirtualMachinePowerState {
+	return vm.Status.PowerState
+}
+
+func (vm *VirtualMachine) SetPowerState(value VirtualMachinePowerState) {
+	vm.Spec.PowerState = value
 }
 
 // +kubebuilder:object:root=true

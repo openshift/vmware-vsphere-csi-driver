@@ -36,14 +36,22 @@ type VirtualMachineSetResourcePolicySpec struct {
 // VirtualMachineSetResourcePolicyStatus defines the observed state of
 // VirtualMachineSetResourcePolicy.
 type VirtualMachineSetResourcePolicyStatus struct {
+	ResourcePools  []ResourcePoolStatus         `json:"resourcePools,omitempty"`
 	ClusterModules []VSphereClusterModuleStatus `json:"clustermodules,omitempty"`
+}
+
+// ResourcePoolStatus describes the observed state of a vSphere child
+// resource pool created for the Spec.ResourcePool.Name.
+type ResourcePoolStatus struct {
+	ClusterMoID           string `json:"clusterMoID"`
+	ChildResourcePoolMoID string `json:"childResourcePoolMoID"`
 }
 
 // VSphereClusterModuleStatus describes the observed state of a vSphere
 // cluster module.
 type VSphereClusterModuleStatus struct {
 	GroupName   string `json:"groupName"`
-	ModuleUuid  string `json:"moduleUUID"` //nolint:revive,stylecheck
+	ModuleUuid  string `json:"moduleUUID"` //nolint:revive
 	ClusterMoID string `json:"clusterMoID"`
 }
 

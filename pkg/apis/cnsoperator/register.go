@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	cnsfileaccessconfigv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsfileaccessconfig/v1alpha1"
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
+	cnsnodevmbatchattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmbatchattachment/v1alpha1"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
 	cnsunregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsunregistervolume/v1alpha1"
 	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
@@ -50,6 +51,8 @@ var (
 	CnsNodeVMAttachmentSingular = "cnsnodevmattachment"
 	// CnsNodeVMAttachmentPlural is plural of CnsNodeVmAttachment
 	CnsNodeVMAttachmentPlural = "cnsnodevmattachments"
+	// CnsNodeVmBatchAttachmentPlural is plural of CnsNodeVmBatchAttachment
+	CnsNodeVmBatchAttachmentPlural = "cnsnodevmbatchattachments"
 	// CnsVolumeMetadataSingular is Singular of CnsVolumeMetadata
 	CnsVolumeMetadataSingular = "cnsvolumemetadata"
 	// CnsVolumeMetadataPlural is plural of CnsVolumeMetadata
@@ -68,6 +71,14 @@ var (
 	CnsStoragePolicyQuotaSingular = "storagepolicyquota"
 	// CnsStoragePolicyQuotaPlural is plural of StoragePolicyQuota
 	CnsStoragePolicyQuotaPlural = "storagepolicyquotas"
+	// CnsStoragePolicyReservationSingular is Singular of StoragePolicyReservation
+	CnsStoragePolicyReservationSingular = "storagepolicyreservation"
+	// CnsStoragePolicyReservationPlural is plural of StoragePolicyReservation
+	CnsStoragePolicyReservationPlural = "storagepolicyreservations"
+	// CnsVirtualMachineSnapshotSingular is Singular of VirtualMachineSnapshot
+	CnsVirtualMachineSnapshotSingular = "vitualmachinesnapshot"
+	// CnsVirtualMachineSnapshotPlural is plural of VirtualMachineSnapshot
+	CnsVirtualMachineSnapshotPlural = "vitualmachinesnapshots"
 )
 
 var (
@@ -122,6 +133,12 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 
 	scheme.AddKnownTypes(
 		SchemeGroupVersion,
+		&cnsnodevmbatchattachmentv1alpha1.CnsNodeVmBatchAttachment{},
+		&cnsnodevmbatchattachmentv1alpha1.CnsNodeVmBatchAttachmentList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersion,
 		&storagepolicyv1alpha1.StoragePolicyQuota{},
 		&storagepolicyv1alpha1.StoragePolicyQuotaList{},
 	)
@@ -148,6 +165,12 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 		SchemeGroupVersionV2,
 		&storagepolicyv1alpha2.StoragePolicyQuota{},
 		&storagepolicyv1alpha2.StoragePolicyQuotaList{},
+	)
+
+	scheme.AddKnownTypes(
+		SchemeGroupVersionV2,
+		&storagepolicyv1alpha2.StoragePolicyReservation{},
+		&storagepolicyv1alpha2.StoragePolicyReservationList{},
 	)
 
 	scheme.AddKnownTypes(

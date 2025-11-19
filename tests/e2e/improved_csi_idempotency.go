@@ -177,9 +177,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		7. Verify no orphan volumes are left (using cnsctl tool)
 	*/
 
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor] "+
-		"Reduce external provisioner timeout and create volumes - idempotency", ginkgo.Label(p0, disruptive, block,
-		file, windows, wcp, tkg, vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] Reduce external provisioner timeout and create volumes - "+
+		"idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		createVolumesByReducingProvisionerTime(namespace, client, storagePolicyName, scParameters,
 			volumeOpsScale, shortProvisionerTimeout, c)
 	})
@@ -203,9 +203,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		5. Delete PVCs and SC
 		6. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor]"+
-		"create volume when hostd service goes down - idempotency", ginkgo.Label(p0, disruptive, block, file, windows,
-		wcp, tkg, vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] create volume when hostd service goes down - idempotency", ginkgo.Label(p0,
+		disruptive, block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = hostdServiceName
 		createVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName,
 			scParameters, volumeOpsScale, isServiceStopped, c)
@@ -221,9 +221,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		6. Delete pvcs and SC
 		7. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor]"+
-		"create volume when CNS goes down - idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg,
-		vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		"[pq-vks][pq-vks-n1][pq-vks-n2] create volume when CNS goes down - idempotency", ginkgo.Label(p0, disruptive,
+		block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = vsanhealthServiceName
 		createVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName,
 			scParameters, volumeOpsScale, isServiceStopped, c)
@@ -239,9 +239,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		6. Delete pvcs and SC
 		7. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor]"+
-		"create volume when VPXD goes down - idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg,
-		vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		"[pq-vks][pq-vks-n1][pq-vks-n2] create volume when VPXD goes down - idempotency", ginkgo.Label(p0, disruptive,
+		block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = vpxdServiceName
 		createVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName,
 			scParameters, volumeOpsScale, isServiceStopped, c)
@@ -257,9 +257,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		6. Delete pvcs and SC
 		7. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor]"+
-		"create volume when SPS goes down - idempotency", ginkgo.Label(p0, block, file, windows, wcp, tkg,
-		vanilla, vc80), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] create volume when SPS goes down - idempotency", ginkgo.Label(p0, block,
+		file, windows, wcp, tkg, vanilla, vc80), func() {
 		serviceName = spsServiceName
 		createVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName,
 			scParameters, volumeOpsScale, isServiceStopped, c)
@@ -274,9 +274,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		5. Delete PVCs and SC
 		6. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor]"+
-		"create volume when CSI restarts - idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg,
-		vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] create volume when CSI restarts - idempotency", ginkgo.Label(p0, disruptive,
+		block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = "CSI"
 		createVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName,
 			scParameters, volumeOpsScale, isServiceStopped, c)
@@ -292,9 +292,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		6. Delete pvcs and SC
 		7. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor] "+
-		"extend volume when csi restarts - idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg,
-		vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block]"+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] extend volume when csi restarts - idempotency", ginkgo.Label(p0, disruptive,
+		block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = "CSI"
 		extendVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName, scParameters,
 			volumeOpsScale, true, isServiceStopped, c)
@@ -311,9 +311,9 @@ var _ = ginkgo.Describe("Improved CSI Idempotency Tests", func() {
 		7. Delete pvcs and SC
 		8. Verify no orphan volumes are left
 	*/
-	ginkgo.It("[csi-block-vanilla] [csi-file-vanilla][csi-guest] [csi-supervisor] "+
-		"extend volume when CNS goes down - idempotency", ginkgo.Label(p0, disruptive, block, file, windows, wcp, tkg,
-		vanilla, vc70), func() {
+	ginkgo.It("[csi-block-vanilla][csi-file-vanilla][csi-guest][csi-supervisor][pq-vanilla-file][pq-vanilla-block] "+
+		" [pq-vks][pq-vks-n1][pq-vks-n2] extend volume when CNS goes down - idempotency", ginkgo.Label(p0, disruptive,
+		block, file, windows, wcp, tkg, vanilla, vc70), func() {
 		serviceName = vsanhealthServiceName
 		extendVolumeWithServiceDown(serviceName, namespace, client, storagePolicyName, scParameters,
 			volumeOpsScale, true, isServiceStopped, c)
@@ -525,7 +525,7 @@ func createVolumeWithServiceDown(serviceName string, namespace string, client cl
 		restConfig := getRestConfigClient()
 		totalQuotaUsedBefore, _, storagePolicyQuotaBefore, _, storagePolicyUsageBefore, _ =
 			getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
-				storageclass.Name, namespace, pvcUsage, volExtensionName)
+				storageclass.Name, namespace, pvcUsage, volExtensionName, false)
 
 	}
 
@@ -703,11 +703,15 @@ func createVolumeWithServiceDown(serviceName string, namespace string, client cl
 		}
 	}()
 
+	newdiskSizeInMb := diskSizeInMb * int64(volumeOpsScale)
+	newdiskSizeInMbstr := convertInt64ToStrMbFormat(newdiskSizeInMb)
 	if supervisorCluster {
-		validateQuotaUsageAfterResourceCreation(ctx, restConfig,
+		sp_quota_pvc_status, sp_usage_pvc_status := validateQuotaUsageAfterResourceCreation(ctx, restConfig,
 			storageclass.Name, namespace, pvcUsage, volExtensionName,
-			diskSizeInMb*int64(volumeOpsScale), totalQuotaUsedBefore, storagePolicyQuotaBefore,
-			storagePolicyUsageBefore)
+			[]string{newdiskSizeInMbstr}, totalQuotaUsedBefore, storagePolicyQuotaBefore,
+			storagePolicyUsageBefore, false)
+		gomega.Expect(sp_quota_pvc_status && sp_usage_pvc_status).NotTo(gomega.BeFalse())
+
 	}
 
 }
@@ -795,7 +799,7 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 		restConfig := getRestConfigClient()
 		totalQuotaUsedBefore, _, storagePolicyQuotaBefore, _, storagePolicyUsageBefore, _ =
 			getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
-				storageclass.Name, namespace, pvcUsage, volExtensionName)
+				storageclass.Name, namespace, pvcUsage, volExtensionName, false)
 	}
 
 	ginkgo.By("Creating PVCs using the Storage Class")
@@ -831,11 +835,15 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 		}
 	}()
 
+	newdiskSizeInMb := diskSizeInMb * int64(volumeOpsScale)
+	newdiskSizeInMbStr := convertInt64ToStrMbFormat(newdiskSizeInMb)
 	if supervisorCluster {
-		validateQuotaUsageAfterResourceCreation(ctx, restConfig,
+		sp_quota_pvc_status, sp_usage_pvc_status := validateQuotaUsageAfterResourceCreation(ctx, restConfig,
 			storageclass.Name, namespace, pvcUsage, volExtensionName,
-			diskSizeInMb*int64(volumeOpsScale), totalQuotaUsedBefore, storagePolicyQuotaBefore,
-			storagePolicyUsageBefore)
+			[]string{newdiskSizeInMbStr}, totalQuotaUsedBefore, storagePolicyQuotaBefore,
+			storagePolicyUsageBefore, false)
+		gomega.Expect(sp_quota_pvc_status && sp_usage_pvc_status).NotTo(gomega.BeFalse())
+
 	}
 
 	ginkgo.By("Create POD")
@@ -943,33 +951,29 @@ func extendVolumeWithServiceDown(serviceName string, namespace string, client cl
 
 	if supervisorCluster {
 		totalquotaAfterExpansion, _ := getTotalQuotaConsumedByStoragePolicy(ctx,
-			restConfig, storageclass.Name, namespace)
+			restConfig, storageclass.Name, namespace, false)
 		framework.Logf("totalquotaAfterExpansion :%v", totalquotaAfterExpansion)
 
 		storagepolicyquotaAfterExpansion, _ := getStoragePolicyQuotaForSpecificResourceType(ctx,
-			restConfig, storageclass.Name, namespace, volExtensionName)
+			restConfig, storageclass.Name, namespace, volExtensionName, false)
 		framework.Logf("storagepolicyquotaAfterExpansion :%v", storagepolicyquotaAfterExpansion)
 
 		storagepolicyUsageAfterExpansion, _ := getStoragePolicyUsageForSpecificResourceType(ctx, restConfig,
 			storageclass.Name, namespace, pvcUsage)
 		framework.Logf("storagepolicy_usage_pvc_after_expansion :%v", storagepolicyUsageAfterExpansion)
 
+		newDiskSizeinMb := diskSizeInMb * 3 * int64(volumeOpsScale)
+		newDiskSizeinMbstr := convertInt64ToStrMbFormat(newDiskSizeinMb)
+
 		//New size is 6Gi, diskSizeInMb is 2Gi so multiplying by 3 to make the expected quota consumption value
-		quotavalidationStatus := validate_totalStoragequota(ctx, diskSizeInMb*3*int64(volumeOpsScale),
+		quotavalidationStatus := validate_totalStoragequota(ctx, []string{newDiskSizeinMbstr},
 			totalQuotaUsedBefore, totalquotaAfterExpansion)
 		gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
-		quotavalidationStatus = validate_totalStoragequota(ctx, diskSizeInMb*3*int64(volumeOpsScale),
+		quotavalidationStatus = validate_totalStoragequota(ctx, []string{newDiskSizeinMbstr},
 			storagePolicyQuotaBefore, storagepolicyquotaAfterExpansion)
 		gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
-		quotavalidationStatus = validate_totalStoragequota(ctx, diskSizeInMb*3*int64(volumeOpsScale),
+		quotavalidationStatus = validate_totalStoragequota(ctx, []string{newDiskSizeinMbstr},
 			storagePolicyUsageBefore, storagepolicyUsageAfterExpansion)
 		gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
 	}
-}
-
-// stopHostD is a function for waitGroup to run stop hostd parallelly
-func stopHostD(ctx context.Context, addr string, wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
-	defer wg.Done()
-	stopHostDOnHost(ctx, addr)
 }

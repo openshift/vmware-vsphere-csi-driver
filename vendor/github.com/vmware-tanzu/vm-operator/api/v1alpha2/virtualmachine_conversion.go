@@ -5,36 +5,44 @@
 package v1alpha2
 
 import (
+	"slices"
+
 	apiconversion "k8s.io/apimachinery/pkg/conversion"
 	ctrlconversion "sigs.k8s.io/controller-runtime/pkg/conversion"
 
 	"github.com/vmware-tanzu/vm-operator/api/utilconversion"
 	vmopv1a2common "github.com/vmware-tanzu/vm-operator/api/v1alpha2/common"
-	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
+	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 )
 
-func Convert_v1alpha4_VirtualMachineBootstrapCloudInitSpec_To_v1alpha2_VirtualMachineBootstrapCloudInitSpec(
+func Convert_v1alpha5_PersistentVolumeClaimVolumeSource_To_v1alpha2_PersistentVolumeClaimVolumeSource(
+	in *vmopv1.PersistentVolumeClaimVolumeSource, out *PersistentVolumeClaimVolumeSource, s apiconversion.Scope) error {
+
+	return autoConvert_v1alpha5_PersistentVolumeClaimVolumeSource_To_v1alpha2_PersistentVolumeClaimVolumeSource(in, out, s)
+}
+
+func Convert_v1alpha5_VirtualMachineBootstrapCloudInitSpec_To_v1alpha2_VirtualMachineBootstrapCloudInitSpec(
 	in *vmopv1.VirtualMachineBootstrapCloudInitSpec, out *VirtualMachineBootstrapCloudInitSpec, s apiconversion.Scope) error {
 
-	return autoConvert_v1alpha4_VirtualMachineBootstrapCloudInitSpec_To_v1alpha2_VirtualMachineBootstrapCloudInitSpec(in, out, s)
+	return autoConvert_v1alpha5_VirtualMachineBootstrapCloudInitSpec_To_v1alpha2_VirtualMachineBootstrapCloudInitSpec(in, out, s)
 }
 
-func Convert_v1alpha4_VirtualMachineNetworkConfigDNSStatus_To_v1alpha2_VirtualMachineNetworkConfigDNSStatus(
+func Convert_v1alpha5_VirtualMachineNetworkConfigDNSStatus_To_v1alpha2_VirtualMachineNetworkConfigDNSStatus(
 	in *vmopv1.VirtualMachineNetworkConfigDNSStatus, out *VirtualMachineNetworkConfigDNSStatus, s apiconversion.Scope) error {
 
-	return autoConvert_v1alpha4_VirtualMachineNetworkConfigDNSStatus_To_v1alpha2_VirtualMachineNetworkConfigDNSStatus(in, out, s)
+	return autoConvert_v1alpha5_VirtualMachineNetworkConfigDNSStatus_To_v1alpha2_VirtualMachineNetworkConfigDNSStatus(in, out, s)
 }
 
-func Convert_v1alpha4_VirtualMachineNetworkSpec_To_v1alpha2_VirtualMachineNetworkSpec(
+func Convert_v1alpha5_VirtualMachineNetworkSpec_To_v1alpha2_VirtualMachineNetworkSpec(
 	in *vmopv1.VirtualMachineNetworkSpec, out *VirtualMachineNetworkSpec, s apiconversion.Scope) error {
 
-	return autoConvert_v1alpha4_VirtualMachineNetworkSpec_To_v1alpha2_VirtualMachineNetworkSpec(in, out, s)
+	return autoConvert_v1alpha5_VirtualMachineNetworkSpec_To_v1alpha2_VirtualMachineNetworkSpec(in, out, s)
 }
 
-func Convert_v1alpha4_VirtualMachineSpec_To_v1alpha2_VirtualMachineSpec(
+func Convert_v1alpha5_VirtualMachineSpec_To_v1alpha2_VirtualMachineSpec(
 	in *vmopv1.VirtualMachineSpec, out *VirtualMachineSpec, s apiconversion.Scope) error {
 
-	if err := autoConvert_v1alpha4_VirtualMachineSpec_To_v1alpha2_VirtualMachineSpec(in, out, s); err != nil {
+	if err := autoConvert_v1alpha5_VirtualMachineSpec_To_v1alpha2_VirtualMachineSpec(in, out, s); err != nil {
 		return err
 	}
 
@@ -47,34 +55,34 @@ func Convert_v1alpha4_VirtualMachineSpec_To_v1alpha2_VirtualMachineSpec(
 	return nil
 }
 
-func Convert_v1alpha2_VirtualMachineVolumeStatus_To_v1alpha4_VirtualMachineVolumeStatus(
+func Convert_v1alpha2_VirtualMachineVolumeStatus_To_v1alpha5_VirtualMachineVolumeStatus(
 	in *VirtualMachineVolumeStatus, out *vmopv1.VirtualMachineVolumeStatus, s apiconversion.Scope) error {
 
-	if err := autoConvert_v1alpha2_VirtualMachineVolumeStatus_To_v1alpha4_VirtualMachineVolumeStatus(in, out, s); err != nil {
+	if err := autoConvert_v1alpha2_VirtualMachineVolumeStatus_To_v1alpha5_VirtualMachineVolumeStatus(in, out, s); err != nil {
 		return err
 	}
 
 	if out.Type == "" {
-		out.Type = vmopv1.VirtualMachineStorageDiskTypeManaged
+		out.Type = vmopv1.VolumeTypeManaged
 	}
 
 	return nil
 }
 
-func Convert_v1alpha4_VirtualMachineStatus_To_v1alpha2_VirtualMachineStatus(
+func Convert_v1alpha5_VirtualMachineStatus_To_v1alpha2_VirtualMachineStatus(
 	in *vmopv1.VirtualMachineStatus, out *VirtualMachineStatus, s apiconversion.Scope) error {
 
-	if err := autoConvert_v1alpha4_VirtualMachineStatus_To_v1alpha2_VirtualMachineStatus(in, out, s); err != nil {
+	if err := autoConvert_v1alpha5_VirtualMachineStatus_To_v1alpha2_VirtualMachineStatus(in, out, s); err != nil {
 		return err
 	}
 
 	out.Volumes = nil
 	for i := range in.Volumes {
-		if in.Volumes[i].Type != vmopv1.VirtualMachineStorageDiskTypeClassic {
+		if in.Volumes[i].Type != vmopv1.VolumeTypeClassic {
 
 			// Only down-convert volume statuses if the volume is managed.
 			var vol VirtualMachineVolumeStatus
-			if err := Convert_v1alpha4_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(
+			if err := Convert_v1alpha5_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(
 				&in.Volumes[i], &vol, s); err != nil {
 				return err
 			}
@@ -82,25 +90,33 @@ func Convert_v1alpha4_VirtualMachineStatus_To_v1alpha2_VirtualMachineStatus(
 		}
 	}
 
+	out.Host = in.NodeName
+
 	return nil
 }
 
-func Convert_v1alpha2_VirtualMachineStatus_To_v1alpha4_VirtualMachineStatus(
+func Convert_v1alpha2_VirtualMachineStatus_To_v1alpha5_VirtualMachineStatus(
 	in *VirtualMachineStatus, out *vmopv1.VirtualMachineStatus, s apiconversion.Scope) error {
 
-	return autoConvert_v1alpha2_VirtualMachineStatus_To_v1alpha4_VirtualMachineStatus(in, out, s)
+	if err := autoConvert_v1alpha2_VirtualMachineStatus_To_v1alpha5_VirtualMachineStatus(in, out, s); err != nil {
+		return err
+	}
+
+	out.NodeName = in.Host
+
+	return nil
 }
 
-func Convert_v1alpha4_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(
+func Convert_v1alpha5_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(
 	in *vmopv1.VirtualMachineVolumeStatus, out *VirtualMachineVolumeStatus, s apiconversion.Scope) error {
 
-	return autoConvert_v1alpha4_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(in, out, s)
+	return autoConvert_v1alpha5_VirtualMachineVolumeStatus_To_v1alpha2_VirtualMachineVolumeStatus(in, out, s)
 }
 
-func Convert_v1alpha4_VirtualMachine_To_v1alpha2_VirtualMachine(
+func Convert_v1alpha5_VirtualMachine_To_v1alpha2_VirtualMachine(
 	in *vmopv1.VirtualMachine, out *VirtualMachine, s apiconversion.Scope) error {
 
-	if err := autoConvert_v1alpha4_VirtualMachine_To_v1alpha2_VirtualMachine(in, out, s); err != nil {
+	if err := autoConvert_v1alpha5_VirtualMachine_To_v1alpha2_VirtualMachine(in, out, s); err != nil {
 		return err
 	}
 
@@ -143,16 +159,16 @@ func Convert_v1alpha4_VirtualMachine_To_v1alpha2_VirtualMachine(
 	return nil
 }
 
-func restore_v1alpha4_VirtualMachineCryptoSpec(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineCryptoSpec(dst, src *vmopv1.VirtualMachine) {
 	dst.Spec.Crypto = src.Spec.Crypto
 }
 
-func restore_v1alpha4_VirtualMachineImage(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineImage(dst, src *vmopv1.VirtualMachine) {
 	dst.Spec.Image = src.Spec.Image
 	dst.Spec.ImageName = src.Spec.ImageName
 }
 
-func restore_v1alpha4_VirtualMachineSpecNetworkDomainName(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineSpecNetworkDomainName(dst, src *vmopv1.VirtualMachine) {
 	var (
 		dstDN string
 		srcDN string
@@ -173,8 +189,8 @@ func restore_v1alpha4_VirtualMachineSpecNetworkDomainName(dst, src *vmopv1.Virtu
 	}
 }
 
-func Convert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(in *VirtualMachine, out *vmopv1.VirtualMachine, s apiconversion.Scope) error {
-	if err := autoConvert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(in, out, s); err != nil {
+func Convert_v1alpha2_VirtualMachine_To_v1alpha5_VirtualMachine(in *VirtualMachine, out *vmopv1.VirtualMachine, s apiconversion.Scope) error {
+	if err := autoConvert_v1alpha2_VirtualMachine_To_v1alpha5_VirtualMachine(in, out, s); err != nil {
 		return err
 	}
 
@@ -238,15 +254,15 @@ func Convert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(in *VirtualMachi
 	return nil
 }
 
-func restore_v1alpha4_VirtualMachineInstanceUUID(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineInstanceUUID(dst, src *vmopv1.VirtualMachine) {
 	dst.Spec.InstanceUUID = src.Spec.InstanceUUID
 }
 
-func restore_v1alpha4_VirtualMachineBiosUUID(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineBiosUUID(dst, src *vmopv1.VirtualMachine) {
 	dst.Spec.BiosUUID = src.Spec.BiosUUID
 }
 
-func restore_v1alpha4_VirtualMachineBootstrapCloudInitInstanceID(
+func restore_v1alpha5_VirtualMachineBootstrapCloudInitInstanceID(
 	dst, src *vmopv1.VirtualMachine) {
 
 	var iid string
@@ -269,7 +285,7 @@ func restore_v1alpha4_VirtualMachineBootstrapCloudInitInstanceID(
 	dst.Spec.Bootstrap.CloudInit.InstanceID = iid
 }
 
-func restore_v1alpha4_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, src *vmopv1.VirtualMachine) {
 	if bs := src.Spec.Bootstrap; bs != nil {
 		if ci := bs.CloudInit; ci != nil {
 			if ci.WaitOnNetwork4 != nil || ci.WaitOnNetwork6 != nil {
@@ -283,22 +299,61 @@ func restore_v1alpha4_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, src *vm
 	}
 }
 
-func restore_v1alpha4_VirtualMachineGuestID(dst, src *vmopv1.VirtualMachine) {
+func restore_v1alpha5_VirtualMachineGuestID(dst, src *vmopv1.VirtualMachine) {
 	dst.Spec.GuestID = src.Spec.GuestID
 }
 
-func restore_v1alpha4_VirtualMachineCdrom(dst, src *vmopv1.VirtualMachine) {
-	dst.Spec.Cdrom = src.Spec.Cdrom
+func restore_v1alpha5_VirtualMachinePromoteDisksMode(dst, src *vmopv1.VirtualMachine) {
+	dst.Spec.PromoteDisksMode = src.Spec.PromoteDisksMode
 }
 
-func restore_v1alpha4_VirtualMachinePromoteDisksMode(dst, src *vmopv1.VirtualMachine) {
-	dst.Spec.PromoteDisksMode = src.Spec.PromoteDisksMode
+func restore_v1alpha5_VirtualMachineBootOptions(dst, src *vmopv1.VirtualMachine) {
+	dst.Spec.BootOptions = src.Spec.BootOptions
+}
+
+func restore_v1alpha5_VirtualMachineAffinitySpec(dst, src *vmopv1.VirtualMachine) {
+	dst.Spec.Affinity = src.Spec.Affinity
+}
+
+func restore_v1alpha5_VirtualMachineVolumes(dst, src *vmopv1.VirtualMachine) {
+	srcVolMap := map[string]*vmopv1.VirtualMachineVolume{}
+	for i := range src.Spec.Volumes {
+		vol := &src.Spec.Volumes[i]
+		srcVolMap[vol.Name] = vol
+	}
+	for i := range dst.Spec.Volumes {
+		dstVol := &dst.Spec.Volumes[i]
+		if srcVol, ok := srcVolMap[dstVol.Name]; ok {
+			if dstPvc := dstVol.PersistentVolumeClaim; dstPvc != nil {
+				if srcPvc := srcVol.PersistentVolumeClaim; srcPvc != nil {
+					dstPvc.ApplicationType = srcPvc.ApplicationType
+					dstPvc.ControllerBusNumber = srcPvc.ControllerBusNumber
+					dstPvc.ControllerType = srcPvc.ControllerType
+					dstPvc.DiskMode = srcPvc.DiskMode
+					dstPvc.SharingMode = srcPvc.SharingMode
+					dstPvc.UnitNumber = srcPvc.UnitNumber
+				}
+			}
+		}
+	}
+}
+
+func restore_v1alpha5_VirtualMachineHardware(dst, src *vmopv1.VirtualMachine) {
+	if src.Spec.Hardware != nil {
+		dst.Spec.Hardware = src.Spec.Hardware.DeepCopy()
+	} else {
+		dst.Spec.Hardware = nil
+	}
+}
+
+func restore_v1alpha5_VirtualMachinePolicies(dst, src *vmopv1.VirtualMachine) {
+	dst.Spec.Policies = slices.Clone(src.Spec.Policies)
 }
 
 // ConvertTo converts this VirtualMachine to the Hub version.
 func (src *VirtualMachine) ConvertTo(dstRaw ctrlconversion.Hub) error {
 	dst := dstRaw.(*vmopv1.VirtualMachine)
-	if err := Convert_v1alpha2_VirtualMachine_To_v1alpha4_VirtualMachine(src, dst, nil); err != nil {
+	if err := Convert_v1alpha2_VirtualMachine_To_v1alpha5_VirtualMachine(src, dst, nil); err != nil {
 		return err
 	}
 
@@ -310,16 +365,20 @@ func (src *VirtualMachine) ConvertTo(dstRaw ctrlconversion.Hub) error {
 
 	// BEGIN RESTORE
 
-	restore_v1alpha4_VirtualMachineImage(dst, restored)
-	restore_v1alpha4_VirtualMachineInstanceUUID(dst, restored)
-	restore_v1alpha4_VirtualMachineBiosUUID(dst, restored)
-	restore_v1alpha4_VirtualMachineBootstrapCloudInitInstanceID(dst, restored)
-	restore_v1alpha4_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, restored)
-	restore_v1alpha4_VirtualMachineSpecNetworkDomainName(dst, restored)
-	restore_v1alpha4_VirtualMachineGuestID(dst, restored)
-	restore_v1alpha4_VirtualMachineCdrom(dst, restored)
-	restore_v1alpha4_VirtualMachineCryptoSpec(dst, restored)
-	restore_v1alpha4_VirtualMachinePromoteDisksMode(dst, restored)
+	restore_v1alpha5_VirtualMachineImage(dst, restored)
+	restore_v1alpha5_VirtualMachineInstanceUUID(dst, restored)
+	restore_v1alpha5_VirtualMachineBiosUUID(dst, restored)
+	restore_v1alpha5_VirtualMachineBootstrapCloudInitInstanceID(dst, restored)
+	restore_v1alpha5_VirtualMachineBootstrapCloudInitWaitOnNetwork(dst, restored)
+	restore_v1alpha5_VirtualMachineSpecNetworkDomainName(dst, restored)
+	restore_v1alpha5_VirtualMachineGuestID(dst, restored)
+	restore_v1alpha5_VirtualMachineCryptoSpec(dst, restored)
+	restore_v1alpha5_VirtualMachinePromoteDisksMode(dst, restored)
+	restore_v1alpha5_VirtualMachineBootOptions(dst, restored)
+	restore_v1alpha5_VirtualMachineAffinitySpec(dst, restored)
+	restore_v1alpha5_VirtualMachineVolumes(dst, restored)
+	restore_v1alpha5_VirtualMachineHardware(dst, restored)
+	restore_v1alpha5_VirtualMachinePolicies(dst, restored)
 
 	// END RESTORE
 
@@ -331,7 +390,7 @@ func (src *VirtualMachine) ConvertTo(dstRaw ctrlconversion.Hub) error {
 // ConvertFrom converts the hub version to this VirtualMachine.
 func (dst *VirtualMachine) ConvertFrom(srcRaw ctrlconversion.Hub) error {
 	src := srcRaw.(*vmopv1.VirtualMachine)
-	if err := Convert_v1alpha4_VirtualMachine_To_v1alpha2_VirtualMachine(src, dst, nil); err != nil {
+	if err := Convert_v1alpha5_VirtualMachine_To_v1alpha2_VirtualMachine(src, dst, nil); err != nil {
 		return err
 	}
 
@@ -342,11 +401,11 @@ func (dst *VirtualMachine) ConvertFrom(srcRaw ctrlconversion.Hub) error {
 // ConvertTo converts this VirtualMachineList to the Hub version.
 func (src *VirtualMachineList) ConvertTo(dstRaw ctrlconversion.Hub) error {
 	dst := dstRaw.(*vmopv1.VirtualMachineList)
-	return Convert_v1alpha2_VirtualMachineList_To_v1alpha4_VirtualMachineList(src, dst, nil)
+	return Convert_v1alpha2_VirtualMachineList_To_v1alpha5_VirtualMachineList(src, dst, nil)
 }
 
 // ConvertFrom converts the hub version to this VirtualMachineList.
 func (dst *VirtualMachineList) ConvertFrom(srcRaw ctrlconversion.Hub) error {
 	src := srcRaw.(*vmopv1.VirtualMachineList)
-	return Convert_v1alpha4_VirtualMachineList_To_v1alpha2_VirtualMachineList(src, dst, nil)
+	return Convert_v1alpha5_VirtualMachineList_To_v1alpha2_VirtualMachineList(src, dst, nil)
 }

@@ -21,8 +21,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
@@ -33,7 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	crconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -47,10 +49,8 @@ const (
 
 var ErrAvailabilityZoneCRNotRegistered = errors.New("AvailabilityZone custom resource not registered")
 
-// GetVCenter returns VirtualCenter object from specified Manager object.
-// Before returning VirtualCenter object, vcenter connection is established if
-// session doesn't exist.
-func GetVCenter(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCenter, error) {
+// getVCenterInternal is the internal implementation that can be overridden for testing
+var getVCenterInternal = func(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCenter, error) {
 	var err error
 	log := logger.GetLogger(ctx)
 	vcenter, err := manager.VcenterManager.GetVirtualCenter(ctx, manager.VcenterConfig.Host)
@@ -64,6 +64,26 @@ func GetVCenter(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCente
 		return nil, err
 	}
 	return vcenter, nil
+}
+
+// getAvailabilityZoneClient returns AZ Client that can be overridden for testing
+var getAvailabilityZoneClient = func() (dynamic.Interface, error) {
+	cfg, err := crconfig.GetConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Kubernetes config. Err: %+v", err)
+	}
+	azClient, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create AvailabilityZone client using config. Err: %+v", err)
+	}
+	return azClient, nil
+}
+
+// GetVCenter returns VirtualCenter object from specified Manager object.
+// Before returning VirtualCenter object, vcenter connection is established if
+// session doesn't exist.
+func GetVCenter(ctx context.Context, manager *Manager) (*cnsvsphere.VirtualCenter, error) {
+	return getVCenterInternal(ctx, manager)
 }
 
 // GetVCenters returns VirtualCenter object from specified Managers object.
@@ -165,12 +185,12 @@ func IsVolumeReadOnly(capability *csi.VolumeCapability) bool {
 // validateVolumeCapabilities validates the access mode in given volume
 // capabilities in validAccessModes.
 func validateVolumeCapabilities(volCaps []*csi.VolumeCapability,
-	validAccessModes []csi.VolumeCapability_AccessMode, volumeType string) error {
+	validAccessModes []csi.VolumeCapability_AccessMode_Mode, volumeType string) error {
 	// Validate if all capabilities of the volume are supported.
 	for _, volCap := range volCaps {
 		found := false
 		for _, validAccessMode := range validAccessModes {
-			if volCap.AccessMode.GetMode() == validAccessMode.GetMode() {
+			if volCap.AccessMode.GetMode() == validAccessMode {
 				found = true
 				break
 			}
@@ -214,7 +234,7 @@ func validateVolumeCapabilities(volCaps []*csi.VolumeCapability,
 // based on volume type.
 func IsValidVolumeCapabilities(ctx context.Context, volCaps []*csi.VolumeCapability) error {
 	if IsFileVolumeRequest(ctx, volCaps) {
-		return validateVolumeCapabilities(volCaps, FileVolumeCaps, FileVolumeType)
+		return validateVolumeCapabilities(volCaps, MultiNodeVolumeCaps, FileVolumeType)
 	}
 	return validateVolumeCapabilities(volCaps, BlockVolumeCaps, BlockVolumeType)
 }
@@ -367,18 +387,12 @@ func Contains(list []string, item string) bool {
 
 // GetClusterComputeResourceMoIds helps find ClusterComputeResourceMoIds from
 // AvailabilityZone CRs on the supervisor cluster.
-func GetClusterComputeResourceMoIds(ctx context.Context) ([]string, error) {
+// returns true if any AZ in the supervisor has multiple clusters
+func GetClusterComputeResourceMoIds(ctx context.Context) ([]string, bool, error) {
 	log := logger.GetLogger(ctx)
-	// Get a config to talk to the apiserver.
-	cfg, err := config.GetConfig()
+	azClient, err := getAvailabilityZoneClient()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Kubernetes config. Err: %+v", err)
-	}
-
-	// Create a new AvailabilityZone client.
-	azClient, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create AvailabilityZone client using config. Err: %+v", err)
+		return nil, false, fmt.Errorf("failed to create AvailabilityZone client using config. Err: %+v", err)
 	}
 	azResource := schema.GroupVersionResource{
 		Group: "topology.tanzu.vmware.com", Version: "v1alpha1", Resource: "availabilityzones"}
@@ -393,27 +407,31 @@ func GetClusterComputeResourceMoIds(ctx context.Context) ([]string, error) {
 		_, ok := err.(*apiMeta.NoKindMatchError)
 		if ok {
 			log.Infof("AvailabilityZone CR is not registered on the cluster")
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, fmt.Errorf("failed to get AvailabilityZone lists. err: %+v", err)
+		return nil, false, fmt.Errorf("failed to get AvailabilityZone lists. err: %+v", err)
 	}
 	if len(azList.Items) == 0 {
-		return nil, fmt.Errorf("could not find any AvailabilityZone")
+		return nil, false, fmt.Errorf("could not find any AvailabilityZone")
 	}
 
 	var (
 		clusterComputeResourceMoIds []string
+		multipleClustersPerAZ       bool
 	)
 	for _, az := range azList.Items {
 		clusterComputeResourceMoIdSlice, found, err := unstructured.NestedStringSlice(az.Object, "spec",
 			"clusterComputeResourceMoIDs")
 		if !found || err != nil {
-			return nil, fmt.Errorf("failed to get ClusterComputeResourceMoIDs "+
+			return nil, multipleClustersPerAZ, fmt.Errorf("failed to get ClusterComputeResourceMoIDs "+
 				"from AvailabilityZone instance: %+v, err:%+v", az.Object, err)
+		}
+		if len(clusterComputeResourceMoIdSlice) > 1 {
+			multipleClustersPerAZ = true
 		}
 		clusterComputeResourceMoIds = append(clusterComputeResourceMoIds, clusterComputeResourceMoIdSlice...)
 	}
-	return clusterComputeResourceMoIds, nil
+	return clusterComputeResourceMoIds, multipleClustersPerAZ, nil
 }
 
 // MergeMaps merges two maps to create a new one, the key-value pair from first
@@ -460,6 +478,58 @@ func GetValidatedCNSVolumeInfoPatch(ctx context.Context,
 					aggregatedSnapshotSizeBytes, resource.BinarySI),
 				"snapshotlatestoperationcompletetime": &metav1.Time{
 					Time: cnsSnapshotInfo.SnapshotLatestOperationCompleteTime},
+			},
+		}
+	}
+	return patch, nil
+}
+
+// ExtractVolumeIDFromPVName parses the VolumeID UUID from a volumeName
+// generated by the external-provisioner (e.g., "pvc-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx").
+// Returns the UUID string if found, or an error otherwise.
+func ExtractVolumeIDFromPVName(ctx context.Context, volumeName string) (string, error) {
+	log := logger.GetLogger(ctx)
+
+	re := regexp.MustCompile(`pvc-([0-9a-fA-F\-]+)`)
+	matches := re.FindStringSubmatch(volumeName)
+
+	if len(matches) != 2 {
+		return "", logger.LogNewErrorf(log, "failed to extract UID from volumeName name: %q", volumeName)
+	}
+	return matches[1], nil
+}
+
+func GetCNSVolumeInfoPatch(ctx context.Context, CapacityInMb int64, volumeId string) (map[string]interface{}, error) {
+	log := logger.GetLogger(ctx)
+	var patch map[string]interface{}
+	if volumeId == "" {
+		log.Errorf("VolumeID %q values cannot be empty", volumeId)
+		return nil, logger.LogNewErrorf(log, "VolumeID values cannot be empty")
+	}
+	if CapacityInMb == -1 {
+		log.Infof("Couldn't retrieve aggregated snapshot capacity for volume %q", volumeId)
+		patch = map[string]interface{}{
+			"spec": map[string]interface{}{
+				"validaggregatedsnapshotsize": false,
+			},
+		}
+	} else {
+		aggregatedSnapshotSizeBytes := CapacityInMb * MbInBytes
+		log.Infof("retrieved aggregated snapshot capacity %d for volume %q",
+			CapacityInMb, volumeId)
+		// In cases of concurrent request for vmsnapshot and volumesnapshot
+		// we compare the snapshotlatestoperationcompletetime and based on that allow update to cnsvolumeinfo.
+		// In cases where there is existing aggregatedSnapshotSizeBytes value and a new one is received
+		// on patching CNSVolumeInfo, in cnsVolumeInfoCRUpdated() compares the old value and new value
+		// based on result the exact differece is added to spu.
+		patch = map[string]interface{}{
+			"spec": map[string]interface{}{
+				"validaggregatedsnapshotsize": true,
+				"aggregatedsnapshotsize": resource.NewQuantity(
+					aggregatedSnapshotSizeBytes, resource.BinarySI),
+				"snapshotlatestoperationcompletetime": &metav1.Time{
+					Time: time.Now(),
+				},
 			},
 		}
 	}

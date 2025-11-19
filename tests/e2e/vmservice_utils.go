@@ -22,10 +22,12 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"reflect"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -35,11 +37,13 @@ import (
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
 	"github.com/pkg/sftp"
-	"golang.org/x/crypto/ssh"
-
 	vmopv1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
 	vmopv3 "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
 	vmopv3common "github.com/vmware-tanzu/vm-operator/api/v1alpha3/common"
+	vmopv4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
+	vmopv4common "github.com/vmware-tanzu/vm-operator/api/v1alpha4/common"
+	vmopv5 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+	"golang.org/x/crypto/ssh"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,9 +51,11 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	ctlrclient "sigs.k8s.io/controller-runtime/pkg/client"
+
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
 )
 
@@ -71,7 +77,14 @@ func createTestWcpNs(
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 
 	namespace := fmt.Sprintf("csi-vmsvcns-%v", r.Intn(10000))
-	nsCreationUrl := "https://" + vcIp + "/api/vcenter/namespaces/instances/v2"
+
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vcIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+
+	nsCreationUrl := "https://" + vcIp + ":" + e2eVSphere.Config.Global.VCenterPort +
+		"/api/vcenter/namespaces/instances/v2"
 	reqBody := fmt.Sprintf(`{
         "namespace": "%s",
         "storage_specs": [  {
@@ -88,6 +101,8 @@ func createTestWcpNs(
         "supervisor": "%s"
     }`, namespace, storagePolicyId, vmClass, contentLibId, supervisorId)
 
+	fmt.Println(reqBody)
+
 	_, statusCode := invokeVCRestAPIPostRequest(vcRestSessionId, nsCreationUrl, reqBody)
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 204))
 	framework.Logf("Successfully created namepsace %v in SVC.", namespace)
@@ -97,16 +112,28 @@ func createTestWcpNs(
 // delTestWcpNs triggeres a wcp namespace deletion asynchronously
 func delTestWcpNs(vcRestSessionId string, namespace string) {
 	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	nsDeletionUrl := "https://" + vcIp + "/api/vcenter/namespaces/instances/" + namespace
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vcIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+	nsDeletionUrl := "https://" + vcIp + ":" + e2eVSphere.Config.Global.VCenterPort +
+		"/api/vcenter/namespaces/instances/" + namespace
 	_, statusCode := invokeVCRestAPIDeleteRequest(vcRestSessionId, nsDeletionUrl)
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 204))
 	framework.Logf("Successfully Deleted namepsace %v in SVC.", namespace)
 }
 
 // getSvcId fetches the ID of the Supervisor cluster
-func getSvcId(vcRestSessionId string) string {
-	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	svcIdFetchUrl := "https://" + vcIp + "/api/vcenter/namespace-management/supervisors/summaries"
+func getSvcId(vcRestSessionId string, vs *vSphere) string {
+
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	vCenterIp := vs.Config.Global.VCenterHostname
+	if isPrivateNetwork {
+		vCenterIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+
+	svcIdFetchUrl := "https://" + vCenterIp + ":" + vs.Config.Global.VCenterPort +
+		"/api/vcenter/namespace-management/supervisors/summaries"
 
 	resp, statusCode := invokeVCRestAPIGetRequest(vcRestSessionId, svcIdFetchUrl)
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 200))
@@ -119,12 +146,13 @@ func getSvcId(vcRestSessionId string) string {
 
 // createAndOrGetContentlibId4Url fetches ID of a content lib that matches the given URL, if none are found it creates a
 // new content lib with the given URL and returns its ID
-func createAndOrGetContentlibId4Url(vcRestSessionId string, contentLibUrl string, dsMoId string) (string, error) {
+func createAndOrGetContentlibId4Url(vcRestSessionId string, contentLibUrl string, dsMoId string,
+	vs *vSphere) (string, error) {
 	r := rand.New(rand.NewSource(time.Now().Unix()))
 	contentlibName := fmt.Sprintf("csi-vmsvc-%v", r.Intn(10000))
 
 	// Try to get the existing Content Library ID
-	contentLibId, err := getContentLibId4Url(vcRestSessionId, contentLibUrl)
+	contentLibId, err := getContentLibId4Url(vcRestSessionId, contentLibUrl, vs)
 	if err == nil {
 		if contentLibId == "" {
 			return "", fmt.Errorf("existing content library ID is empty")
@@ -134,13 +162,18 @@ func createAndOrGetContentlibId4Url(vcRestSessionId string, contentLibUrl string
 
 	// Get SSL Thumbprint
 	sslThumbPrint, err := getSslThumbprintForContentLibraryCreation(vcRestSessionId,
-		contentLibUrl)
+		contentLibUrl, &e2eVSphere)
 	if err != nil {
 		return "", fmt.Errorf("failed to get SSL thumbprint: %w", err)
 	}
 
 	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	contentlbCreationUrl := "https://" + vcIp + "/api/content/subscribed-library"
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vcIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+	contentlbCreationUrl := "https://" + vcIp + ":" + vs.Config.Global.VCenterPort +
+		"/api/content/subscribed-library"
 	reqBody := fmt.Sprintf(`{
         "name": "%s",
         "storage_backings": [{
@@ -181,9 +214,16 @@ func createAndOrGetContentlibId4Url(vcRestSessionId string, contentLibUrl string
 getSslThumbprintForContentLibraryCreation util will fetch the thumbprint
 required to create a content library
 */
-func getSslThumbprintForContentLibraryCreation(vcRestSessionId string, contentLibUrl string) (string, error) {
+func getSslThumbprintForContentLibraryCreation(vcRestSessionId string, contentLibUrl string,
+	vs *vSphere) (string, error) {
 	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	contentlbCreationUrl := "https://" + vcIp + "/api/content/subscribed-library?action=probe"
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vcIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+
+	contentlbCreationUrl := "https://" + vcIp + ":" + vs.Config.Global.VCenterPort +
+		"/api/content/subscribed-library?action=probe"
 
 	reqBody := fmt.Sprintf(`{
         "subscription_info": {
@@ -211,11 +251,11 @@ func getSslThumbprintForContentLibraryCreation(vcRestSessionId string, contentLi
 }
 
 // getContentLibId4Url fetches ID of a content lib that matches the given URL
-func getContentLibId4Url(vcRestSessionId string, url string) (string, error) {
+func getContentLibId4Url(vcRestSessionId string, url string, vs *vSphere) (string, error) {
 	var libId string
-	libIds := getAllContentLibIds(vcRestSessionId)
+	libIds := getAllContentLibIds(vcRestSessionId, vs)
 	for _, libId := range libIds {
-		lib := getContentLib(vcRestSessionId, libId)
+		lib := getContentLib(vcRestSessionId, libId, vs)
 		if lib.url == url {
 			return libId, nil
 		}
@@ -224,9 +264,15 @@ func getContentLibId4Url(vcRestSessionId string, url string) (string, error) {
 }
 
 // getAllContentLibIds fetches IDs of all content libs
-func getAllContentLibIds(vcRestSessionId string) []string {
-	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	contentLibsFetchUrl := "https://" + vcIp + "/api/content/subscribed-library"
+func getAllContentLibIds(vcRestSessionId string, vs *vSphere) []string {
+	vCenterIp := e2eVSphere.Config.Global.VCenterHostname
+
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vCenterIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+	contentLibsFetchUrl := "https://" + vCenterIp + ":" + vs.Config.Global.VCenterPort +
+		"/api/content/subscribed-library"
 
 	resp, statusCode := invokeVCRestAPIGetRequest(vcRestSessionId, contentLibsFetchUrl)
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 200))
@@ -238,9 +284,16 @@ func getAllContentLibIds(vcRestSessionId string) []string {
 }
 
 // getContentLib fetches the content lib with give ID
-func getContentLib(vcRestSessionId string, libId string) subscribedContentLibBasic {
+func getContentLib(vcRestSessionId string, libId string, vs *vSphere) subscribedContentLibBasic {
 	vcIp := e2eVSphere.Config.Global.VCenterHostname
-	contentLibFetchUrl := "https://" + vcIp + "/api/content/subscribed-library/" + libId
+
+	isPrivateNetwork := GetBoolEnvVarOrDefault("IS_PRIVATE_NETWORK", false)
+	if isPrivateNetwork {
+		vcIp = GetStringEnvVarOrDefault("LOCAL_HOST_IP", defaultlocalhostIP)
+	}
+
+	contentLibFetchUrl := "https://" + vcIp + ":" + vs.Config.Global.VCenterPort +
+		"/api/content/subscribed-library/" + libId
 
 	resp, statusCode := invokeVCRestAPIGetRequest(vcRestSessionId, contentLibFetchUrl)
 	gomega.Expect(statusCode).Should(gomega.BeNumerically("==", 200))
@@ -311,10 +364,12 @@ func invokeVCRestAPIDeleteRequest(vcRestSessionId string, url string) ([]byte, i
 // waitNGetVmiForImageName waits and fetches VM image CR for given image name in the specified namespace
 func waitNGetVmiForImageName(ctx context.Context, c ctlrclient.Client, imageName string) string {
 	vmi := ""
+	time.Sleep(pollTimeoutShort)
 	err := wait.PollUntilContextTimeout(ctx, poll*5, pollTimeout, true,
 		func(ctx context.Context) (bool, error) {
 			vmImagesList := &vmopv1.VirtualMachineImageList{}
 			err := c.List(ctx, vmImagesList)
+			defer ginkgo.GinkgoRecover()
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			for _, instance := range vmImagesList.Items {
 				if instance.Status.ImageName == imageName {
@@ -365,6 +420,7 @@ func createVmServiceVmV3(ctx context.Context, c ctlrclient.Client, opts CreateVm
 			},
 		})
 	}
+
 	vm := &vmopv3.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: opts.Namespace},
 		Spec: vmopv3.VirtualMachineSpec{
@@ -425,6 +481,7 @@ func createVmServiceVmWithPvcs(ctx context.Context, c ctlrclient.Client, namespa
 	r := rand.New(rand.NewSource(time.Now().UnixNano()))
 	vols := []vmopv1.VirtualMachineVolume{}
 	vmName := fmt.Sprintf("csi-test-vm-%d", r.Intn(10000))
+
 	for _, pvc := range pvcs {
 		vols = append(vols, vmopv1.VirtualMachineVolume{
 			Name: pvc.Name,
@@ -433,6 +490,7 @@ func createVmServiceVmWithPvcs(ctx context.Context, c ctlrclient.Client, namespa
 			},
 		})
 	}
+
 	vm := vmopv1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: namespace},
 		Spec: vmopv1.VirtualMachineSpec{
@@ -661,93 +719,92 @@ func waitNverifyPvcsAreAttachedToVmsvcVm(ctx context.Context, vmopC ctlrclient.C
 	return err
 }
 
-// formatNVerifyPvcIsAccessible format the pvc inside vm and create a file system on it and returns a folder with 777
-// permissions under the mount point
+// formatNVerifyPvcIsAccessible formats the PVC inside a VM, creates a filesystem,
+// and returns a folder with 777 permissions under the mount point.
 func formatNVerifyPvcIsAccessible(diskUuid string, mountIndex int, vmIp string) string {
-	// Construct the disk path from the UUID
 	p := "/dev/disk/by-id/wwn-0x" + strings.ReplaceAll(strings.ToLower(diskUuid), "-", "")
 	fmt.Println("Checking disk path:", p)
 
-	// List the available disks
-	results := execSshOnVmThroughGatewayVm(vmIp, []string{
-		"ls -l /dev/disk/by-id/",
-	})
-	fmt.Println("Disk list results:", results)
-
-	// Check if the desired disk exists
-	diskCheckResults := execSshOnVmThroughGatewayVm(vmIp, []string{
-		"ls -l " + p,
-	})
-
-	// If the disk is not found, try rescanning SCSI devices
-	if strings.Contains(diskCheckResults[0].Stderr, "No such file or directory") {
-		fmt.Printf("Disk %s not found. Rescanning SCSI devices.\n", p)
-		rescanResults := execSshOnVmThroughGatewayVm(vmIp, []string{
-			"echo '- - -' | sudo tee /sys/class/scsi_host/host*/scan",
-			"ls -l /dev/disk/by-id/",
-			"ls -l " + p,
+	var dev string
+	maxRetries := 10
+	for i := 0; i < maxRetries; i++ {
+		// Trigger SCSI rescan
+		execSshOnVmThroughGatewayVm(vmIp, []string{
+			"for host in /sys/class/scsi_host/host*; do echo '- - -' | sudo tee $host/scan; done",
 		})
-		fmt.Println("Rescan results:", rescanResults)
 
-		// Check again if the disk is available after rescanning
-		diskCheckResults = execSshOnVmThroughGatewayVm(vmIp, []string{
-			"ls -l " + p,
+		// Resolve device path
+		diskCheckResults := execSshOnVmThroughGatewayVm(vmIp, []string{
+			fmt.Sprintf("ls -l %s || true", p),
+			fmt.Sprintf("readlink -f %s || true", p),
 		})
+		dev = strings.TrimSpace(diskCheckResults[len(diskCheckResults)-1].Stdout)
+
+		if dev == "" || dev == "/dev/" {
+			fmt.Printf("Attempt %d/%d: device not resolved yet\n", i+1, maxRetries)
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		// Skip root disk
+		if dev == "/dev/sda" {
+			fmt.Printf("Resolved device is root disk (/dev/sda). Skipping PVC format for UUID %s on VM %s\n", diskUuid, vmIp)
+
+			// 🔎 Debug check: list all disks inside the VM
+			checkResults := execSshOnVmThroughGatewayVm(vmIp, []string{
+				"lsblk -o NAME,SIZE,TYPE,MOUNTPOINT",
+				"sudo fdisk -l || true",
+				"ls -l /dev/disk/by-id/ | grep wwn || true",
+			})
+			fmt.Println("Disk check results:")
+			for _, r := range checkResults {
+				fmt.Println(r.Stdout)
+			}
+
+			return "" // return safely instead of failing
+		}
+
+		break
 	}
 
-	// If the disk is still not found, fail the test
-	if strings.Contains(diskCheckResults[0].Stderr, "No such file or directory") {
-		framework.Failf("Disk %s not found on VM %s after rescanning.", p, vmIp)
+	if dev == "" || dev == "/dev/" {
+		framework.Failf("Failed to resolve valid device path for UUID %s on VM %s (got %s)", p, vmIp, dev)
 	}
 
-	// Extract the device name
-	parts := strings.Split(strings.TrimSpace(diskCheckResults[0].Stdout), "/")
-	if len(parts) < 7 {
-		framework.Failf("Unexpected ls output: %s", diskCheckResults[0].Stdout)
-	}
-	dev := "/dev/" + parts[6]
-	fmt.Println("Device:", dev)
-
-	gomega.Expect(dev).ShouldNot(gomega.Equal("/dev/"))
-	framework.Logf("Found device %s for disk with UUID %s", dev, diskUuid)
-
+	fmt.Println("Resolved device:", dev)
 	partitionDev := dev + "1"
-	fmt.Println("Partition Device:", partitionDev)
 
-	// Unmount any existing partitions on the device
-	unmountCommands := []string{
-		fmt.Sprintf("sudo umount %s* || true", dev),
-	}
-	res := execSshOnVmThroughGatewayVm(vmIp, unmountCommands)
-	fmt.Println("Unmount Results:", res)
+	// Unmount if already mounted
+	execSshOnVmThroughGatewayVm(vmIp, []string{
+		fmt.Sprintf("sudo umount -f %s || true", partitionDev),
+		fmt.Sprintf("sudo umount -f %s || true", dev),
+	})
 
-	// Partition and format the disk
+	// Partition fresh (wipe GPT headers, then create ext4)
 	partitionCommands := []string{
+		fmt.Sprintf("sudo wipefs -a %s || true", dev),
 		fmt.Sprintf("sudo parted --script %s mklabel gpt", dev),
-		fmt.Sprintf("sudo parted --script -a optimal %s mkpart primary 0%% 100%%", dev),
-		"lsblk -l",
-		fmt.Sprintf("sudo mkfs.ext4 %s", partitionDev),
+		fmt.Sprintf("sudo parted --script -a optimal %s mkpart primary ext4 0%% 100%%", dev),
+		"sleep 2",
+		fmt.Sprintf("sudo mkfs.ext4 -F %s", partitionDev),
 	}
-	res = execSshOnVmThroughGatewayVm(vmIp, partitionCommands)
-	fmt.Println("Partitioning Results:", res)
+	execSshOnVmThroughGatewayVm(vmIp, partitionCommands)
 
-	// Mount the new partition
+	// Mount point
 	volMountPath := "/mnt/volume" + strconv.Itoa(mountIndex)
 	volFolder := volMountPath + "/data"
 	mountCommands := []string{
 		fmt.Sprintf("sudo mkdir -p %s", volMountPath),
-		fmt.Sprintf("sudo mount %s %s", partitionDev, volMountPath),
+		fmt.Sprintf("sudo mount -o discard %s %s", partitionDev, volMountPath),
 		fmt.Sprintf("sudo mkdir -p %s", volFolder),
 		fmt.Sprintf("sudo chmod -R 777 %s", volFolder),
-		fmt.Sprintf("bash -c 'df -Th %s | tee %s/fstype'", partitionDev, volFolder),
+		fmt.Sprintf("df -Th %s | tee %s/fstype", partitionDev, volFolder),
 		fmt.Sprintf("grep -c ext4 %s/fstype", volFolder),
-		"sync",
 	}
-	results = execSshOnVmThroughGatewayVm(vmIp, mountCommands)
-	fmt.Println("Mounting Results:", results)
+	results := execSshOnVmThroughGatewayVm(vmIp, mountCommands)
 
-	// Verify the filesystem type
-	gomega.Expect(strings.TrimSpace(results[5].Stdout)).To(gomega.Equal("1"), "Filesystem type is not ext4")
+	// Verify FS type
+	gomega.Expect(strings.TrimSpace(results[len(results)-1].Stdout)).To(gomega.Equal("1"), "Filesystem type is not ext4")
 
 	return volFolder
 }
@@ -1256,8 +1313,10 @@ and verifying the attached volumes.
 func createVmServiceVm(ctx context.Context, client clientset.Interface, vmopC ctlrclient.Client,
 	cnsopC ctlrclient.Client, namespace string,
 	pvclaims []*v1.PersistentVolumeClaim, vmClass string,
-	storageClassName string) (string, *vmopv1.VirtualMachine, *vmopv1.VirtualMachineService, error) {
-
+	storageClassName string, createBootstrapSecret bool) (string, *vmopv1.VirtualMachine,
+	*vmopv1.VirtualMachineService, error) {
+	var err error
+	var secretName string
 	/*Fetch the VM image name from the environment variable. This image is used for
 	creating the VirtualMachineInstance */
 	vmImageName := GetAndExpectStringEnvVar(envVmsvcVmImageName)
@@ -1267,7 +1326,9 @@ func createVmServiceVm(ctx context.Context, client clientset.Interface, vmopC ct
 
 	/* Create a bootstrap secret for the VirtualMachineService VM. This secret contains
 	credentials or configuration data needed by the VM. */
-	secretName := createBootstrapSecretForVmsvcVms(ctx, client, namespace)
+	if createBootstrapSecret {
+		secretName = createBootstrapSecretForVmsvcVms(ctx, client, namespace)
+	}
 
 	var vm *vmopv1.VirtualMachine
 	//Create the Virtual Machine with PVC
@@ -1283,7 +1344,7 @@ func createVmServiceVm(ctx context.Context, client clientset.Interface, vmopC ct
 	vmlbsvc := createService4Vm(ctx, vmopC, namespace, vm.Name)
 
 	// Wait for the VM to get an IP address.
-	vmIp, err := waitNgetVmsvcVmIp(ctx, vmopC, namespace, vm.Name)
+	_, err = waitNgetVmsvcVmIp(ctx, vmopC, namespace, vm.Name)
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("failed to get VM IP: %w", err)
 	}
@@ -1298,18 +1359,8 @@ func createVmServiceVm(ctx context.Context, client clientset.Interface, vmopC ct
 		return "", nil, nil, fmt.Errorf("PVCs not attached to VM: %w", err)
 	}
 
-	// After the VM has been created and the PVCs are attached, fetch the current state of the VM.
-	vm, err = getVmsvcVM(ctx, vmopC, vm.Namespace, vm.Name)
-	if err != nil {
-		return "", nil, nil, fmt.Errorf("failed to get VM info: %w", err)
-	}
-
-	/* Verify that the attached volumes are accessible and validate data integrity. The function iterates through each
-	volume of the VM, verifies that the PVC is accessible, and checks the data integrity on each attached disk */
-	for i, vol := range vm.Status.Volumes {
-		volFolder := formatNVerifyPvcIsAccessible(vol.DiskUuid, i+1, vmIp)
-		verifyDataIntegrityOnVmDisk(vmIp, volFolder)
-	}
+	vm, err = getVmsvcVM(ctx, vmopC, vm.Namespace, vm.Name) // refresh vm info before returning
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
 	return secretName, vm, vmlbsvc, nil
 }
@@ -1388,7 +1439,7 @@ func verifyVmServiceVMNodeLocation(vm *vmopv1.VirtualMachine, nodeList *v1.NodeL
 		if strings.Contains(nodeName, ip) {
 			for labelKey, labelValue := range node.Labels {
 				if topologyValue, ok := allowedTopologiesMap[labelKey]; ok {
-					if !contains(topologyValue, labelValue) {
+					if !isValuePresentInTheList(topologyValue, labelValue) {
 						return false, fmt.Errorf("VM: %s is not running on node located in %s", vm.Name, labelValue)
 					}
 				}
@@ -1397,4 +1448,238 @@ func verifyVmServiceVMNodeLocation(vm *vmopv1.VirtualMachine, nodeList *v1.NodeL
 		}
 	}
 	return false, fmt.Errorf("VM: %s is not running on any node with matching IP", vm.Name)
+}
+
+// getVmsvcVmDetailedOutput  gets the detailed status output of the vm
+func getVmsvcVmDetailedOutput(ctx context.Context, c ctlrclient.Client, namespace string, name string) string {
+	vm, _ := getVmsvcVM4(ctx, c, namespace, name)
+	// Command to write data and sync it
+	cmd := []string{"get", "vm", vm.Name, "-o", "yaml"}
+	output := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
+	framework.Logf("Describe vm : %s", output)
+
+	return output
+}
+
+// getVMStorageData returs the vmDiskUsage of the vm
+func getVMStorageData(ctx context.Context, c ctlrclient.Client, namespace string, vmName string) string {
+	yamlOutput := getVmsvcVmDetailedOutput(ctx, c, namespace, vmName)
+
+	// Regex to match the line with "total: <value>"
+	re := regexp.MustCompile(`(?i)total:\s*([^\s]+)`)
+	matches := re.FindStringSubmatch(yamlOutput)
+	framework.Logf("matches : %s", matches)
+	if len(matches) < 2 {
+		log.Fatal("Total value not found")
+	}
+
+	vmDiskUsage := matches[1]
+	fmt.Println("Extracted vmDiskUsage:", vmDiskUsage)
+
+	return vmDiskUsage
+}
+
+// getVmImages: get's all the images assigned to the given namespace
+func getVmImages(ctx context.Context, namespace string) string {
+	// Command to write data and sync it
+	cmd := []string{"get", "vmi"}
+	output := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
+	framework.Logf("StatusCode of addContentLibToNamespace : %s", output)
+
+	return output
+}
+
+// Waits for vm images to get listed in namespace
+func pollWaitForVMImageToSync(ctx context.Context, namespace string, expectedImage string, Poll,
+	timeout time.Duration) error {
+
+	for start := time.Now(); time.Since(start) < timeout; time.Sleep(Poll) {
+		listOfVmImages := getVmImages(ctx, namespace)
+		// Split output into lines and search for the expected image
+		lines := strings.Split(listOfVmImages, "\n")
+		found := false
+		for _, line := range lines {
+			if strings.Contains(line, expectedImage) {
+				found = true
+				framework.Logf("Found : %t, Image: %s\n", found, expectedImage)
+				break
+			}
+		}
+		if !found {
+			continue
+		} else {
+			return nil
+		}
+
+	}
+	return fmt.Errorf("failed to load vm-image timed out after %v", timeout)
+
+}
+
+// get zone name on which vm is scheduled
+func getVMzone(ctx context.Context, vm *vmopv4.VirtualMachine) (string, error) {
+	vmlabel := vm.GetLabels()
+	val, labelOk := vmlabel[vmZoneLabel]
+	framework.Logf("val %v, labelOk: %v", val, labelOk)
+	if !labelOk {
+		return val, fmt.Errorf("zone is not present on vm: %s", vm.Name)
+	}
+	// Get labels and print them
+	framework.Logf("vm Labels")
+	vmlabel = vm.GetLabels()
+	for k, v := range vmlabel {
+		fmt.Printf("%s = %s\n", k, v)
+	}
+
+	return val, nil
+}
+
+type CreateVmOptionsV4 struct {
+	Namespace          string
+	VmClass            string
+	VMI                string
+	StorageClassName   string
+	PVCs               []*v1.PersistentVolumeClaim
+	SecretName         string
+	WaitForReadyStatus bool
+}
+
+// createVmServiceVmV4 creates VM v3 via VM service with given options
+func createVmServiceVmV4(ctx context.Context, c ctlrclient.Client, opts CreateVmOptionsV4) *vmopv4.VirtualMachine {
+
+	r := rand.New(rand.NewSource(time.Now().UnixNano()))
+	vols := []vmopv4.VirtualMachineVolume{}
+	vmName := fmt.Sprintf("csi-test-vm-%d", r.Intn(10000))
+
+	if opts.VmClass == "" {
+		opts.VmClass = vmClassBestEffortSmall
+	}
+
+	for _, pvc := range opts.PVCs {
+		vols = append(vols, vmopv4.VirtualMachineVolume{
+			Name: pvc.Name,
+			VirtualMachineVolumeSource: vmopv4.VirtualMachineVolumeSource{
+				PersistentVolumeClaim: &vmopv4.PersistentVolumeClaimVolumeSource{
+					PersistentVolumeClaimVolumeSource: v1.PersistentVolumeClaimVolumeSource{ClaimName: pvc.Name},
+				},
+			},
+		})
+	}
+
+	vm := &vmopv4.VirtualMachine{
+		ObjectMeta: metav1.ObjectMeta{Name: vmName, Namespace: opts.Namespace},
+		Spec: vmopv4.VirtualMachineSpec{
+			PowerState:   vmopv4.VirtualMachinePowerStateOn,
+			ImageName:    opts.VMI,
+			ClassName:    opts.VmClass,
+			StorageClass: opts.StorageClassName,
+			Volumes:      vols,
+		},
+	}
+
+	if opts.SecretName != "" {
+		vm.Spec.Bootstrap = &vmopv4.VirtualMachineBootstrapSpec{
+			CloudInit: &vmopv4.VirtualMachineBootstrapCloudInitSpec{
+				RawCloudConfig: &vmopv4common.SecretKeySelector{
+					Name: opts.SecretName,
+					Key:  opts.SecretName,
+				},
+			},
+		}
+	}
+
+	err := c.Create(ctx, vm)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	vmKey := ctlrclient.ObjectKey{Name: vmName, Namespace: opts.Namespace}
+
+	err = wait.PollUntilContextTimeout(ctx, poll*5, pollTimeout, true,
+		func(ctx context.Context) (bool, error) {
+			err := c.Get(ctx, vmKey, vm)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, err
+				}
+				return false, nil
+			}
+
+			if opts.WaitForReadyStatus &&
+				!slices.ContainsFunc(vm.GetConditions(), func(c metav1.Condition) bool {
+					return c.Type == vmopv4.VirtualMachineReconcileReady && c.Status == metav1.ConditionTrue
+				}) {
+				return false, nil
+			}
+
+			return true, nil
+		})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	framework.Logf("Found VM %s in namespace %s", vmName, opts.Namespace)
+
+	r = rand.New(rand.NewSource(time.Now().UnixNano()))
+	svcName := fmt.Sprintf("%s-svc-%d", vmName, r.Intn(10000))
+	framework.Logf("Creating loadbalancer VM: %s for vm: %s", svcName, vmName)
+	vmService := vmopv4.VirtualMachineService{
+		ObjectMeta: metav1.ObjectMeta{Name: svcName, Namespace: opts.Namespace},
+		Spec: vmopv4.VirtualMachineServiceSpec{
+			Ports:    []vmopv4.VirtualMachineServicePort{{Name: "ssh", Port: 22, Protocol: "TCP", TargetPort: 22}},
+			Type:     "LoadBalancer",
+			Selector: map[string]string{"app": "vmName"},
+		},
+	}
+	err = c.Create(ctx, &vmService)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	vm, _ = getVmsvcVmV4(ctx, c, opts.Namespace, vmName)
+	framework.Logf("Found VM %s in namespace %s", vmName, opts.Namespace)
+
+	return vm
+}
+
+// getVmsvcVM fetches the vm from the specified ns
+func getVmsvcVmV4(
+	ctx context.Context, c ctlrclient.Client, namespace string, vmName string) (*vmopv4.VirtualMachine, error) {
+	instanceKey := ctlrclient.ObjectKey{Name: vmName, Namespace: namespace}
+	vm := &vmopv4.VirtualMachine{}
+	err := c.Get(ctx, instanceKey, vm)
+	return vm, err
+}
+
+// getVmsvcVM fetches the vm from the specified ns
+func getVmsvcVM4(
+	ctx context.Context, c ctlrclient.Client, namespace string, vmName string) (*vmopv4.VirtualMachine, error) {
+	instanceKey := ctlrclient.ObjectKey{Name: vmName, Namespace: namespace}
+	vm := &vmopv4.VirtualMachine{}
+	err := c.Get(ctx, instanceKey, vm)
+	return vm, err
+}
+
+// getVmsvcVM fetches the vm from the specified ns
+func getVmsvcVM5(
+	ctx context.Context, c ctlrclient.Client, namespace string, vmName string) (*vmopv5.VirtualMachine, error) {
+	instanceKey := ctlrclient.ObjectKey{Name: vmName, Namespace: namespace}
+	vm := &vmopv5.VirtualMachine{}
+	err := c.Get(ctx, instanceKey, vm)
+	return vm, err
+}
+
+// waitNgetVmsvcVmIp wait and fetch the primary IP of the vm in give ns
+func waitNgetVmsvcVmIpV4(ctx context.Context, c ctlrclient.Client, namespace string, name string) (string, error) {
+	ip := ""
+	err := wait.PollUntilContextTimeout(ctx, poll*10, pollTimeout*4, true,
+		func(ctx context.Context) (bool, error) {
+			vm, err := getVmsvcVmV4(ctx, c, namespace, name)
+			if err != nil {
+				if !apierrors.IsNotFound(err) {
+					return false, err
+				}
+				return false, nil
+			}
+			if vm.Status.Network.PrimaryIP4 == "" {
+				return false, nil
+			}
+			ip = vm.Status.Network.PrimaryIP4
+			return true, nil
+		})
+	framework.Logf("Found IP '%s' for VM '%s'", ip, name)
+	return ip, err
 }

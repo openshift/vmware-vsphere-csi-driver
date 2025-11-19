@@ -23,7 +23,11 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/simulator/vpx"
@@ -34,6 +38,10 @@ import (
 
 	cnssim "github.com/vmware/govmomi/cns/simulator"
 	pbmsim "github.com/vmware/govmomi/pbm/simulator"
+	_ "github.com/vmware/govmomi/vapi/simulator"
+	"k8s.io/apimachinery/pkg/api/resource"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -51,38 +59,32 @@ var mapVolumePathToID map[string]map[string]string
 // GetFakeContainerOrchestratorInterface returns a dummy CO interface based on the CO type
 func GetFakeContainerOrchestratorInterface(orchestratorType int) (commonco.COCommonInterface, error) {
 	if orchestratorType == common.Kubernetes {
+		defaultFSS := map[string]string{
+			"csi-migration":                     "true",
+			"file-volume":                       "true",
+			"block-volume-snapshot":             "true",
+			"tkgs-ha":                           "true",
+			"list-volumes":                      "true",
+			"csi-internal-generated-cluster-id": "true",
+			"online-volume-extend":              "true",
+			"csi-windows-support":               "true",
+			"use-csinode-id":                    "true",
+			"pv-to-backingdiskobjectid-mapping": "false",
+			"cnsmgr-suspend-create-volume":      "true",
+			"listview-tasks":                    "true",
+			"storage-quota-m2":                  "false",
+			"workload-domain-isolation":         "true",
+			// From `wcp-cluster-capabilities` configmap in supervisor
+			"Workload_Domain_Isolation_Supported": "false",
+		}
+
 		fakeCO := &FakeK8SOrchestrator{
 			featureStatesLock: &sync.RWMutex{},
-			featureStates: map[string]string{
-				"volume-extend":                     "true",
-				"volume-health":                     "true",
-				"csi-migration":                     "true",
-				"file-volume":                       "true",
-				"block-volume-snapshot":             "true",
-				"tkgs-ha":                           "true",
-				"list-volumes":                      "true",
-				"csi-internal-generated-cluster-id": "true",
-				"online-volume-extend":              "true",
-				"async-query-volume":                "true",
-				"csi-windows-support":               "true",
-				"use-csinode-id":                    "true",
-				"pv-to-backingdiskobjectid-mapping": "false",
-				"cnsmgr-suspend-create-volume":      "true",
-				"topology-preferential-datastores":  "true",
-				"max-pvscsi-targets-per-vm":         "true",
-				"multi-vcenter-csi-topology":        "true",
-				"listview-tasks":                    "true",
-				"storage-quota-m2":                  "false",
-				"workload-domain-isolation":         "true",
-				// Adding FSS from `wcp-cluster-capabilities` configmap in supervisor here for simplicity.
-				// TODO: Enable FSS for unit tests after mockControllerVolumeTopology interfaces are implemented
-				"Workload_Domain_Isolation_Supported": "false",
-			},
+			featureStates:     defaultFSS,
 		}
 		return fakeCO, nil
 	}
 	return nil, fmt.Errorf("unrecognized CO type")
-
 }
 
 // IsFSSEnabled returns the FSS values for a given feature
@@ -135,6 +137,48 @@ func (c *FakeK8SOrchestrator) IsFakeAttachAllowed(
 		"IsFakeAttachAllowed for FakeK8SOrchestrator is not yet implemented.")
 }
 
+func (c *FakeK8SOrchestrator) GetPvcObjectByName(ctx context.Context,
+	pvcName string, namespace string) (*v1.PersistentVolumeClaim, error) {
+	if pvcName == "pvc-rwx" {
+
+		pvc := &v1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      pvcName,   // Name of the PVC
+				Namespace: namespace, // Namespace to create the PVC in
+			},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{
+					v1.ReadWriteMany, // Set the access mode to RWO (ReadWriteOnce)
+				},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{
+						v1.ResourceStorage: *resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5Gi of storage
+					},
+				},
+			},
+		}
+		return pvc, nil
+	}
+
+	pvc := &v1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,   // Name of the PVC
+			Namespace: namespace, // Namespace to create the PVC in
+		},
+		Spec: v1.PersistentVolumeClaimSpec{
+			AccessModes: []v1.PersistentVolumeAccessMode{
+				v1.ReadWriteOnce, // Set the access mode to RWO (ReadWriteOnce)
+			},
+			Resources: v1.VolumeResourceRequirements{
+				Requests: v1.ResourceList{
+					v1.ResourceStorage: *resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5Gi of storage
+				},
+			},
+		},
+	}
+	return pvc, nil
+}
+
 // MarkFakeAttached marks the volume as fake attached.
 func (c *FakeK8SOrchestrator) MarkFakeAttached(ctx context.Context, volumeID string) error {
 	// TODO - This can be implemented if we add WCP controller tests for attach volume
@@ -168,6 +212,16 @@ func (cntrlTopology *mockControllerVolumeTopology) GetSharedDatastoresInTopology
 // GetAZClustersMap returns the zone to clusterMorefs map from the azClustersMap.
 func (cntrlTopology *mockControllerVolumeTopology) GetAZClustersMap(ctx context.Context) map[string][]string {
 	return nil
+}
+
+// GetZonesForNamespace fetches the zones associated with a namespace when
+// WorkloadDomainIsolation is supported in supervisor.
+func (cntrlTopology *mockControllerVolumeTopology) GetZonesForNamespace(ns string) map[string]struct{} {
+	return nil
+}
+
+func (cntrlTopology *mockControllerVolumeTopology) ZonesWithMultipleClustersExist(ctx context.Context) bool {
+	return false
 }
 
 // GetTopologyInfoFromNodes retrieves the topology information of the given list of node names.
@@ -335,18 +389,61 @@ func (c *FakeK8SOrchestrator) CreateConfigMap(ctx context.Context, name string, 
 
 // GetCSINodeTopologyInstancesList lists CSINodeTopology instances for a given cluster.
 func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstancesList() []interface{} {
-	return nil
+	return c.csiNodeTopologyInstances
 }
 
 // GetCSINodeTopologyInstanceByName fetches the CSINodeTopology instance for a given node name in the cluster.
 func (c *FakeK8SOrchestrator) GetCSINodeTopologyInstanceByName(nodeName string) (
 	item interface{}, exists bool, err error) {
+	// Search through stored CSINodeTopology instances
+	for _, instance := range c.csiNodeTopologyInstances {
+		if unstructuredObj, ok := instance.(*unstructured.Unstructured); ok {
+			// Get the name from the metadata
+			name := unstructuredObj.GetName()
+			if name == nodeName {
+				return instance, true, nil
+			}
+		}
+	}
 	return nil, false, nil
 }
 
 // GetPVNameFromCSIVolumeID retrieves the pv name from volumeID.
 func (c *FakeK8SOrchestrator) GetPVNameFromCSIVolumeID(volumeID string) (string, bool) {
-	return "", false
+	if strings.Contains(volumeID, "invalid") {
+		// Simulate a case where the volumeID is invalid and does not correspond to any PV.
+		return "", false
+	}
+
+	// Simulate a case where the volumeID corresponds to a PV.
+	return "mock-pv", true
+}
+
+// GetPVCNameFromCSIVolumeID returns `pvc name` and `pvc namespace` for the given volumeID using volumeIDToPvcMap.
+func (c *FakeK8SOrchestrator) GetPVCNameFromCSIVolumeID(volumeID string) (string, string, bool) {
+	if strings.Contains(volumeID, "invalid") {
+		// Simulate a case where the volumeID is invalid and does not correspond to any PVC.
+		return "", "", false
+	}
+
+	// Simulate a case where the volumeID corresponds to a PVC.
+	return "mock-pvc", "mock-namespace", true
+}
+
+// GetVolumeIDFromPVCName simlates an invalid case when pvcName contains "invalid".
+func (c *FakeK8SOrchestrator) GetVolumeIDFromPVCName(pvcName string) (string, bool) {
+	if strings.Contains(pvcName, "invalid") {
+		// Simulate a case where the volumeID is invalid and does not correspond to any PVC.
+		return "", false
+	}
+
+	if strings.Contains(pvcName, "fail-attach") {
+		// Simulate a case so that attach fails for the given volumeID.
+		return "fail-attach", true
+	}
+
+	// Simulate a case where the volumeID corresponds to a PVC.
+	return "12345-6789", true
 }
 
 // InitializeCSINodes creates CSINode instances for each K8s node with the appropriate topology keys.
@@ -365,6 +462,42 @@ func (c *FakeK8SOrchestrator) StartZonesInformer(ctx context.Context, restClient
 // WorkloadDomainIsolation is supported in supervisor.
 func (c *FakeK8SOrchestrator) GetZonesForNamespace(ns string) map[string]struct{} {
 	return nil
+}
+
+func (c *FakeK8SOrchestrator) IsLinkedCloneRequest(ctx context.Context, pvcName string,
+	pvcNamespace string) (bool, error) {
+	return false, nil
+}
+
+func (c *FakeK8SOrchestrator) GetLinkedCloneVolumeSnapshotSourceUUID(ctx context.Context, pvcName string,
+	pvcNamespace string) (string, error) {
+	return "", nil
+}
+
+func (c *FakeK8SOrchestrator) PreLinkedCloneCreateAction(ctx context.Context, pvcNamespace string,
+	pvcName string) error {
+	return nil
+}
+
+func (c *FakeK8SOrchestrator) GetVolumeSnapshotPVCSource(ctx context.Context, volumeSnapshotNamespace string,
+	volumeSnapshotName string) (*v1.PersistentVolumeClaim, error) {
+
+	return nil, nil
+}
+
+func (c *FakeK8SOrchestrator) UpdatePersistentVolumeLabel(ctx context.Context, pvName string,
+	key string, value string) error {
+	return nil
+}
+
+func (c *FakeK8SOrchestrator) GetActiveClustersForNamespaceInRequestedZones(ctx context.Context,
+	targetNS string, requestedZones []string) ([]string, error) {
+	return nil, nil
+}
+
+// SetCSINodeTopologyInstances sets the CSINodeTopology instances for testing
+func (c *FakeK8SOrchestrator) SetCSINodeTopologyInstances(instances []interface{}) {
+	c.csiNodeTopologyInstances = instances
 }
 
 // configFromVCSim starts a vcsim instance and returns config for use against the
@@ -412,7 +545,9 @@ func configFromVCSimWithTLS(tlsConfig *tls.Config, vcsimParams VcsimParams, inse
 	if err != nil {
 		log.Fatal(err)
 	}
+	model.Service.RegisterEndpoints = true
 
+	model.Service.RegisterEndpoints = true
 	model.Service.TLS = tlsConfig
 	s := model.Service.NewServer()
 

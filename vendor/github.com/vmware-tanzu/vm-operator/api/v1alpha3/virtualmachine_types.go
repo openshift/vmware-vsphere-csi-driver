@@ -488,6 +488,11 @@ type VirtualMachineSpec struct {
 
 	// +optional
 
+	// Affinity describes the VM's scheduling constraints.
+	Affinity *VirtualMachineAffinitySpec `json:"affinity,omitempty"`
+
+	// +optional
+
 	// Crypto describes the desired encryption state of the VirtualMachine.
 	Crypto *VirtualMachineCryptoSpec `json:"crypto,omitempty"`
 
@@ -692,12 +697,14 @@ type VirtualMachineSpec struct {
 	// guest ID, then that value is used.
 	// The guest ID from VirtualMachineClass used to deploy the VM is ignored.
 	//
-	// For a complete list of supported values, refer to https://bit.ly/3TiZX3G.
-	// Note that some guest ID values may require a minimal hardware version,
-	// which can be set using the `spec.minHardwareVersion` field.
+	// For a complete list of supported values, please refer to
+	// https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.vm.GuestOsDescriptor.GuestOsIdentifier.html.
+	//
+	// Please note that some guest ID values may require a minimal hardware
+	// version, which can be set using the `spec.minHardwareVersion` field.
 	// To see the mapping between virtual hardware versions and the product
-	// versions that support a specific guest ID, visit the following link:
-	// https://knowledge.broadcom.com/external/article/315655/virtual-machine-hardware-versions.html
+	// versions that support a specific guest ID, please refer to
+	// https://knowledge.broadcom.com/external/article/315655/virtual-machine-hardware-versions.html.
 	//
 	// Please note that this field is immutable after the VM is powered on.
 	// To change the guest ID after the VM is powered on, the VM must be powered
@@ -705,6 +712,21 @@ type VirtualMachineSpec struct {
 	//
 	// This field is required when the VM has any CD-ROM devices attached.
 	GuestID string `json:"guestID,omitempty"`
+
+	// +optional
+
+	// GroupName indicates the name of the VirtualMachineGroup to which this
+	// VM belongs.
+	//
+	// VMs that belong to a group do not drive their own placement, rather that
+	// is handled by the group.
+	//
+	// When this field is set to a valid group that contains this VM as a
+	// member, an owner reference to that group is added to this VM.
+	//
+	// When this field is deleted or changed, any existing owner reference to
+	// the previous group will be removed from this VM.
+	GroupName string `json:"groupName,omitempty"`
 }
 
 // VirtualMachineReservedSpec describes a set of VM configuration options
@@ -904,16 +926,36 @@ type VirtualMachine struct {
 	Status VirtualMachineStatus `json:"status,omitempty"`
 }
 
-func (vm *VirtualMachine) NamespacedName() string {
+func (vm VirtualMachine) NamespacedName() string {
 	return vm.Namespace + "/" + vm.Name
 }
 
-func (vm *VirtualMachine) GetConditions() []metav1.Condition {
+func (vm VirtualMachine) GetConditions() []metav1.Condition {
 	return vm.Status.Conditions
 }
 
 func (vm *VirtualMachine) SetConditions(conditions []metav1.Condition) {
 	vm.Status.Conditions = conditions
+}
+
+func (vm VirtualMachine) GetMemberKind() string {
+	return "VirtualMachine"
+}
+
+func (vm VirtualMachine) GetGroupName() string {
+	return vm.Spec.GroupName
+}
+
+func (vm *VirtualMachine) SetGroupName(value string) {
+	vm.Spec.GroupName = value
+}
+
+func (vm VirtualMachine) GetPowerState() VirtualMachinePowerState {
+	return vm.Status.PowerState
+}
+
+func (vm *VirtualMachine) SetPowerState(value VirtualMachinePowerState) {
+	vm.Spec.PowerState = value
 }
 
 // +kubebuilder:object:root=true

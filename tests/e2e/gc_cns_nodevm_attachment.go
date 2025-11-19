@@ -72,7 +72,6 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 
 	ginkgo.AfterEach(func() {
 		svcClient, svNamespace := getSvcClientAndNamespace()
-		setResourceQuota(svcClient, svNamespace, defaultrqLimit)
 		dumpSvcNsEventsOnTestFailure(svcClient, svNamespace)
 	})
 
@@ -93,7 +92,8 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// Verify volume is detached from VM.
 	// Delete PVC in GC.
 
-	ginkgo.It("Verify CnsNodeVmAttachements existence in a pod lifecycle", func() {
+	ginkgo.It("[cf-vks] Verify CnsNodeVmAttachements existence in "+
+		"a pod lifecycle", ginkgo.Label(p0, block, tkg, vc70), func() {
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
 		var err error
@@ -179,7 +179,8 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// Verify volumes are detached from VMs.
 	// Delete PVCs in GC.
 
-	ginkgo.It("Verify CnsNodeVmAttachements crd existence when pods are created concurrently", func() {
+	ginkgo.It("[cf-vks] Verify CnsNodeVmAttachements crd existence when pods are created "+
+		"concurrently", ginkgo.Label(p0, block, tkg, vc70), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -253,7 +254,8 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// Verify volume is detached from VM.
 	// Delete PVC in GC.
 
-	ginkgo.It("Verify CnsNodeVmAttachements crd and Pod is created after CSI controller comes up", func() {
+	ginkgo.It("[pq-vks][pq-vks-n1][pq-vks-n2] Verify CnsNodeVmAttachements crd and Pod is created after CSI controller "+
+		"comes up", ginkgo.Label(p0, block, tkg, vc70), func() {
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
 		var err error
@@ -388,7 +390,8 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// 11- Delete statefulset.
 	// 13- Delete PVCs.
 
-	ginkgo.It("Detach Statefulset testing with default podManagementPolicy", func() {
+	ginkgo.It("[cf-vks] Detach Statefulset testing with default "+
+		"podManagementPolicy", ginkgo.Label(p0, block, tkg, vc70), func() {
 
 		ginkgo.By("Creating StorageClass for Statefulset")
 		scParameters[svStorageClassName] = storagePolicyName
@@ -562,7 +565,7 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// Verify Pod is deleted from GC.
 	// Verify volume is detached from VM.
 	// Delete PVC in GC.
-	ginkgo.It("Create a Pod mounted with multiple PVC", func() {
+	ginkgo.It("[cf-vks] Create a Pod mounted with multiple PVC", ginkgo.Label(p0, block, tkg, vc70), func() {
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
 		var err error
@@ -651,7 +654,7 @@ var _ = ginkgo.Describe("[csi-guest] CnsNodeVmAttachment persistence", func() {
 	// 14. Verify Pods are deleted from GC1 and GC2.
 	// 15. Verify volume is detached from VM.
 	// 16. Delete PVC in GC.
-	ginkgo.It("Verify PVC is attached to Pods created in corresponding GC", func() {
+	ginkgo.It("Verify PVC is attached to Pods created in corresponding GC", ginkgo.Label(p0, block, tkg, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

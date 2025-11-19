@@ -30,10 +30,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	cnsvolumemetadatav1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsvolumemetadata/v1alpha1"
 	cnsoperatorconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/config"
+	wcpcapapis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/wcpcapabilities"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -77,21 +79,14 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			err      error
 			vcconfig *cnsvsphere.VirtualCenterConfig
 		)
-		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.MultiVCenterCSITopology) {
-			vcconfig, err = cnsvsphere.GetVirtualCenterConfig(ctx, cnsOperator.configInfo.Cfg)
-			if err != nil {
-				log.Errorf("failed to get VirtualCenterConfig. Err: %+v", err)
-				return err
-			}
-			vCenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcconfig, false)
-			if err != nil {
-				return err
-			}
-		} else {
-			vCenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, cnsOperator.configInfo, false)
-			if err != nil {
-				return err
-			}
+		vcconfig, err = cnsvsphere.GetVirtualCenterConfig(ctx, cnsOperator.configInfo.Cfg)
+		if err != nil {
+			log.Errorf("failed to get VirtualCenterConfig. Err: %+v", err)
+			return err
+		}
+		vCenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, vcconfig, false)
+		if err != nil {
+			return err
 		}
 
 		volumeManager, err = volumes.GetManager(ctx, vCenter, nil, false, false, false, clusterFlavor)
@@ -130,6 +125,20 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			return err
 		}
 
+		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx,
+			common.SharedDiskFss) {
+			// Create CnsNodeVmBatchAttachment CRD
+			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx,
+				cnsoperatorconfig.EmbedCnsNodeVmBatchAttachmentCRFile,
+				cnsoperatorconfig.EmbedCnsNodeVmABatchttachmentCRFileName)
+			if err != nil {
+				crdNameNodeVmBatchAttachment := cnsoperatorv1alpha1.CnsNodeVmBatchAttachmentPlural +
+					"." + cnsoperatorv1alpha1.SchemeGroupVersion.Group
+				log.Errorf("failed to create %q CRD. Err: %+v", crdNameNodeVmBatchAttachment, err)
+				return err
+			}
+		}
+
 		// Create CnsVolumeMetadata CRD
 		err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, cnsoperatorconfig.EmbedCnsVolumeMetadataCRFile,
 			cnsoperatorconfig.EmbedCnsVolumeMetadataCRFileName)
@@ -141,7 +150,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 
 		var stretchedSupervisor bool
 		if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
-			clusterComputeResourceMoIds, err := common.GetClusterComputeResourceMoIds(ctx)
+			clusterComputeResourceMoIds, _, err := common.GetClusterComputeResourceMoIds(ctx)
 			if err != nil {
 				log.Errorf("failed to get clusterComputeResourceMoIds. err: %v", err)
 				return err
@@ -285,6 +294,14 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 	}
 	if err = internalapis.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Errorf("failed to add internalapis to scheme with error: %+v", err)
+		return err
+	}
+	if err := wcpcapapis.AddToScheme(mgr.GetScheme()); err != nil {
+		log.Errorf("failed to set the scheme for Cns operator. Err: %+v", err)
+		return err
+	}
+	if err := vmoperatortypes.AddToScheme(mgr.GetScheme()); err != nil {
+		log.Errorf("failed to set the scheme for vm operator. Err: %+v", err)
 		return err
 	}
 

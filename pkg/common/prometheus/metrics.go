@@ -60,6 +60,8 @@ const (
 	PrometheusCnsAttachVolumeOpType = "attach-volume"
 	// PrometheusCnsDetachVolumeOpType represents the DetachVolume operation.
 	PrometheusCnsDetachVolumeOpType = "detach-volume"
+	// PrometheusCnsBatchAttachVolumeOpType represents the BatchAttachVolume operation.
+	PrometheusCnsBatchAttachVolumeOpType = "batch-volume"
 	// PrometheusCnsUpdateVolumeMetadataOpType represents the UpdateVolumeMetadata operation.
 	PrometheusCnsUpdateVolumeMetadataOpType = "update-volume-metadata"
 	// PrometheusCnsUpdateVolumeCryptoOpType represents the UpdateVolumeCrypto operation.
@@ -86,6 +88,8 @@ const (
 	PrometheusAccessibleVolumes = "accessible-volumes"
 	// PrometheusInaccessibleVolumes represents inaccessible volumes.
 	PrometheusInaccessibleVolumes = "inaccessible-volumes"
+	// PrometheusUnregisterVolumeOpType represents UnregisterVolume operation.
+	PrometheusUnregisterVolumeOpType = "unregister-volume"
 
 	// PrometheusPassStatus represents a successful API run.
 	PrometheusPassStatus = "pass"

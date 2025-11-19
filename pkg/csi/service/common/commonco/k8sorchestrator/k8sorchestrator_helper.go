@@ -39,7 +39,7 @@ import (
 func (c *K8sOrchestrator) getPVCAnnotations(ctx context.Context, volumeID string) (map[string]string, error) {
 	log := logger.GetLogger(ctx)
 	log.Debugf("Getting annotations on pvc corresponding to volume: %s", volumeID)
-	if pvc := c.volumeIDToPvcMap.get(volumeID); pvc != "" {
+	if pvc, _ := c.volumeIDToPvcMap.get(volumeID); pvc != "" {
 		parts := strings.Split(pvc, "/")
 		pvcNamespace := parts[0]
 		pvcName := parts[1]
@@ -67,7 +67,7 @@ func (c *K8sOrchestrator) getPVCAnnotations(ctx context.Context, volumeID string
 func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
 	volumeID string, annotations map[string]string) error {
 	log := logger.GetLogger(ctx)
-	if pvc := c.volumeIDToPvcMap.get(volumeID); pvc != "" {
+	if pvc, _ := c.volumeIDToPvcMap.get(volumeID); pvc != "" {
 		parts := strings.Split(pvc, "/")
 		pvcNamespace := parts[0]
 		pvcName := parts[1]
@@ -106,10 +106,17 @@ func (c *K8sOrchestrator) updatePVCAnnotations(ctx context.Context,
 
 // isFileVolume checks if the Persistent Volume has ReadWriteMany or
 // ReadOnlyMany support.
-func isFileVolume(pv *v1.PersistentVolume) bool {
+func isFileVolume(ctx context.Context, pv *v1.PersistentVolume) bool {
 	if len(pv.Spec.AccessModes) == 0 {
 		return false
 	}
+
+	if k8sOrchestratorInstance.IsFSSEnabled(ctx, common.SharedDiskFss) &&
+		*pv.Spec.VolumeMode == v1.PersistentVolumeBlock {
+		// If volumeMode is block, then volume is Block volume.
+		return false
+	}
+
 	for _, accessMode := range pv.Spec.AccessModes {
 		if accessMode == v1.ReadWriteMany || accessMode == v1.ReadOnlyMany {
 			return true

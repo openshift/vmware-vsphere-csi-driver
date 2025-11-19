@@ -28,6 +28,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
@@ -101,7 +102,8 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] [csi-block-vanil
 	// 7. Expect the old PVC to reflect the latest cluster-distribution value.
 
 	// Test for cluster-distribution value presence.
-	ginkgo.It("Verify dynamic provisioning of pvc has cluster-distribution value updated", func() {
+	ginkgo.It("[pq-vanilla-file][pq-vanilla-block]Verify dynamic provisioning of pvc has cluster-distribution value "+
+		"updated", ginkgo.Label(p0, block, file, vanilla, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -274,5 +276,67 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-file-vanilla] [csi-block-vanil
 		gomega.Expect(queryResult3.Volumes[0].Metadata.ContainerClusterArray[0].ClusterDistribution).Should(
 			gomega.Equal(vanillaClusterDistributionWithSpecialChar),
 			"Wrong/empty cluster-distribution name present on CNS")
+	})
+
+	// Test to verify PVC goes to Pending when cluster-distribution name has more than 128 characters
+	// Steps
+	// 1. Update cluster-distribution value to  more than 128 characters
+	// 2. Create a PVC.
+	// 3. Expect PVC to go to Pending state.
+
+	ginkgo.It("[pq-vanilla-file][pq-vanilla-block]Verify PVC goes to Pending when cluster distribution name has more"+
+		" than 128 characters", ginkgo.Label(p0, block, file, vanilla, vc70), func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var pvclaim *v1.PersistentVolumeClaim
+		var storageclasspvc *storagev1.StorageClass
+		var err error
+
+		ginkgo.By("Setting the cluster-distribution name having more than 128 characters")
+		clsDistributionName, err := genrateRandomString(130)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		setClusterDistribution(ctx, client, clsDistributionName)
+		ginkgo.By("Restart CSI driver")
+		collectPodLogs(ctx, client, csiSystemNamespace)
+		restartSuccess, err := restartCSIDriver(ctx, client, csiNamespace, csiReplicas)
+		gomega.Expect(restartSuccess).To(gomega.BeTrue(), "csi driver restart not successful")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		defer func() {
+			// Reset the cluster distribution value to default value "CSI-Vanilla".
+			setClusterDistribution(ctx, client, vanillaClusterDistribution)
+		}()
+
+		ginkgo.By("Creating a PVC")
+		scParameters[scParamDatastoreURL] = datastoreURL
+		storageclasspvc, pvclaim, err = createPVCAndStorageClass(ctx, client,
+			namespace, nil, scParameters, diskSize, nil, "", false, "")
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		defer func() {
+			err = fpv.DeletePersistentVolumeClaim(ctx, client, pvclaim.Name, pvclaim.Namespace)
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+			err := client.StorageV1().StorageClasses().Delete(ctx,
+				storageclasspvc.Name, *metav1.NewDeleteOptions(0))
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}()
+
+		ginkgo.By("Expect claim to fail")
+		err = fpv.WaitForPersistentVolumeClaimPhase(ctx,
+			v1.ClaimPending, client, pvclaim.Namespace, pvclaim.Name, framework.Poll, time.Second*130)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+		expectedErrMsg := "A specified parameter was not correct: createSpecs.metadata.containerCluster.clusterDistribution"
+		framework.Logf("Expected failure message: %+q", expectedErrMsg)
+		waitErr := wait.PollUntilContextTimeout(ctx, poll*5, pollTimeoutSixMin, true,
+			func(ctx context.Context) (bool, error) {
+				errorOccurred := checkEventsforError(client, pvclaim.Namespace,
+					metav1.ListOptions{FieldSelector: fmt.Sprintf("involvedObject.name=%s", pvclaim.Name)},
+					expectedErrMsg)
+				return errorOccurred, nil
+			})
+		gomega.Expect(waitErr).ToNot(gomega.HaveOccurred())
 	})
 })

@@ -28,8 +28,8 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/pbm"
-	"github.com/vmware/govmomi/simulator"
 	v1 "k8s.io/api/core/v1"
 
 	cnstypes "github.com/vmware/govmomi/cns/types"
@@ -83,9 +83,6 @@ func getControllerTest(t *testing.T) *controllerTest {
 		// CNS based CSI requires a valid cluster name.
 		config.Global.ClusterID = testClusterName
 
-		clusterMoRef := simulator.Map.Any("ClusterComputeResource").(*simulator.ClusterComputeResource).Reference()
-		clusterComputeResourceMoIds = append(clusterComputeResourceMoIds, clusterMoRef.Value)
-
 		vcenterconfig, err := cnsvsphere.GetVirtualCenterConfig(ctx, config)
 		if err != nil {
 			t.Fatal(err)
@@ -100,6 +97,12 @@ func getControllerTest(t *testing.T) *controllerTest {
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		clusters, err := find.NewFinder(vcenter.Client.Client).ClusterComputeResourceList(ctx, "*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		clusterComputeResourceMoIds = append(clusterComputeResourceMoIds, clusters[0].Reference().Value)
 
 		fakeOpStore, err := unittestcommon.InitFakeVolumeOperationRequestInterface()
 		if err != nil {
@@ -148,7 +151,6 @@ func getControllerTest(t *testing.T) *controllerTest {
 // TestWCPCreateVolumeWithStoragePolicy creates volume with storage policy.
 func TestWCPCreateVolumeWithStoragePolicy(t *testing.T) {
 	ct := getControllerTest(t)
-
 	// Create.
 	params := make(map[string]string)
 
@@ -205,7 +207,7 @@ func TestWCPCreateVolumeWithStoragePolicy(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +247,7 @@ func TestWCPCreateVolumeWithStoragePolicy(t *testing.T) {
 	}
 
 	// Varify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -259,20 +261,6 @@ func TestWCPCreateVolumeWithStoragePolicy(t *testing.T) {
 // but not storage topology type. It is a negative case.
 func TestWCPCreateVolumeWithZonalLabelPresentButNoStorageTopoType(t *testing.T) {
 	ct := getControllerTest(t)
-	// TODO: Add following code back when FSS for Workload_Domain_Isolation_Supported is enabled for unit tests
-	/*
-		err := commonco.ContainerOrchestratorUtility.DisableFSS(ctx, "Workload_Domain_Isolation_Supported")
-		if err != nil {
-			t.Fatal("failed to disable Workload_Domain_Isolation_Supported FSS")
-		}
-		defer func() {
-			err := commonco.ContainerOrchestratorUtility.EnableFSS(ctx, "Workload_Domain_Isolation_Supported")
-			if err != nil {
-				t.Fatal("failed to enable Workload_Domain_Isolation_Supported FSS back to true")
-			}
-		}()
-	*/
-
 	// Create.
 	params := make(map[string]string)
 
@@ -351,7 +339,7 @@ func TestWCPCreateVolumeWithZonalLabelPresentButNoStorageTopoType(t *testing.T) 
 					},
 				},
 			}
-			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -451,7 +439,7 @@ func TestWCPCreateVolumeWithoutZoneLabelPresentForFileVolume(t *testing.T) {
 					},
 				},
 			}
-			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -557,7 +545,7 @@ func TestWCPCreateVolumeWithHostLabelPresentForFileVolume(t *testing.T) {
 					},
 				},
 			}
-			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+			queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -630,7 +618,7 @@ func TestWCPCreateDeleteSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -671,7 +659,7 @@ func TestWCPCreateDeleteSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -743,7 +731,7 @@ func TestListSnapshots(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -862,7 +850,7 @@ func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -982,7 +970,7 @@ func TestListSnapshotsWithToken(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1112,7 +1100,7 @@ func TestListSnapshotsOnSpecificVolumeAndSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1182,7 +1170,7 @@ func TestListSnapshotsOnSpecificVolumeAndSnapshot(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1230,7 +1218,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1268,7 +1256,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1333,7 +1321,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1353,7 +1341,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1435,7 +1423,7 @@ func TestWCPDeleteVolumeWithSnapshots(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1492,7 +1480,7 @@ func TestWCPDeleteVolumeWithSnapshots(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1540,7 +1528,7 @@ func TestWCPExpandVolumeWithSnapshots(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1605,7 +1593,7 @@ func TestWCPExpandVolumeWithSnapshots(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}

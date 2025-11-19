@@ -9,8 +9,6 @@ package v1alpha4
 import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha4/common"
 )
 
 const (
@@ -558,7 +556,15 @@ type VirtualMachineSpec struct {
 	// deployed by VM Operator. An imported VirtualMachine resource references
 	// an existing VM on the underlying platform that was not deployed from a
 	// VM class.
+	//
+	// If a VM is using a class, a different value in spec.className
+	// leads to the VM being resized.
 	ClassName string `json:"className,omitempty"`
+
+	// +optional
+
+	// Affinity describes the VM's scheduling constraints.
+	Affinity *VirtualMachineAffinitySpec `json:"affinity,omitempty"`
 
 	// +optional
 
@@ -766,12 +772,14 @@ type VirtualMachineSpec struct {
 	// guest ID, then that value is used.
 	// The guest ID from VirtualMachineClass used to deploy the VM is ignored.
 	//
-	// For a complete list of supported values, refer to https://bit.ly/3TiZX3G.
-	// Note that some guest ID values may require a minimal hardware version,
-	// which can be set using the `spec.minHardwareVersion` field.
+	// For a complete list of supported values, please refer to
+	// https://developer.broadcom.com/xapis/vsphere-web-services-api/latest/vim.vm.GuestOsDescriptor.GuestOsIdentifier.html.
+	//
+	// Please note that some guest ID values may require a minimal hardware
+	// version, which can be set using the `spec.minHardwareVersion` field.
 	// To see the mapping between virtual hardware versions and the product
-	// versions that support a specific guest ID, visit the following link:
-	// https://knowledge.broadcom.com/external/article/315655/virtual-machine-hardware-versions.html
+	// versions that support a specific guest ID, please refer to
+	// https://knowledge.broadcom.com/external/article/315655/virtual-machine-hardware-versions.html.
 	//
 	// Please note that this field is immutable after the VM is powered on.
 	// To change the guest ID after the VM is powered on, the VM must be powered
@@ -791,8 +799,26 @@ type VirtualMachineSpec struct {
 	//               snapshots do not support online promotion.
 	// - Offline  -- Promote disks while the VM is powered off.
 	//
+	// Please note, this field is ignored for encrypted VMs since they do not
+	// use delta disks.
+	//
 	// Defaults to Online.
 	PromoteDisksMode VirtualMachinePromoteDisksMode `json:"promoteDisksMode,omitempty"`
+
+	// +optional
+
+	// GroupName indicates the name of the VirtualMachineGroup to which this
+	// VM belongs.
+	//
+	// VMs that belong to a group do not drive their own placement, rather that
+	// is handled by the group.
+	//
+	// When this field is set to a valid group that contains this VM as a
+	// member, an owner reference to that group is added to this VM.
+	//
+	// When this field is deleted or changed, any existing owner reference to
+	// the previous group will be removed from this VM.
+	GroupName string `json:"groupName,omitempty"`
 }
 
 // VirtualMachineReservedSpec describes a set of VM configuration options
@@ -876,17 +902,12 @@ type VirtualMachineCryptoStatus struct {
 
 // VirtualMachineStatus defines the observed state of a VirtualMachine instance.
 type VirtualMachineStatus struct {
-	// +optional
-
-	// Class is a reference to the VirtualMachineClass resource used to deploy
-	// this VM.
-	Class *vmopv1common.LocalObjectRef `json:"class,omitempty"`
 
 	// +optional
 
-	// Host describes the hostname or IP address of the infrastructure host
-	// where the VM is executed.
-	Host string `json:"host,omitempty"`
+	// NodeName describes the observed name of the node where the VirtualMachine
+	// is scheduled.
+	NodeName string `json:"nodeName,omitempty"`
 
 	// +optional
 
@@ -971,17 +992,10 @@ type VirtualMachineStatus struct {
 
 	// Storage describes the observed state of the VirtualMachine's storage.
 	Storage *VirtualMachineStorageStatus `json:"storage,omitempty"`
-
-	// +optional
-
-	// TaskID describes the observed ID of the task created by VM Operator to
-	// perform some long-running operation on the VM.
-	TaskID string `json:"taskID,omitempty"`
 }
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vm
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Power-State",type="string",JSONPath=".status.powerState"
 // +kubebuilder:printcolumn:name="Class",type="string",priority=1,JSONPath=".spec.className"
@@ -999,16 +1013,36 @@ type VirtualMachine struct {
 	Status VirtualMachineStatus `json:"status,omitempty"`
 }
 
-func (vm *VirtualMachine) NamespacedName() string {
+func (vm VirtualMachine) NamespacedName() string {
 	return vm.Namespace + "/" + vm.Name
 }
 
-func (vm *VirtualMachine) GetConditions() []metav1.Condition {
+func (vm VirtualMachine) GetConditions() []metav1.Condition {
 	return vm.Status.Conditions
 }
 
 func (vm *VirtualMachine) SetConditions(conditions []metav1.Condition) {
 	vm.Status.Conditions = conditions
+}
+
+func (vm VirtualMachine) GetMemberKind() string {
+	return "VirtualMachine"
+}
+
+func (vm VirtualMachine) GetGroupName() string {
+	return vm.Spec.GroupName
+}
+
+func (vm *VirtualMachine) SetGroupName(value string) {
+	vm.Spec.GroupName = value
+}
+
+func (vm VirtualMachine) GetPowerState() VirtualMachinePowerState {
+	return vm.Status.PowerState
+}
+
+func (vm *VirtualMachine) SetPowerState(value VirtualMachinePowerState) {
+	vm.Spec.PowerState = value
 }
 
 // +kubebuilder:object:root=true

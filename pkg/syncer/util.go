@@ -55,7 +55,7 @@ const (
 
 // getPVsInBoundAvailableOrReleased return PVs in Bound, Available or Released
 // state.
-func getPVsInBoundAvailableOrReleased(ctx context.Context,
+var getPVsInBoundAvailableOrReleased = func(ctx context.Context,
 	metadataSyncer *metadataSyncInformer) ([]*v1.PersistentVolume, error) {
 	log := logger.GetLogger(ctx)
 	var pvsInDesiredState []*v1.PersistentVolume
@@ -189,7 +189,6 @@ func fullSyncGetQueryResults(ctx context.Context, volumeIds []cnstypes.CnsVolume
 	log := logger.GetLogger(ctx)
 	log.Debugf("FullSync: fullSyncGetQueryResults is called with volumeIds %v for clusterID %s",
 		volumeIds, clusterID)
-	useQueryVolumeAsync := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx, common.AsyncQueryVolume)
 	var volumeIdsBatchesToFilter [][]cnstypes.CnsVolumeId
 	for i := 0; i < len(volumeIds); i += volumdIDLimitPerQuery {
 		end := i + volumdIDLimitPerQuery
@@ -207,8 +206,7 @@ func fullSyncGetQueryResults(ctx context.Context, volumeIds []cnstypes.CnsVolume
 		if clusterID != "" {
 			queryFilter.ContainerClusterIds = []string{clusterID}
 		}
-		queryResult, err := utils.QueryVolumeUtil(ctx, volumeManager, queryFilter, nil,
-			useQueryVolumeAsync)
+		queryResult, err := utils.QueryVolumeUtil(ctx, volumeManager, queryFilter, nil)
 		if err != nil {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"queryVolumeUtil failed with err=%+v", err.Error())
@@ -311,9 +309,9 @@ func isValidvSphereVolume(ctx context.Context, pv *v1.PersistentVolume) bool {
 	return false
 }
 
-// IsMultiAttachAllowed helps check accessModes on the PV and return true if
-// volume can be attached to multiple nodes.
-func IsMultiAttachAllowed(pv *v1.PersistentVolume) bool {
+// IsFileVolume returns true for PVs that have accessMode as RWX or ROM
+// and volumeMode as FileSystem.
+func IsFileVolume(pv *v1.PersistentVolume) bool {
 	if pv == nil {
 		return false
 	}
@@ -322,7 +320,13 @@ func IsMultiAttachAllowed(pv *v1.PersistentVolume) bool {
 	}
 	for _, accessMode := range pv.Spec.AccessModes {
 		if accessMode == v1.ReadWriteMany || accessMode == v1.ReadOnlyMany {
-			return true
+			if isSharedDiskEabled {
+				if *pv.Spec.VolumeMode != v1.PersistentVolumeBlock {
+					return true
+				}
+			} else {
+				return true
+			}
 		}
 	}
 	return false
@@ -339,24 +343,20 @@ func initVolumeMigrationService(ctx context.Context, metadataSyncer *metadataSyn
 	var err error
 	var volManager volumes.Manager
 
-	if !isMultiVCenterFssEnabled {
-		volManager = metadataSyncer.volumeManager
-	} else {
-		if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
-			// Migration feature switch is enabled and multi vCenter feature is enabled, and
-			// Kubernetes Cluster is spread on multiple vCenter Servers.
-			return logger.LogNewErrorf(log,
-				"volume-migration feature is not supported on Multi-vCenter deployment")
-		}
-
-		// It is a single VC setup with Multi VC FSS enabled, we need to pick up the one and only volume manager in inventory.
-		vCenter := metadataSyncer.configInfo.Cfg.Global.VCenterIP
-		cnsVolumeMgr, volMgrFound := metadataSyncer.volumeManagers[vCenter]
-		if !volMgrFound {
-			return logger.LogNewErrorf(log, "could not get volume manager for the vCenter: %q", vCenter)
-		}
-		volManager = cnsVolumeMgr
+	if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+		// Migration feature switch is enabled and multi vCenter feature is enabled, and
+		// Kubernetes Cluster is spread on multiple vCenter Servers.
+		return logger.LogNewErrorf(log,
+			"volume-migration feature is not supported on Multi-vCenter deployment")
 	}
+
+	// It is a single VC setup with Multi VC FSS enabled, we need to pick up the one and only volume manager in inventory.
+	vCenter := metadataSyncer.configInfo.Cfg.Global.VCenterIP
+	cnsVolumeMgr, volMgrFound := metadataSyncer.volumeManagers[vCenter]
+	if !volMgrFound {
+		return logger.LogNewErrorf(log, "could not get volume manager for the vCenter: %q", vCenter)
+	}
+	volManager = cnsVolumeMgr
 
 	volumeMigrationService, err = migration.GetVolumeMigrationService(ctx,
 		&volManager, metadataSyncer.configInfo.Cfg, true)
@@ -429,8 +429,13 @@ func getVcHostAndVolumeManagerForVolumeID(ctx context.Context,
 	log := logger.GetLogger(ctx)
 	log.Debugf("Getting VC from in-memory map for volume %s", volumeID)
 
-	// isMultiVCenterFssEnabled feature gate is always going to be disabled for flavors other than vanilla.
-	if !isMultiVCenterFssEnabled {
+	// For WORKLOAD cluster type, return the single volumeManager since
+	// volumeManagers map is not populated
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if metadataSyncer.volumeManager == nil {
+			return "", nil, logger.LogNewErrorf(log,
+				"volume manager not initialized for WORKLOAD cluster")
+		}
 		return metadataSyncer.host, metadataSyncer.volumeManager, nil
 	}
 
@@ -535,10 +540,17 @@ func getVolManagerForVcHost(ctx context.Context, vc string,
 	metadataSyncer *metadataSyncInformer) (volumes.Manager, error) {
 	log := logger.GetLogger(ctx)
 
-	if !isMultiVCenterFssEnabled {
+	// For WORKLOAD cluster type, return the single volumeManager since
+	// volumeManagers map is not populated
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		if metadataSyncer.volumeManager == nil {
+			return nil, logger.LogNewErrorf(log,
+				"volume manager not initialized for WORKLOAD cluster")
+		}
 		return metadataSyncer.volumeManager, nil
 	}
 
+	// For other cluster types (Vanilla, Guest), use the volumeManagers map
 	cnsVolumeMgr, volMgrFound := metadataSyncer.volumeManagers[vc]
 	if !volMgrFound {
 		return nil, logger.LogNewErrorf(log,
@@ -589,7 +601,7 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 	}
 
 	// For a single VC setup, send back all volumes.
-	if !isMultiVCenterFssEnabled || len(metadataSyncer.configInfo.Cfg.VirtualCenter) == 1 {
+	if len(metadataSyncer.configInfo.Cfg.VirtualCenter) == 1 {
 		return allPvs, nil
 	}
 
@@ -610,7 +622,7 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 		}
 
 		// Check if the PV is a file share volume.
-		if IsMultiAttachAllowed(pv) {
+		if IsFileVolume(pv) {
 			isTopologyAwareFileVolumeEnabled := metadataSyncer.coCommonInterface.IsFSSEnabled(ctx,
 				common.TopologyAwareFileVolume)
 			if !isTopologyAwareFileVolumeEnabled {
@@ -640,7 +652,7 @@ func getPVsInBoundAvailableOrReleasedForVc(ctx context.Context, metadataSyncer *
 
 	if len(leftOutPvs) != 0 {
 		for _, volume := range leftOutPvs {
-			if !IsMultiAttachAllowed(volume) {
+			if !IsFileVolume(volume) {
 				// Try to locate the VC for all the left out PVs from their nodeAffinity rules.
 				topologySegments := getTopologySegmentsFromNodeAffinityRules(ctx, volume)
 				vCenter, err := getVcHostFromTopologySegments(ctx, topologySegments, volume.Name)
@@ -758,7 +770,7 @@ func createCnsVolume(ctx context.Context, pv *v1.PersistentVolume,
 	} else {
 		log.Infof("vSphere CSI Driver has successfully marked volume: %q as the container volume.",
 			pv.Spec.CSI.VolumeHandle)
-		if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+		if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
 			// Create CNSVolumeInfo CR for the volume ID.
 			err = volumeInfoService.CreateVolumeInfo(ctx, pv.Spec.CSI.VolumeHandle, vcHost)
 			if err != nil {
@@ -795,7 +807,7 @@ func createMissingFileVolumeInfoCrs(ctx context.Context, metadataSyncer *metadat
 			return
 		}
 		// Check if the PV is a file volume.
-		if IsMultiAttachAllowed(pv) {
+		if IsFileVolume(pv) {
 			fileVolumes = append(fileVolumes, pv)
 		}
 	}
@@ -949,10 +961,6 @@ func hasClusterDistributionSet(ctx context.Context, volume cnstypes.CnsVolume,
 func generateVolumeAccessibleTopologyFromPVCAnnotation(claim *v1.PersistentVolumeClaim) (
 	[]map[string]string, error) {
 	volumeAccessibleTopology := claim.Annotations[common.AnnVolumeAccessibleTopology]
-	if volumeAccessibleTopology == "" {
-		return nil, fmt.Errorf("annotation %q is not set for the claim: %q, namespace: %q",
-			common.AnnVolumeAccessibleTopology, claim.Name, claim.Namespace)
-	}
 	volumeAccessibleTopologyArray := make([]map[string]string, 0)
 	err := json.Unmarshal([]byte(volumeAccessibleTopology), &volumeAccessibleTopologyArray)
 	if err != nil {

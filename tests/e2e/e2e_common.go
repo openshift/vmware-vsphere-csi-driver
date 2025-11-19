@@ -23,10 +23,10 @@ import (
 	"strings"
 	"time"
 
-	cnstypes "github.com/vmware/govmomi/cns/types"
-	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
-
 	"github.com/onsi/gomega"
+	cnstypes "github.com/vmware/govmomi/cns/types"
+
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 )
 
 const (
@@ -63,6 +63,7 @@ const (
 	disklibUnlinkErr                           = "DiskLib_Unlink"
 	diskSize1GB                                = "1Gi"
 	diskSize                                   = "2Gi"
+	diskSize4GB                                = "4Gi"
 	diskSizeSmall                              = "100Mi"
 	diskSizeLarge                              = "100Gi"
 	diskSizeInMb                               = int64(2048)
@@ -179,7 +180,7 @@ const (
 	regionKey                                 = "topology.csi.vmware.com/k8s-region"
 	resizePollInterval                        = 2 * time.Second
 	restartOperation                          = "restart"
-	rqLimit                                   = "200Gi"
+	rqLimit                                   = "500Gi"
 	rqLimitScaleTest                          = "900Gi"
 	rootUser                                  = "root"
 	defaultrqLimit                            = "20Gi"
@@ -229,7 +230,7 @@ const (
 	vsphereCloudProviderConfiguration         = "vsphere-cloud-provider.conf"
 	vsphereControllerManager                  = "vmware-system-tkg-controller-manager"
 	vSphereCSIConf                            = "csi-vsphere.conf"
-	vsphereTKGSystemNamespace                 = "svc-tkg-domain-c10"
+	envVsphereTKGSystemNamespace              = "VSPHERE_TKG_SYSTEM_NAMESPACE"
 	waitTimeForCNSNodeVMAttachmentReconciler  = 30 * time.Second
 	wcpServiceName                            = "wcp"
 	vmcWcpHost                                = "10.2.224.24" //This is the LB IP of VMC WCP and its constant
@@ -265,7 +266,7 @@ const (
 	envZonalStoragePolicyName2               = "ZONAL2_STORAGECLASS"
 	volExtensionName                         = "volume.cns.vsphere.vmware.com"
 	snapshotExtensionName                    = "snapshot.cns.vsphere.vmware.com"
-	vmServiceExtensionName                   = "vmservice.cns.vsphere.vmware.com"
+	vmServiceExtensionName                   = "vmware-system-vmop-webhook-service"
 	pvcUsage                                 = "-pvc-usage"
 	snapshotUsage                            = "-snapshot-usage"
 	vmUsage                                  = "-vm-usage"
@@ -274,6 +275,12 @@ const (
 	envStoragePolicyNameForVsanNfsDatastores = "STORAGE_POLICY_FOR_VSAN_NFS_DATASTORES"
 	devopsKubeConf                           = "DEV_OPS_USER_KUBECONFIG"
 	quotaSupportedVCVersion                  = "9.0.0"
+	lateBinding                              = "-latebinding"
+	cnsVolumeDeleteTimeout                   = 5 * time.Minute
+	vscDeleteTimeout                         = 5 * time.Minute
+	selectedNodeIsZone                       = "cns.vmware.com/selected-node-is-zone"
+	selectedNodeAnnotationOnPVC              = "volume.kubernetes.io/selected-node"
+	vmZoneLabel                              = "topology.kubernetes.io/zone"
 )
 
 /*
@@ -343,6 +350,13 @@ const (
 	vc70                  = "vc70"
 	wldi                  = "wldi"
 	vmServiceVm           = "vmServiceVm"
+	vsanDirect            = "vsanDirect"
+	preUpgrade            = "preUpgrade"
+	vcptocsiTest          = "vcptocsiTest"
+	stretchedSvc          = "stretchedSvc"
+	devops                = "devops"
+	vc901                 = "vc901"
+	multiGc               = "multiGc"
 )
 
 // The following variables are required to know cluster type to run common e2e
@@ -358,6 +372,7 @@ var (
 	multipleSvc          bool
 	multivc              bool
 	stretchedSVC         bool
+	latebinding          bool
 )
 
 // For busybox pod image
@@ -458,16 +473,9 @@ var (
 
 // multiSvc env variables
 var (
-	vcSessionWaitTime                   = 5 * time.Minute
 	envStoragePolicyNameForSharedDsSvc1 = "STORAGE_POLICY_FOR_SHARED_DATASTORES_SVC1"
 	envStoragePolicyNameForSharedDsSvc2 = "STORAGE_POLICY_FOR_SHARED_DATASTORES_SVC2"
-	envSupervisorClusterNamespace1      = "SVC_NAMESPACE1"
-	envNfsDatastoreName                 = "NFS_DATASTORE_NAME"
-	envNfsDatastoreIP                   = "NFS_DATASTORE_IP"
 	pwdRotationTimeout                  = 10 * time.Minute
-	roleCnsDatastore                    = "CNS-SUPERVISOR-DATASTORE"
-	roleCnsSearchAndSpbm                = "CNS-SUPERVISOR-SEARCH-AND-SPBM"
-	roleCnsHostConfigStorageAndCnsVm    = "CNS-SUPERVISOR-HOST-CONFIG-STORAGE-AND-CNS-VM"
 )
 
 // For rwx
@@ -482,14 +490,35 @@ var (
 
 // For management workload domain isolation
 var (
-	envZonal2StoragePolicyName            = "ZONAL2_STORAGE_POLICY_IMM"
-	envZonal2StoragePolicyNameLateBidning = "ZONAL2_STORAGE_POLICY_WFFC"
-	envZonal1StoragePolicyName            = "ZONAL1_STORAGE_POLICY_IMM"
-	envZonal3StoragePolicyName            = "ZONAL3_STORAGE_POLICY_IMM"
-	topologyDomainIsolation               = "Workload_Management_Isolation"
-	envIsolationSharedStoragePolicyName   = "WORKLOAD_ISOLATION_SHARED_STORAGE_POLICY"
-	envSharedZone2Zone4StoragePolicyName  = "SHARED_ZONE2_ZONE4_STORAGE_POLICY_IMM"
-	envSharedZone2Zone4DatastoreUrl       = "SHARED_ZONE2_ZONE4_DATASTORE_URL"
+	envZonal2StoragePolicyName                     = "ZONAL2_STORAGE_POLICY_IMM"
+	envZonal2StoragePolicyNameLateBidning          = "ZONAL2_STORAGE_POLICY_WFFC"
+	envZonal1StoragePolicyName                     = "ZONAL1_STORAGE_POLICY_IMM"
+	envZonal3StoragePolicyName                     = "ZONAL3_STORAGE_POLICY_IMM"
+	topologyDomainIsolation                        = "Workload_Management_Isolation"
+	envIsolationSharedStoragePolicyName            = "WORKLOAD_ISOLATION_SHARED_STORAGE_POLICY"
+	envSharedZone2Zone4StoragePolicyName           = "SHARED_ZONE2_ZONE4_STORAGE_POLICY_IMM"
+	envSharedZone2Zone4DatastoreUrl                = "SHARED_ZONE2_ZONE4_DATASTORE_URL"
+	envZonal2DatastoreUrl                          = "ZONAL2_DATASTORE_URL"
+	envZone3DatastoreName                          = "ZONE3_DATASTORE_NAME"
+	envZone2DatastoreName                          = "ZONE2_DATASTORE_NAME"
+	vmMigrationUserName                            = "VM_MIGRATION_USER_NAME"
+	vmMigrationUserPwd                             = "VM_MIGRATION_USER_PWD"
+	envZone2DatastoreUrl                           = "ZONE2_DATASTORE_URL"
+	envIsolationSharedStoragePolicyNameLateBidning = "WORKLOAD_ISOLATION_SHARED_STORAGE_POLICY_WFFC"
+	envSharedZone1Zone2Zone3StoragePolicyName      = "SHARED_ZONE1_ZONE2_ZONE3_STORAGE_POLICY_IMM"
+	nimbusWorkerIp                                 = "NIMBUS_WORKER_IP"
+	vsanMaxFaultDomainName                         = "VSAN_MAX_FD_NAME"
+)
+
+// for devops persona testing
+var (
+	envAdminKubeconfig        = "ADMIN_KUBECONFIG"
+	envDevopsKubeconfig       = "DEVOPS_KUBE_CONFIG"
+	rbacApiGroup              = "rbac.authorization.k8s.io"
+	roleKeyword               = "Role"
+	audienceForSvcAccountName = "https://kubernetes.default.svc.cluster.local"
+	envIsDevopsUser           = "IS_DEVOPS_USER"
+	serviceAccountKeyword     = "ServiceAccount"
 )
 
 // storage policy usages for storage quota validation
@@ -618,6 +647,12 @@ func setClusterFlavor(clusterFlavor cnstypes.CnsClusterFlavor) {
 	testbedType := os.Getenv("STRETCHED_SVC")
 	if strings.TrimSpace(string(testbedType)) == "1" {
 		stretchedSVC = true
+	}
+
+	//Check if policy given is latebinding
+	bindingModeType := os.Getenv("BINDING_MODE_TYPE")
+	if strings.TrimSpace(string(bindingModeType)) == "WFFC" {
+		latebinding = true
 	}
 }
 

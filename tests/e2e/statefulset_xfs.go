@@ -49,7 +49,8 @@ import (
 	10. Delete the storage class.
 */
 
-var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] statefulset with XFS filesystem", func() {
+var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] statefulset with XFS "+
+	"filesystem", ginkgo.Label(p0, block, vanilla, vc70), func() {
 
 	f := framework.NewDefaultFramework("e2e-vsphere-statefulset")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
@@ -73,7 +74,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] st
 		fss.DeleteAllStatefulSets(ctx, client, namespace)
 	})
 
-	ginkgo.It("Statefulset testing with XFS filesystem", func() {
+	ginkgo.It("[ef-vanilla-block] Statefulset testing with XFS filesystem", func() {
 		framework.Logf("CNS_TEST: Running for vanilla k8s setup")
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -205,7 +206,7 @@ var _ = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelized] st
 				if volumespec.PersistentVolumeClaim != nil {
 					pv := getPvFromClaim(client, statefulset.Namespace, volumespec.PersistentVolumeClaim.ClaimName)
 					ginkgo.By("Verify scale up operation should not introduce new volume")
-					gomega.Expect(contains(volumesBeforeScaleDown, pv.Spec.CSI.VolumeHandle)).To(gomega.BeTrue())
+					gomega.Expect(isValuePresentInTheList(volumesBeforeScaleDown, pv.Spec.CSI.VolumeHandle)).To(gomega.BeTrue())
 					ginkgo.By(fmt.Sprintf("Verify volume: %s is attached to the node: %s",
 						pv.Spec.CSI.VolumeHandle, sspod.Spec.NodeName))
 					var vmUUID string

@@ -20,6 +20,7 @@ import (
 	"context"
 	"embed"
 	"flag"
+	"fmt"
 	"net"
 	"os"
 	"strconv"
@@ -29,6 +30,7 @@ import (
 	vmoperatorv1alpha2 "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
 	vmoperatorv1alpha3 "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
 	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
+	vmoperatorv1alpha5 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -49,12 +51,17 @@ import (
 	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	apiutils "sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	cr_log "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/go-logr/zapr"
 
 	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	storagev1 "k8s.io/api/storage/v1"
 
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
 	migrationv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration/v1alpha1"
+	storagepoolAPIs "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/storagepool"
+	wcpcapapis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/wcpcapabilities"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
@@ -74,6 +81,7 @@ func GetKubeConfig(ctx context.Context) (*restclient.Config, error) {
 	log := logger.GetLogger(ctx)
 	var config *restclient.Config
 	var err error
+	// TODO-perf: can this be cached?
 	kubecfgPath := getKubeConfigPath(ctx)
 	if kubecfgPath != "" {
 		log.Debugf("k8s client using kubeconfig from %s", kubecfgPath)
@@ -213,6 +221,9 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 	var err error
 	log := logger.GetLogger(ctx)
 
+	// Initialize controller-runtime logger to prevent log.SetLogger warning
+	cr_log.SetLogger(zapr.NewLogger(log.Desugar()))
+
 	scheme := runtime.NewScheme()
 	switch groupName {
 	case ccV1beta1.GroupVersion.Group:
@@ -221,7 +232,13 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			log.Errorf("failed to add to scheme for %s with err: %+v", ccV1beta1.GroupVersion.Group, err)
 			return nil, err
 		}
-	case vmoperatorv1alpha4.GroupName:
+	case wcpcapapis.GroupName:
+		err = wcpcapapis.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+	case vmoperatorv1alpha5.GroupName:
 		log.Info("adding scheme for vm-operator version v1alpha1")
 		err = vmoperatorv1alpha1.AddToScheme(scheme)
 		if err != nil {
@@ -242,6 +259,12 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 		}
 		log.Info("adding scheme for vm-operator version v1alpha4")
 		err = vmoperatorv1alpha4.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add to scheme with err: %+v", err)
+			return nil, err
+		}
+		log.Info("adding scheme for vm-operator version v1alpha5")
+		err = vmoperatorv1alpha5.AddToScheme(scheme)
 		if err != nil {
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
@@ -277,15 +300,21 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			log.Errorf("failed to add CNSVolumeInfo to scheme with error: %+v", err)
 			return nil, err
 		}
+
+		err = storagepoolAPIs.AddToScheme(scheme)
+		if err != nil {
+			log.Errorf("failed to add StoragePool scheme with error :%+v", err)
+			return nil, err
+		}
 	}
-	client, err := client.New(config, client.Options{
+
+	c, err := client.New(config, client.Options{
 		Scheme: scheme,
 	})
 	if err != nil {
 		log.Errorf("failed to create client for group %s with err: %+v", groupName, err)
 	}
-	return client, err
-
+	return c, err
 }
 
 // NewCnsFileAccessConfigWatcher creates a new ListWatch for VirtualMachines
@@ -329,7 +358,11 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 	log := logger.GetLogger(ctx)
 
 	scheme := runtime.NewScheme()
-	log.Info("adding scheme for vm-operator versions v1alpha1, v1alpha2, v1alpha3, v1alpha4")
+	log.Info("adding scheme for vm-operator versions v1alpha1, v1alpha2, v1alpha3, v1alpha4, v1alpha5")
+	err = vmoperatorv1alpha5.AddToScheme(scheme)
+	if err != nil {
+		log.Errorf("failed to add to scheme with err: %+v", err)
+	}
 	err = vmoperatorv1alpha4.AddToScheme(scheme)
 	if err != nil {
 		log.Errorf("failed to add to scheme with err: %+v", err)
@@ -635,4 +668,144 @@ func getCRDFromManifest(ctx context.Context, embedFS embed.FS, fileName string) 
 		return nil, err
 	}
 	return &crd, nil
+}
+
+// GetLatestCRDVersion retrieves the latest version of a Custom Resource Definition (CRD) by its name.
+func GetLatestCRDVersion(ctx context.Context, crdName string) (string, error) {
+	log := logger.GetLogger(ctx)
+	config, err := GetKubeConfig(ctx)
+	if err != nil {
+		log.Errorf("Failed to get KubeConfig. err: %s", err)
+		return "", err
+	}
+
+	c, err := apiextensionsclientset.NewForConfig(config)
+	if err != nil {
+		log.Errorf("Failed to create API extensions client. err: %s", err)
+		return "", err
+	}
+
+	crd, err := c.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("Failed to get CRD %s. Error: %s", crdName, err)
+		return "", err
+	}
+
+	for _, version := range crd.Spec.Versions {
+		if version.Storage {
+			// This is the storage version, which is the latest version.
+			return version.Name, nil
+		}
+	}
+
+	err = fmt.Errorf("no storage version found for CRD %s", crdName)
+	log.Error(err)
+	return "", err
+}
+
+// PatchFinalizers updates only the finalizers of the object without modifying other fields
+// or incrementing the resource version.
+func PatchFinalizers(ctx context.Context, c client.Client, obj client.Object, finalizers []string) error {
+	original := obj.DeepCopyObject().(client.Object)
+	obj.SetFinalizers(finalizers)
+	patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+	return c.Patch(ctx, obj, patch)
+}
+
+// RetainPersistentVolume updates the PersistentVolume's ReclaimPolicy to Retain.
+// This is useful to preserve the PersistentVolume even if the associated PersistentVolumeClaim is deleted.
+func RetainPersistentVolume(ctx context.Context, k8sClient clientset.Interface, pvName string) error {
+	log := logger.GetLogger(ctx)
+
+	if pvName == "" {
+		log.Debugf("PersistentVolume name is empty. Exiting...")
+		return nil
+	}
+
+	log.Debugf("Retaining PersistentVolume %q", pvName)
+	pv, err := k8sClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Debugf("PersistentVolume %q not found. Exiting...", pvName)
+			return nil
+		}
+
+		return logger.LogNewErrorf(log, "Failed to get PersistentVolume %q. Error: %s", pvName, err.Error())
+	}
+
+	pv.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimRetain
+	_, err = k8sClient.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+	if err != nil {
+		return logger.LogNewErrorf(log, "Failed to update PersistentVolume %q to retain policy. Error: %s",
+			pvName, err.Error())
+	}
+
+	log.Debugf("Successfully retained PersistentVolume %q", pvName)
+	return nil
+}
+
+// DeletePersistentVolumeClaim deletes the PersistentVolumeClaim with the given name and namespace.
+func DeletePersistentVolumeClaim(ctx context.Context, k8sClient clientset.Interface,
+	pvcName, pvcNamespace string) error {
+	log := logger.GetLogger(ctx)
+
+	if pvcName == "" {
+		log.Debugf("PVC name is empty. Exiting...")
+		return nil
+	}
+
+	log.Debugf("Deleting PersistentVolumeClaim %q in namespace %q", pvcName, pvcNamespace)
+	err := k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Delete(ctx, pvcName, metav1.DeleteOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Debugf("PersistentVolumeClaim %q in namespace %q not found. Exiting...", pvcName, pvcNamespace)
+			return nil
+		}
+
+		return logger.LogNewErrorf(log, "Failed to delete PersistentVolumeClaim %q in namespace %q. Error: %s",
+			pvcName, pvcNamespace, err.Error())
+	}
+
+	log.Debugf("Successfully deleted PersistentVolumeClaim %q in namespace %q", pvcName, pvcNamespace)
+	return nil
+}
+
+// DeletePersistentVolume deletes the PersistentVolume with the given name.
+func DeletePersistentVolume(ctx context.Context, k8sClient clientset.Interface, pvName string) error {
+	log := logger.GetLogger(ctx)
+
+	if pvName == "" {
+		log.Debugf("PersistentVolume name is empty. Exiting...")
+		return nil
+	}
+
+	log.Debugf("Deleting PersistentVolume %q", pvName)
+	err := k8sClient.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Debugf("PersistentVolume %q not found. Exiting...", pvName)
+			return nil
+		}
+
+		return logger.LogNewErrorf(log, "Failed to delete PersistentVolume %q. Error: %s", pvName, err.Error())
+	}
+
+	log.Debugf("Successfully deleted PersistentVolume %q", pvName)
+	return nil
+}
+
+// UpdateStatus updates the status subresource of the given Kubernetes object.
+// If the object is a Custom Resource, make sure that the `subresources` field in the
+// CustomResourceDefinition includes `status` to enable status subresource updates.
+func UpdateStatus(ctx context.Context, c client.Client, obj client.Object) error {
+	log := logger.GetLogger(ctx)
+	if err := c.Status().Update(ctx, obj); err != nil {
+		log.Errorf("Failed to update status for %s %s/%s: %v", obj.GetObjectKind().GroupVersionKind().Kind,
+			obj.GetNamespace(), obj.GetName(), err)
+		return err
+	}
+
+	log.Infof("Successfully updated status for %s %s/%s", obj.GetObjectKind().GroupVersionKind().Kind,
+		obj.GetNamespace(), obj.GetName())
+	return nil
 }

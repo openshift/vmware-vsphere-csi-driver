@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2018 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package lookup
 
@@ -20,6 +8,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -53,6 +42,9 @@ type Client struct {
 	RoundTripper soap.RoundTripper
 
 	ServiceContent types.LookupServiceContent
+
+	// Rewrite when true changes EndpointURL Host to the VC connection's Host
+	Rewrite bool
 }
 
 // NewClient returns a client targeting the SSO Lookup Service API endpoint.
@@ -71,23 +63,41 @@ func NewClient(ctx context.Context, c *vim25.Client) (*Client, error) {
 		}
 	}
 
-	sc := c.Client.NewServiceClient(path.String(), Namespace)
-	sc.Version = Version
+	// 1st try: use the URL from OptionManager as-is, continue to 2nd try on DNS error
+	// 2nd try: use the URL from OptionManager, changing Host to vim25.Client's Host
+	var attempts []error
 
-	req := types.RetrieveServiceContent{
-		This: ServiceInstance,
+	for _, rewrite := range []bool{false, true} {
+		if rewrite {
+			path.Host = c.URL().Host
+		}
+
+		sc := c.Client.NewServiceClient(path.String(), Namespace)
+		sc.Version = Version
+		client := &Client{Client: sc, RoundTripper: sc, Rewrite: rewrite}
+
+		req := types.RetrieveServiceContent{
+			This: ServiceInstance,
+		}
+
+		res, err := methods.RetrieveServiceContent(ctx, client, &req)
+		if err != nil {
+			attempts = append(attempts, err)
+			continue
+		}
+
+		client.ServiceContent = res.Returnval
+
+		return client, nil
 	}
 
-	res, err := methods.RetrieveServiceContent(ctx, sc, &req)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Client{sc, sc, res.Returnval}, nil
+	return nil, errors.Join(attempts...)
 }
 
 // RoundTrip dispatches to the RoundTripper field.
 func (c *Client) RoundTrip(ctx context.Context, req, res soap.HasFault) error {
+	// Drop any operationID header, not used by lookup service
+	ctx = context.WithValue(ctx, vim.ID{}, "")
 	return c.RoundTripper.RoundTrip(ctx, req, res)
 }
 
@@ -131,10 +141,15 @@ func EndpointURL(ctx context.Context, c *vim25.Client, path string, filter *type
 			path = endpoint.Url
 
 			if u, err := url.Parse(path); err == nil {
-				// Set thumbprint only for endpoints on hosts outside this vCenter.
-				// Platform Services may live on multiple hosts.
-				if c.URL().Host != u.Host && c.Thumbprint(u.Host) == "" {
-					c.SetThumbprint(u.Host, endpointThumbprint(endpoint))
+				if lu.Rewrite {
+					u.Host = c.URL().Host
+					path = u.String()
+				} else {
+					// Set thumbprint only for endpoints on hosts outside this vCenter.
+					// Platform Services may live on multiple hosts.
+					if c.URL().Host != u.Host && c.Thumbprint(u.Host) == "" {
+						c.SetThumbprint(u.Host, endpointThumbprint(endpoint))
+					}
 				}
 			}
 		}

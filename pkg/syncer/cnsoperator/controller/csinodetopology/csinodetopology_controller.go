@@ -18,12 +18,13 @@ package csinodetopology
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
-	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -40,9 +41,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
+	cnsoperatortypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/types"
 
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/node"
-	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/utils"
@@ -54,14 +56,14 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer"
 )
 
-const defaultMaxWorkerThreadsForCSINodeTopology = 1
+const defaultMaxWorkerThreads = 1
 
 // backOffDuration is a map of csinodetopology instance name to the time after
 // which a request for this instance will be requeued. Initialized to 1 second
 // for new instances and for instances whose latest reconcile operation
 // succeeded. If the reconcile fails, backoff is incremented exponentially.
 var (
-	backOffDuration         map[string]time.Duration
+	backOffDuration         map[types.NamespacedName]time.Duration
 	backOffDurationMapMutex = sync.Mutex{}
 )
 
@@ -97,7 +99,7 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		log.Infof("The %s FSS is enabled in %s", common.TKGsHA, cnstypes.CnsClusterFlavorGuest)
 		restClientConfigForSupervisor :=
 			k8s.GetRestClientConfigForSupervisor(ctx, configInfo.Cfg.GC.Endpoint, configInfo.Cfg.GC.Port)
-		vmOperatorClient, err = k8s.NewClientForGroup(ctx, restClientConfigForSupervisor, vmoperatorv1alpha4.GroupName)
+		vmOperatorClient, err = k8s.NewClientForGroup(ctx, restClientConfigForSupervisor, vmoperatortypes.GroupName)
 		if err != nil {
 			log.Errorf("failed to create vmOperatorClient. Error: %+v", err)
 			return err
@@ -110,7 +112,6 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 		}
 	}
 
-	isMultiVCFSSEnabled := coCommonInterface.IsFSSEnabled(ctx, common.MultiVCenterCSITopology)
 	// Initialize kubernetes client.
 	k8sclient, err := k8s.NewClient(ctx)
 	if err != nil {
@@ -128,12 +129,12 @@ func Add(mgr manager.Manager, clusterFlavor cnstypes.CnsClusterFlavor,
 	recorder := eventBroadcaster.NewRecorder(scheme.Scheme,
 		corev1.EventSource{Component: csinodetopologyv1alpha1.GroupName})
 	return add(mgr, newReconciler(mgr, configInfo, recorder,
-		enableTKGsHAinGuest, isMultiVCFSSEnabled, vmOperatorClient, supervisorNamespace))
+		enableTKGsHAinGuest, vmOperatorClient, supervisorNamespace))
 }
 
 // newReconciler returns a new `reconcile.Reconciler`.
 func newReconciler(mgr manager.Manager, configInfo *cnsconfig.ConfigurationInfo, recorder record.EventRecorder,
-	enableTKGsHAinGuest bool, isMultiVCFSSEnabled bool, vmOperatorClient client.Client,
+	enableTKGsHAinGuest bool, vmOperatorClient client.Client,
 	supervisorNamespace string) reconcile.Reconciler {
 	return &ReconcileCSINodeTopology{
 		client:              mgr.GetClient(),
@@ -141,7 +142,6 @@ func newReconciler(mgr manager.Manager, configInfo *cnsconfig.ConfigurationInfo,
 		configInfo:          configInfo,
 		recorder:            recorder,
 		enableTKGsHAinGuest: enableTKGsHAinGuest,
-		isMultiVCFSSEnabled: isMultiVCFSSEnabled,
 		vmOperatorClient:    vmOperatorClient,
 		supervisorNamespace: supervisorNamespace}
 }
@@ -152,14 +152,14 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 
 	// Create a new controller.
 	c, err := controller.New("csinodetopology-controller", mgr, controller.Options{Reconciler: r,
-		MaxConcurrentReconciles: defaultMaxWorkerThreadsForCSINodeTopology})
+		MaxConcurrentReconciles: defaultMaxWorkerThreads})
 	if err != nil {
 		log.Errorf("failed to create new CSINodetopology controller with error: %+v", err)
 		return err
 	}
 
 	// Initialize backoff duration map.
-	backOffDuration = make(map[string]time.Duration)
+	backOffDuration = make(map[types.NamespacedName]time.Duration)
 
 	// Predicates are used to determine under which conditions the reconcile
 	// callback will be made for an instance.
@@ -207,7 +207,6 @@ type ReconcileCSINodeTopology struct {
 	configInfo          *cnsconfig.ConfigurationInfo
 	recorder            record.EventRecorder
 	enableTKGsHAinGuest bool
-	isMultiVCFSSEnabled bool
 	vmOperatorClient    client.Client
 	supervisorNamespace string
 }
@@ -253,10 +252,10 @@ func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, requ
 	// Initialize backOffDuration for the instance, if required.
 	backOffDurationMapMutex.Lock()
 	var timeout time.Duration
-	if _, exists := backOffDuration[instance.Name]; !exists {
-		backOffDuration[instance.Name] = time.Second
+	if _, exists := backOffDuration[request.NamespacedName]; !exists {
+		backOffDuration[request.NamespacedName] = time.Second
 	}
-	timeout = backOffDuration[instance.Name]
+	timeout = backOffDuration[request.NamespacedName]
 	backOffDurationMapMutex.Unlock()
 
 	// Get NodeVM instance.
@@ -282,7 +281,7 @@ func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, requ
 		nodeVM, err = nodeManager.GetNodeVMByNameAndUpdateCache(ctx, nodeID)
 	}
 	if err != nil {
-		if err == node.ErrNodeNotFound {
+		if errors.Is(err, node.ErrNodeNotFound) {
 			log.Warnf("Node %q is not yet registered in the node manager. Error: %+v", nodeID, err)
 			return reconcile.Result{}, err
 		}
@@ -317,7 +316,7 @@ func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, requ
 		}
 
 		// Fetch topology labels for nodeVM.
-		topologyLabels, err := getNodeTopologyInfo(ctx, nodeVM, r.configInfo.Cfg, r.isMultiVCFSSEnabled)
+		topologyLabels, err := getNodeTopologyInfo(ctx, nodeVM, r.configInfo.Cfg)
 		if err != nil {
 			msg := fmt.Sprintf("failed to fetch topology information for the nodeVM %q. Error: %v",
 				instance.Name, err)
@@ -342,7 +341,7 @@ func (r *ReconcileCSINodeTopology) reconcileForVanilla(ctx context.Context, requ
 
 	// On successful event, remove instance from backOffDuration.
 	backOffDurationMapMutex.Lock()
-	delete(backOffDuration, instance.Name)
+	delete(backOffDuration, request.NamespacedName)
 	backOffDurationMapMutex.Unlock()
 	log.Infof("Successfully updated topology labels for nodeVM %q", instance.Name)
 	return reconcile.Result{}, nil
@@ -385,10 +384,10 @@ func (r *ReconcileCSINodeTopology) reconcileForGuest(ctx context.Context, reques
 	func() {
 		backOffDurationMapMutex.Lock()
 		defer backOffDurationMapMutex.Unlock()
-		if _, exists := backOffDuration[instance.Name]; !exists {
-			backOffDuration[instance.Name] = time.Second
+		if _, exists := backOffDuration[request.NamespacedName]; !exists {
+			backOffDuration[request.NamespacedName] = time.Second
 		}
-		timeout = backOffDuration[instance.Name]
+		timeout = backOffDuration[request.NamespacedName]
 	}()
 
 	// Fetch topology labels for guest worker node backed by vmop VM.
@@ -412,7 +411,7 @@ func (r *ReconcileCSINodeTopology) reconcileForGuest(ctx context.Context, reques
 	func() {
 		backOffDurationMapMutex.Lock()
 		defer backOffDurationMapMutex.Unlock()
-		delete(backOffDuration, instance.Name)
+		delete(backOffDuration, request.NamespacedName)
 	}()
 
 	log.Infof("Successfully updated topology labels for worker %q in %s",
@@ -428,7 +427,7 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 		Name:      instance.Name, // use the nodeName as the VM key
 	}
 	log.Info("fetching virtual machines with all versions")
-	virtualMachine, err := utils.GetVirtualMachineAllApiVersions(
+	virtualMachine, _, err := utils.GetVirtualMachineAllApiVersions(
 		ctx, vmKey, vmOperatorClient)
 	if err != nil {
 		return nil, logger.LogNewErrorf(log,
@@ -452,6 +451,10 @@ func updateCRStatus(ctx context.Context, r *ReconcileCSINodeTopology, instance *
 	status csinodetopologyv1alpha1.CRDStatus, eventMessage string) error {
 	log := logger.GetLogger(ctx)
 
+	namespacedName := types.NamespacedName{
+		Name:      instance.Name,
+		Namespace: instance.Namespace,
+	}
 	instance.Status.Status = status
 	switch status {
 	case csinodetopologyv1alpha1.CSINodeTopologySuccess:
@@ -462,7 +465,8 @@ func updateCRStatus(ctx context.Context, r *ReconcileCSINodeTopology, instance *
 	case csinodetopologyv1alpha1.CSINodeTopologyError:
 		// Increase backoff duration for the instance.
 		backOffDurationMapMutex.Lock()
-		backOffDuration[instance.Name] = backOffDuration[instance.Name] * 2
+		backOffDuration[namespacedName] = min(backOffDuration[namespacedName]*2,
+			cnsoperatortypes.MaxBackOffDurationForReconciler)
 		backOffDurationMapMutex.Unlock()
 
 		// Record an event on the CR.
@@ -481,40 +485,25 @@ func updateCRStatus(ctx context.Context, r *ReconcileCSINodeTopology, instance *
 	return nil
 }
 
-func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine, cfg *cnsconfig.Config,
-	isMultiVCFSSEnabled bool) ([]csinodetopologyv1alpha1.TopologyLabel, error) {
+func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine,
+	cfg *cnsconfig.Config) ([]csinodetopologyv1alpha1.TopologyLabel, error) {
 	log := logger.GetLogger(ctx)
 	var (
 		vcenter *cnsvsphere.VirtualCenter
 		err     error
 	)
 	// Get VC instance.
-	if isMultiVCFSSEnabled {
-		vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, nodeVM.VirtualCenterHost, true)
-		if err != nil {
-			return nil, logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter Host: %q, err: %v",
-				nodeVM.VirtualCenterHost, err)
-		}
-	} else {
-		vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, &cnsconfig.ConfigurationInfo{Cfg: cfg}, false)
-		if err != nil {
-			log.Errorf("failed to get virtual center instance with error: %v", err)
-			return nil, err
-		}
+	vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, nodeVM.VirtualCenterHost, true)
+	if err != nil {
+		return nil, logger.LogNewErrorf(log, "failed to get vCenterInstance for vCenter Host: %q, err: %v",
+			nodeVM.VirtualCenterHost, err)
 	}
-
 	// Get tag manager instance.
-	tagManager, err := cnsvsphere.GetTagManager(ctx, vcenter)
+	tagManager, err := vcenter.GetTagManager(ctx)
 	if err != nil {
 		log.Errorf("failed to create tagManager. Error: %v", err)
 		return nil, err
 	}
-	defer func() {
-		err := tagManager.Logout(ctx)
-		if err != nil {
-			log.Errorf("failed to logout tagManager. Error: %v", err)
-		}
-	}()
 
 	// Create a map of TopologyCategories with category as key and value as empty string.
 	var isZoneRegion bool

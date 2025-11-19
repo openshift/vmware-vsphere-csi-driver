@@ -31,7 +31,6 @@ import (
 
 	csiconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
-	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
 	cnsvolumeoperationrequestconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest/config"
 	cnsvolumeoprequestv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest/v1alpha1"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
@@ -79,6 +78,7 @@ var (
 	operationRequestStoreInstance        *operationRequestStore
 	operationStoreInitLock               = &sync.Mutex{}
 	isPodVMOnStretchSupervisorFSSEnabled bool
+	isCSITransactionSupportEnabled       bool
 )
 
 // InitVolumeOperationRequestInterface creates the CnsVolumeOperationRequest
@@ -86,7 +86,8 @@ var (
 // VolumeOperationRequest interface. Clients are unaware of the implementation
 // details to read and persist volume operation details.
 func InitVolumeOperationRequestInterface(ctx context.Context, cleanupInterval int,
-	isBlockVolumeSnapshotEnabled func() bool, isPodVMOnStretchSupervisorEnabled bool) (
+	isBlockVolumeSnapshotEnabled func() bool, isPodVMOnStretchSupervisorEnabled bool,
+	csiTransactionSupportEnabled bool) (
 	VolumeOperationRequest, error) {
 	log := logger.GetLogger(ctx)
 	csiNamespace = getCSINamespace()
@@ -127,10 +128,12 @@ func InitVolumeOperationRequestInterface(ctx context.Context, cleanupInterval in
 		operationRequestStoreInstance = &operationRequestStore{
 			k8sclient: k8sclient,
 		}
-		go operationRequestStoreInstance.cleanupStaleInstances(cleanupInterval, isBlockVolumeSnapshotEnabled)
+		go operationRequestStoreInstance.cleanupStaleInstances(cleanupInterval)
 	}
 	// Store PodVMOnStretchedSupervisor FSS value for later use.
 	isPodVMOnStretchSupervisorFSSEnabled = isPodVMOnStretchSupervisorEnabled
+	// Store CSI Transaction Support FSS value for later use.
+	isCSITransactionSupportEnabled = csiTransactionSupportEnabled
 
 	return operationRequestStoreInstance, nil
 }
@@ -262,6 +265,32 @@ func (or *operationRequestStore) StoreRequestDetails(
 	// Create a deep copy since we modify the object.
 	updatedInstance := instance.DeepCopy()
 
+	// If CSI Transaction Support is enabled and we're storing a new InProgress operation with empty TaskID,
+	// mark any existing InProgress entries as TrackingAborted since this indicates a retry scenario.
+	if isCSITransactionSupportEnabled && operationDetailsToStore.TaskStatus == TaskInvocationStatusInProgress &&
+		operationDetailsToStore.TaskID == "" {
+		// This is a new operation attempt (Phase 1: Intent Registration)
+		// Mark any existing InProgress entries as TrackingAborted since this is clearly a retry
+		for index := range updatedInstance.Status.LatestOperationDetails {
+			existingOp := &updatedInstance.Status.LatestOperationDetails[index]
+			if existingOp.TaskStatus == TaskInvocationStatusInProgress {
+				// This is a retry - mark the previous attempt as aborted
+				existingOp.TaskStatus = TaskInvocationStatusTrackingAborted
+				existingOp.Error = "Operation tracking aborted due to retry attempt"
+				log.Infof("Marked previous InProgress operation as TrackingAborted due to retry detection. Instance: %s",
+					operationToStore.Name)
+			}
+		}
+
+		// Also check FirstOperationDetails
+		if updatedInstance.Status.FirstOperationDetails.TaskStatus == TaskInvocationStatusInProgress {
+			updatedInstance.Status.FirstOperationDetails.TaskStatus = TaskInvocationStatusTrackingAborted
+			updatedInstance.Status.FirstOperationDetails.Error = "Operation tracking aborted due to retry attempt"
+			log.Infof("Marked FirstOperationDetails as TrackingAborted due to retry detection. Instance: %s",
+				operationToStore.Name)
+		}
+	}
+
 	// Modify VolumeID, SnapshotID and Capacity
 	updatedInstance.Status.VolumeID = operationToStore.VolumeID
 	updatedInstance.Status.SnapshotID = operationToStore.SnapshotID
@@ -352,113 +381,68 @@ func (or *operationRequestStore) DeleteRequestDetails(ctx context.Context, name 
 	return nil
 }
 
-// cleanupStaleInstances cleans up CnsVolumeOperationRequest instances for
-// volumes that are no longer present in the kubernetes cluster.
-func (or *operationRequestStore) cleanupStaleInstances(cleanupInterval int, isBlockVolumeSnapshotEnabled func() bool) {
+// cleanupStaleInstances cleans up CnsVolumeOperationRequest instances
+// with latest TaskInvocationTimestamp older than 15 minutes
+func (or *operationRequestStore) cleanupStaleInstances(cleanupInterval int) {
 	ticker := time.NewTicker(time.Duration(cleanupInterval) * time.Minute)
 	ctx, log := logger.GetNewContextWithLogger()
 	log.Infof("CnsVolumeOperationRequest clean up interval is set to %d minutes", cleanupInterval)
 	for ; true; <-ticker.C {
+		cutoffTime := time.Now().Add(-15 * time.Minute)
+		continueToken := ""
 		log.Infof("Cleaning up stale CnsVolumeOperationRequest instances.")
-
-		instanceMap := make(map[string]bool)
-
-		cnsVolumeOperationRequestList := &cnsvolumeoprequestv1alpha1.CnsVolumeOperationRequestList{}
-		err := or.k8sclient.List(ctx, cnsVolumeOperationRequestList)
-		if err != nil {
-			log.Errorf("failed to list CnsVolumeOperationRequests with error %v. Abandoning "+
-				"CnsVolumeOperationRequests clean up ...", err)
-			continue
-		}
-
-		k8sclient, err := k8s.NewClient(ctx)
-		if err != nil {
-			log.Errorf("failed to get k8sclient with error: %v. Abandoning CnsVolumeOperationRequests "+
-				"clean up ...", err)
-			continue
-		}
-		pvList, err := k8sclient.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
-		if err != nil {
-			log.Errorf("failed to list PersistentVolumes with error %v. Abandoning "+
-				"CnsVolumeOperationRequests clean up ...", err)
-			continue
-		}
-
-		for _, pv := range pvList.Items {
-			if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == csitypes.Name {
-				instanceMap[pv.Name] = true
-				volumeHandle := pv.Spec.CSI.VolumeHandle
-				if strings.Contains(volumeHandle, "file") {
-					volumeHandle = strings.ReplaceAll(volumeHandle, ":", "-")
-				}
-				instanceMap[volumeHandle] = true
+		for {
+			listOptions := &client.ListOptions{
+				Limit:    5000,
+				Continue: continueToken,
 			}
-		}
-		blockVolumeSnapshotEnabled := isBlockVolumeSnapshotEnabled()
-		// skip cleaning up of snapshot related CnsVolumeOperationRequests if FSS is not enabled.
-		if blockVolumeSnapshotEnabled {
-			snapshotterClient, err := k8s.NewSnapshotterClient(ctx)
+			cnsVolumeOperationRequestList := &cnsvolumeoprequestv1alpha1.CnsVolumeOperationRequestList{}
+			err := or.k8sclient.List(ctx, cnsVolumeOperationRequestList, listOptions)
 			if err != nil {
-				log.Errorf("failed to get snapshotterClient with error: %v. Abandoning "+
+				log.Errorf("failed to list CnsVolumeOperationRequests with error %v. Abandoning "+
 					"CnsVolumeOperationRequests clean up ...", err)
-				return
+				break
 			}
-
-			// the List API below ensures VolumeSnapshotContent CRD is installed and lists the existing
-			// VolumeSnapshotContent CRs in cluster.
-			vscList, err := snapshotterClient.SnapshotV1().VolumeSnapshotContents().List(ctx, metav1.ListOptions{})
-			if err != nil {
-				log.Errorf("failed to list VolumeSnapshotContents with error %v. Abandoning "+
-					"CnsVolumeOperationRequests clean up ...", err)
-				return
-			}
-
-			for _, vsc := range vscList.Items {
-				if vsc.Spec.Driver != csitypes.Name {
+			for _, instance := range cnsVolumeOperationRequestList.Items {
+				latestOperationDetailsLength := len(instance.Status.LatestOperationDetails)
+				// Skip if task is still in progress
+				if latestOperationDetailsLength != 0 &&
+					instance.Status.LatestOperationDetails[latestOperationDetailsLength-1].TaskStatus ==
+						TaskInvocationStatusInProgress {
 					continue
 				}
-				volumeHandle := vsc.Spec.Source.VolumeHandle
-				if volumeHandle != nil {
-					// CnsVolumeOperation instance for CreateSnapshot
-					instanceMap[strings.TrimPrefix(vsc.Name, "snapcontent-")+"-"+*volumeHandle] = true
+				// Delete instance if TaskInvocationTimestamp is older than 15 minutes
+				if latestOperationDetailsLength != 0 &&
+					instance.Status.LatestOperationDetails[latestOperationDetailsLength-1].
+						TaskInvocationTimestamp.Time.After(cutoffTime) {
+					log.Debugf("CnsVolumeOperationRequest instance %q is skipped for deletion", instance.Name)
+					continue
 				}
-				if vsc.Status != nil && vsc.Status.SnapshotHandle != nil {
-					// CnsVolumeOperation instance for DeleteSnapshot
-					instanceMap[strings.Replace(*vsc.Status.SnapshotHandle, "+", "-", 1)] = true
-				}
-			}
-		}
-
-		for _, instance := range cnsVolumeOperationRequestList.Items {
-			latestOperationDetailsLength := len(instance.Status.LatestOperationDetails)
-			if latestOperationDetailsLength != 0 &&
-				instance.Status.LatestOperationDetails[latestOperationDetailsLength-1].TaskStatus ==
-					TaskInvocationStatusInProgress {
-				continue
-			}
-			var trimmedName string
-			switch {
-			case strings.HasPrefix(instance.Name, "pvc"):
-				trimmedName = instance.Name
-			case strings.HasPrefix(instance.Name, "delete"):
-				trimmedName = strings.TrimPrefix(instance.Name, "delete-")
-			case strings.HasPrefix(instance.Name, "expand"):
-				trimmedName = strings.TrimPrefix(instance.Name, "expand-")
-			case blockVolumeSnapshotEnabled && strings.HasPrefix(instance.Name, "snapshot"):
-				trimmedName = strings.TrimPrefix(instance.Name, "snapshot-")
-			case blockVolumeSnapshotEnabled && strings.HasPrefix(instance.Name, "deletesnapshot"):
-				trimmedName = strings.TrimPrefix(instance.Name, "deletesnapshot-")
-			}
-			if _, ok := instanceMap[trimmedName]; !ok {
+				log.Debugf("Calling DeleteRequestDetails for %q", instance.Name)
 				err = or.DeleteRequestDetails(ctx, instance.Name)
 				if err != nil {
 					log.Errorf("failed to delete CnsVolumeOperationRequest instance %s with error %v",
 						instance.Name, err)
 				}
+				log.Debugf("CnsVolumeOperationRequest instance %q is deleted", instance.Name)
+			}
+			// Exit if there are no more pages
+			continueToken = cnsVolumeOperationRequestList.GetContinue()
+			log.Debugf("continueToken to process remaining CnsVolumeOperationRequest "+
+				"insances is %q", continueToken)
+			if continueToken == "" {
+				log.Infof("all CnsVolumeOperationRequest instances are processed")
+				break
 			}
 		}
 		log.Infof("Clean up of stale CnsVolumeOperationRequest complete.")
 	}
+}
+
+// SetCSITransactionSupport sets the CSI Transaction Support feature flag.
+// This function allows runtime modification of the isCSITransactionSupportEnabled variable.
+func SetCSITransactionSupport(enabled bool) {
+	isCSITransactionSupportEnabled = enabled
 }
 
 func getCSINamespace() string {

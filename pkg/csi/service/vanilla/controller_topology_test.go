@@ -28,10 +28,18 @@ import (
 	"github.com/google/uuid"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/simulator"
+	"github.com/vmware/govmomi/vapi/rest"
+	_ "github.com/vmware/govmomi/vapi/simulator"
+	"github.com/vmware/govmomi/vapi/tags"
+	"github.com/vmware/govmomi/view"
+	"github.com/vmware/govmomi/vim25"
+	"github.com/vmware/govmomi/vim25/mo"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/vmware/govmomi/simulator"
 	clientset "k8s.io/client-go/kubernetes"
 	testclient "k8s.io/client-go/kubernetes/fake"
 
@@ -43,7 +51,9 @@ import (
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	commoncotypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/types"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/cnsvolumeoperationrequest"
+	csinodetopologyv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/internalapis/csinodetopology/v1alpha1"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
 
@@ -68,6 +78,32 @@ type FakeTopologyManager struct {
 type FakeNodeManagerTopology struct {
 	cnsNodeManager node.Manager
 	k8sClient      clientset.Interface
+	vimClient      *vim25.Client
+}
+
+func getAllManagedObjects(ctx context.Context, client *vim25.Client, kind string, prop []string, dst any) error {
+	m := view.NewManager(client)
+
+	v, err := m.CreateContainerView(ctx, client.ServiceContent.RootFolder, []string{kind}, true)
+	if err != nil {
+		return err
+	}
+
+	defer func() { _ = v.Destroy(ctx) }()
+
+	return v.Retrieve(ctx, []string{kind}, prop, dst)
+}
+
+func getAllVirtualMachines(ctx context.Context, client *vim25.Client, props ...string) ([]mo.VirtualMachine, error) {
+	var vms []mo.VirtualMachine
+	err := getAllManagedObjects(ctx, client, "VirtualMachine", props, &vms)
+	if err != nil {
+		return nil, err
+	}
+	if len(vms) == 0 {
+		return nil, fmt.Errorf("no VirtualMachines found")
+	}
+	return vms, nil
 }
 
 func (f *FakeNodeManagerTopology) Initialize(ctx context.Context) error {
@@ -83,12 +119,14 @@ func (f *FakeNodeManagerTopology) Initialize(ctx context.Context) error {
 		t.Errorf("Error occurred while unregistering all nodes, err: %v", err)
 	}
 
-	objVMs := simulator.Map.All("VirtualMachine")
+	objVMs, err := getAllVirtualMachines(ctx, f.vimClient, "config.uuid")
+	if err != nil {
+		return err
+	}
 	var i int
 	for _, vm := range objVMs {
 		i++
-		obj := vm.(*simulator.VirtualMachine)
-		nodeUUID := obj.Config.Uuid
+		nodeUUID := vm.Config.Uuid
 		nodeName := "k8s-node-" + strconv.Itoa(i)
 		// Register new node entry in nodeManager
 		err := f.cnsNodeManager.RegisterNode(ctx, nodeUUID, nodeName)
@@ -131,8 +169,8 @@ func (f *FakeNodeManagerTopology) GetAllNodes(ctx context.Context) ([]*cnsvspher
 
 func (f *FakeNodeManagerTopology) GetAllNodesByVC(ctx context.Context, vcHost string) ([]*cnsvsphere.VirtualMachine,
 	error) {
-	// This function is required only for multi VC env.
-	return nil, nil
+	// For topology testing, return all nodes since we're working with a single vCenter
+	return f.cnsNodeManager.GetAllNodes(ctx)
 }
 
 // generateNodeLabels adds region and zone specific labels on all nodeVMs generated using vcsim
@@ -141,11 +179,13 @@ func generateNodeLabels(ctx context.Context, vc *cnsvsphere.VirtualCenter) (map[
 	var i int
 
 	finder := find.NewFinder(vc.Client.Client, false)
-	objDCs := simulator.Map.All("Datacenter")
+	objDCs, err := finder.DatacenterList(ctx, "*")
+	if err != nil {
+		return nil, err
+	}
 	for _, dc := range objDCs {
 		i++
-		dcref := dc.(*simulator.Datacenter)
-		dcname := dcref.Name
+		dcname := dc.Name()
 		fmt.Printf("generateNodeLabels for datacenter=%s\n", dcname)
 		datacenter, err := finder.Datacenter(ctx, dcname)
 		if err != nil {
@@ -314,6 +354,11 @@ func (f *FakeTopologyManager) GetAZClustersMap(ctx context.Context) map[string][
 	return nil
 }
 
+func (f *FakeTopologyManager) ZonesWithMultipleClustersExist(ctx context.Context) bool {
+	// This function is not yet implemented
+	return false
+}
+
 var vcsimParamsTopology = unittestcommon.VcsimParams{
 	Datacenters:     2,
 	Clusters:        1,
@@ -342,12 +387,12 @@ func getControllerTestWithTopology(t *testing.T) *controllerTestTopology {
 		// GetVirtualCenterManager returns a singleton instance of VirtualCenterManager,
 		// so it could have already registered VCs as part of previous unit test run from
 		// same folder.
-		// Unregister old VCs and register new VC.
+		// Unregister old VCs.
 		err = vcManager.UnregisterAllVirtualCenters(ctxtopology)
 		if err != nil {
 			t.Fatal(err)
 		}
-		vcenter, err := vcManager.RegisterVirtualCenter(ctxtopology, vcenterconfig)
+		vcenter, err := cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctxtopology, vcenterconfig, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,6 +401,13 @@ func getControllerTestWithTopology(t *testing.T) *controllerTestTopology {
 		if err != nil {
 			t.Fatal(err)
 		}
+
+		// Set up real tags in vcsim for topology testing
+		err = setupRealTagsInVCSim(ctxtopology, vcenter)
+		if err != nil {
+			t.Fatal(err)
+		}
+
 		fakeOpStore, err := unittestcommon.InitFakeVolumeOperationRequestInterface()
 		if err != nil {
 			t.Fatal(err)
@@ -407,6 +459,14 @@ func getControllerTestWithTopology(t *testing.T) *controllerTestTopology {
 			VolumeManager:  volumeManager,
 			VcenterManager: vcManager,
 		}
+		managers := &common.Managers{
+			VcenterConfigs: make(map[string]*cnsvsphere.VirtualCenterConfig),
+			CnsConfig:      config,
+			VolumeManagers: make(map[string]cnsvolume.Manager),
+			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
+		}
+		managers.VcenterConfigs[vcenterconfig.Host] = vcenterconfig
+		managers.VolumeManagers[vcenterconfig.Host] = volumeManager
 
 		var k8sClient clientset.Interface
 		if k8senv := os.Getenv("KUBECONFIG"); k8senv != "" {
@@ -419,7 +479,9 @@ func getControllerTestWithTopology(t *testing.T) *controllerTestTopology {
 		}
 
 		nodeManager := &FakeNodeManagerTopology{
-			k8sClient: k8sClient}
+			k8sClient: k8sClient,
+			vimClient: vcenter.Client.Client,
+		}
 		err = nodeManager.Initialize(ctxtopology)
 		if err != nil {
 			t.Fatalf("Failed to initialize the node manager, err= =%v", err)
@@ -430,20 +492,35 @@ func getControllerTestWithTopology(t *testing.T) *controllerTestTopology {
 			t.Fatalf("Failed to add mock node labels, err = %v", err)
 		}
 
+		fakeAuthMgr := &FakeAuthManager{
+			vcenter: vcenter,
+		}
+
 		c := &controller{
-			manager: manager,
-			nodeMgr: nodeManager,
-			authMgr: &FakeAuthManager{
-				vcenter: vcenter,
-			},
+			manager:  manager,
+			managers: managers,
+			nodeMgr:  nodeManager,
+			authMgr:  fakeAuthMgr,
+			authMgrs: make(map[string]*common.AuthManager),
 			topologyMgr: &FakeTopologyManager{
 				nodeLabels: mockNodeLabels,
 			},
+			topologyCalc: &defaultTopologyCalculator{}, // Use real topology calculation for topology tests
 		}
+		c.authMgrs[vcenterconfig.Host], _ =
+			common.GetAuthorizationServiceForTesting(ctxtopology,
+				vcenter, fakeAuthMgr.GetDatastoreMapForBlockVolumes(ctxtopology), nil)
+
 		commonco.ContainerOrchestratorUtility, err =
 			unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
 		if err != nil {
 			t.Fatalf("Failed to create co agnostic interface. err=%v", err)
+		}
+
+		// Create CSINodeTopology instances for topology testing
+		err = createCSINodeTopologyInstances(ctxtopology, mockNodeLabels, nodeManager, commonco.ContainerOrchestratorUtility)
+		if err != nil {
+			t.Fatalf("Failed to create CSINodeTopology instances. err=%v", err)
 		}
 		controllerTestInstanceTopology = &controllerTestTopology{
 			controller:     c,
@@ -485,7 +562,13 @@ func TestCreateVolumeWithAccessibilityRequirements(t *testing.T) {
 					},
 				},
 			},
-			Preferred: []*csi.Topology{},
+			Preferred: []*csi.Topology{
+				{
+					Segments: map[string]string{
+						"topology.csi.vmware.com/k8s-zone": "zone-1",
+					},
+				},
+			},
 		},
 	}
 
@@ -502,7 +585,7 @@ func TestCreateVolumeWithAccessibilityRequirements(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctxtopology, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctxtopology, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -521,7 +604,7 @@ func TestCreateVolumeWithAccessibilityRequirements(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctxtopology, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctxtopology, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -529,4 +612,199 @@ func TestCreateVolumeWithAccessibilityRequirements(t *testing.T) {
 	if len(queryResult.Volumes) != 0 {
 		t.Fatalf("Volume should not exist after deletion with ID: %s", volID)
 	}
+}
+
+// createCSINodeTopologyInstances creates CSINodeTopology instances based on the node labels
+func createCSINodeTopologyInstances(ctx context.Context, nodeLabels map[string]map[string]string,
+	nodeManager *FakeNodeManagerTopology, co commonco.COCommonInterface) error {
+
+	var instances []interface{}
+	nodeIndex := 1
+
+	for nodeUUID, labels := range nodeLabels {
+		// Get the node name from the node manager
+		nodeName := fmt.Sprintf("k8s-node-%d", nodeIndex)
+		nodeIndex++
+
+		// Create topology labels array
+		var topologyLabels []csinodetopologyv1alpha1.TopologyLabel
+		for key, value := range labels {
+			topologyLabels = append(topologyLabels, csinodetopologyv1alpha1.TopologyLabel{
+				Key:   key,
+				Value: value,
+			})
+		}
+
+		// Create CSINodeTopology instance
+		instance := &csinodetopologyv1alpha1.CSINodeTopology{
+			TypeMeta: metav1.TypeMeta{
+				APIVersion: "cns.vmware.com/v1alpha1",
+				Kind:       "CSINodeTopology",
+			},
+			ObjectMeta: metav1.ObjectMeta{
+				Name: nodeName,
+			},
+			Spec: csinodetopologyv1alpha1.CSINodeTopologySpec{
+				NodeID:   nodeName,
+				NodeUUID: nodeUUID,
+			},
+			Status: csinodetopologyv1alpha1.CSINodeTopologyStatus{
+				Status:         csinodetopologyv1alpha1.CSINodeTopologySuccess,
+				TopologyLabels: topologyLabels,
+				ErrorMessage:   "",
+			},
+		}
+
+		// Convert to unstructured for storage
+		unstructuredObj := &unstructured.Unstructured{}
+		unstructuredMap, err := convertToUnstructured(instance)
+		if err != nil {
+			return fmt.Errorf("failed to convert CSINodeTopology to unstructured: %v", err)
+		}
+		unstructuredObj.Object = unstructuredMap
+
+		instances = append(instances, unstructuredObj)
+	}
+
+	// Set the instances in the fake container orchestrator
+	if fakeOrchestrator, ok := co.(*unittestcommon.FakeK8SOrchestrator); ok {
+		fakeOrchestrator.SetCSINodeTopologyInstances(instances)
+	} else {
+		return fmt.Errorf("container orchestrator is not a FakeK8SOrchestrator")
+	}
+
+	return nil
+}
+
+// convertToUnstructured converts a typed object to an unstructured map
+func convertToUnstructured(obj interface{}) (map[string]interface{}, error) {
+	// This is a simplified conversion - in a real implementation, you might use
+	// runtime.DefaultUnstructuredConverter.ToUnstructured
+	switch v := obj.(type) {
+	case *csinodetopologyv1alpha1.CSINodeTopology:
+		return map[string]interface{}{
+			"apiVersion": v.APIVersion,
+			"kind":       v.Kind,
+			"metadata": map[string]interface{}{
+				"name": v.Name,
+			},
+			"spec": map[string]interface{}{
+				"nodeID":   v.Spec.NodeID,
+				"nodeuuid": v.Spec.NodeUUID,
+			},
+			"status": map[string]interface{}{
+				"status":         string(v.Status.Status),
+				"topologyLabels": convertTopologyLabelsToUnstructured(v.Status.TopologyLabels),
+				"errorMessage":   v.Status.ErrorMessage,
+			},
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported type: %T", obj)
+	}
+}
+
+// convertTopologyLabelsToUnstructured converts topology labels to unstructured format
+func convertTopologyLabelsToUnstructured(labels []csinodetopologyv1alpha1.TopologyLabel) []interface{} {
+	var result []interface{}
+	for _, label := range labels {
+		result = append(result, map[string]interface{}{
+			"key":   label.Key,
+			"value": label.Value,
+		})
+	}
+	return result
+}
+
+// setupRealTagsInVCSim creates real vSphere tags and categories in vcsim instead of using mocks
+func setupRealTagsInVCSim(ctx context.Context, vcenter *cnsvsphere.VirtualCenter) error {
+	log := logger.GetLogger(ctx)
+
+	// Create REST client for tag management
+	restClient := rest.NewClient(vcenter.Client.Client)
+	err := restClient.Login(ctx, simulator.DefaultLogin)
+	if err != nil {
+		return fmt.Errorf("failed to login to REST client: %v", err)
+	}
+
+	// Create tag manager
+	tagManager := tags.NewManager(restClient)
+	if tagManager == nil {
+		return fmt.Errorf("failed to create tag manager")
+	}
+
+	log.Infof("Created tag manager with useragent: %s", tagManager.UserAgent)
+
+	// Create k8s-region category
+	regionCategoryID, err := cnsvsphere.CreateNewCategory(ctx, "k8s-region", "SINGLE", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create k8s-region category: %v", err)
+	}
+
+	// Create k8s-zone category
+	zoneCategoryID, err := cnsvsphere.CreateNewCategory(ctx, "k8s-zone", "SINGLE", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create k8s-zone category: %v", err)
+	}
+
+	// Create region tags
+	region1TagID, err := cnsvsphere.CreateNewTag(ctx, regionCategoryID, "region-1", "Region 1 tag", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create region-1 tag: %v", err)
+	}
+
+	region2TagID, err := cnsvsphere.CreateNewTag(ctx, regionCategoryID, "region-2", "Region 2 tag", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create region-2 tag: %v", err)
+	}
+
+	// Create zone tags
+	zone1TagID, err := cnsvsphere.CreateNewTag(ctx, zoneCategoryID, "zone-1", "Zone 1 tag", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create zone-1 tag: %v", err)
+	}
+
+	zone2TagID, err := cnsvsphere.CreateNewTag(ctx, zoneCategoryID, "zone-2", "Zone 2 tag", tagManager)
+	if err != nil {
+		return fmt.Errorf("failed to create zone-2 tag: %v", err)
+	}
+
+	// Get datacenter references to attach tags
+	datacenters, err := vcenter.GetDatacenters(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get datacenters: %v", err)
+	}
+
+	// Attach tags to datacenters
+	// DC0 gets region-1 and zone-1
+	// DC1 gets region-2 and zone-2
+	for i, datacenter := range datacenters {
+		dcRef := datacenter.Datacenter.Reference()
+
+		if i == 0 {
+			// DC0 - region-1, zone-1
+			err = cnsvsphere.AttachTag(ctx, region1TagID, dcRef, tagManager)
+			if err != nil {
+				return fmt.Errorf("failed to attach region-1 tag to DC0: %v", err)
+			}
+			err = cnsvsphere.AttachTag(ctx, zone1TagID, dcRef, tagManager)
+			if err != nil {
+				return fmt.Errorf("failed to attach zone-1 tag to DC0: %v", err)
+			}
+			log.Infof("Attached region-1 and zone-1 tags to DC0")
+		} else if i == 1 {
+			// DC1 - region-2, zone-2
+			err = cnsvsphere.AttachTag(ctx, region2TagID, dcRef, tagManager)
+			if err != nil {
+				return fmt.Errorf("failed to attach region-2 tag to DC1: %v", err)
+			}
+			err = cnsvsphere.AttachTag(ctx, zone2TagID, dcRef, tagManager)
+			if err != nil {
+				return fmt.Errorf("failed to attach zone-2 tag to DC1: %v", err)
+			}
+			log.Infof("Attached region-2 and zone-2 tags to DC1")
+		}
+	}
+
+	log.Infof("Successfully set up real tags in vcsim")
+	return nil
 }

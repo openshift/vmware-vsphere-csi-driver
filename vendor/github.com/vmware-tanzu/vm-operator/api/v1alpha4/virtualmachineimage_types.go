@@ -8,7 +8,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	vmopv1common "github.com/vmware-tanzu/vm-operator/api/v1alpha4/common"
+	vmopv1a4common "github.com/vmware-tanzu/vm-operator/api/v1alpha4/common"
 )
 
 const (
@@ -152,7 +152,7 @@ type VirtualMachineImageSpec struct {
 
 	// ProviderRef is a reference to the resource that contains the source of
 	// this image's information.
-	ProviderRef *vmopv1common.LocalObjectRef `json:"providerRef,omitempty"`
+	ProviderRef *vmopv1a4common.LocalObjectRef `json:"providerRef,omitempty"`
 }
 
 // VirtualMachineImageStatus defines the observed state of VirtualMachineImage.
@@ -213,7 +213,7 @@ type VirtualMachineImageStatus struct {
 
 	// VMwareSystemProperties describes the observed VMware system properties defined for
 	// this image.
-	VMwareSystemProperties []vmopv1common.KeyValuePair `json:"vmwareSystemProperties,omitempty"`
+	VMwareSystemProperties []vmopv1a4common.KeyValuePair `json:"vmwareSystemProperties,omitempty"`
 
 	// +optional
 
@@ -248,7 +248,8 @@ type VirtualMachineImageStatus struct {
 
 	// +optional
 	//
-	// Type describes the content library item type (OVF or ISO) of the image.
+	// Type describes the content library item type (OVF, ISO, or VM) of the
+	// image.
 	Type string `json:"type,omitempty"`
 }
 
@@ -262,7 +263,6 @@ func (i *VirtualMachineImageStatus) SetConditions(conditions []metav1.Condition)
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Namespaced,shortName=vmi;vmimage
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Display Name",type="string",JSONPath=".status.name"
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".status.type"
@@ -300,7 +300,6 @@ type VirtualMachineImageList struct {
 
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:scope=Cluster,shortName=cvmi;cvmimage;clustervmi;clustervmimage
-// +kubebuilder:storageversion
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Display Name",type="string",JSONPath=".status.name"
 // +kubebuilder:printcolumn:name="Type",type="string",JSONPath=".status.type"

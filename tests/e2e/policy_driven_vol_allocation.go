@@ -42,11 +42,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2ekubectl "k8s.io/kubernetes/test/e2e/framework/kubectl"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
-	fssh "k8s.io/kubernetes/test/e2e/framework/ssh"
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
@@ -121,8 +119,6 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 	ginkgo.AfterEach(func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		setVpxdTaskTimeout(ctx, 0) // reset vpxd timeout to default
-		time.Sleep(3 * time.Minute)
 		if supervisorCluster {
 			dumpSvcNsEventsOnTestFailure(client, namespace)
 		}
@@ -163,8 +159,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 			9	Delete the SCs created in step 2
 			10	Deleted the SPBM polices created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-block-vanilla-parallelized][csi-guest][csi-supervisor]"+
-		"[csi-wcp-vsan-direct] Verify Thin, EZT, LZT volume creation via SPBM policies", func() {
+	ginkgo.It("[ef-svc-volallowcation][csi-block-vanilla][csi-block-vanilla-parallelized][csi-guest][csi-supervisor]"+
+		"[csi-wcp-vsan-direct][ef-vks-thickthin][cf-vanilla-block] Verify Thin, EZT, LZT volume creation via SPBM "+
+		"policies", ginkgo.Label(p0, vanilla, block, thickThin, wcp, tkg, windows, stable, vsanDirect, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -419,8 +416,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		9. Delete the SCs created in step 2
 		10. Deleted the SPBM policies created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-guest][csi-supervisor]"+
-		"[csi-wcp-vsan-direct] Fill LZT/EZT volume", func() {
+	ginkgo.It("[ef-svc-volallowcation][csi-block-vanilla][csi-guest][csi-supervisor][csi-wcp-vsan-direct]"+
+		"[pq-vanilla-block][pq-vks-thickthin] Fill LZT/EZT volume", ginkgo.Label(p0, vanilla, block,
+		thickThin, wcp, tkg, windows, stable, vsanDirect, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		sharedvmfsURL, vsanDDatstoreURL := "", ""
@@ -673,9 +671,10 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		7. Delete the SC created in step 2
 		8. Deleted the SPBM policy created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-guest][csi-supervisor]"+
-		"[csi-wcp-vsan-direct] Verify large EZT volume creation which takes "+
-		"longer than vpxd timeout", func() {
+	ginkgo.It("[pq-svc-volallowcation-neg][csi-block-vanilla][csi-guest][csi-supervisor][csi-wcp-vsan-direct]"+
+		"[pq-vanilla-block][pq-vks-thickthin] Verify large EZT volume creation which takes longer than "+
+		"vpxd timeout", ginkgo.Label(p0, vanilla, block, thickThin, wcp, tkg, windows, stable, vsanDirect,
+		vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -700,7 +699,6 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		}
 
 		scParameters := make(map[string]string)
-
 		rand.New(rand.NewSource(time.Now().UnixNano()))
 		suffix := fmt.Sprintf("-%v-%v", time.Now().UnixNano(), rand.Intn(10000))
 		randomStr := strconv.Itoa(rand.Intn(10000))
@@ -882,9 +880,10 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		10	Delete the SC created in step 2
 		11	Deleted the SPBM policy created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-guest][csi-supervisor]"+
-		"[csi-wcp-vsan-direct] Verify EZT online volume expansion to a large size "+
-		"which takes longer than vpxd timeout", func() {
+	ginkgo.It("[pq-svc-volallowcation-neg][csi-block-vanilla][csi-guest][csi-supervisor][csi-wcp-vsan-direct]"+
+		"[pq-vanilla-block][pq-vks-thickthin] Verify EZT online volume expansion to a large size which takes "+
+		"longer than vpxd timeout", ginkgo.Label(p0, vanilla, block, thickThin, wcp, windows, tkg, stable,
+		vsanDirect, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1159,9 +1158,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		11	Delete the SC created in step 2
 		12	Deleted the SPBM policy created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-guest][csi-supervisor]"+
-		"[csi-wcp-vsan-direct] Verify online LZT/EZT volume expansion of "+
-		"attached volumes with IO", func() {
+	ginkgo.It("[ef-vanilla-block][ef-svc-volallowcation][csi-block-vanilla][csi-guest][csi-supervisor]"+
+		"[ef-vks-thickthin][csi-wcp-vsan-direct] Verify online LZT/EZT volume expansion of attached volumes with "+
+		"IO", ginkgo.Label(p0, vanilla, block, thickThin, wcp, tkg, stable, vsanDirect, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1383,7 +1382,7 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		var op []byte
 		if !windowsEnv {
 			rand.New(rand.NewSource(time.Now().Unix()))
-			testdataFile := fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
+			testdataFile = fmt.Sprintf("/tmp/testdata_%v_%v", time.Now().Unix(), rand.Intn(1000))
 			ginkgo.By(fmt.Sprintf("Creating a 100mb test data file %v", testdataFile))
 			op, err = exec.Command("dd", "if=/dev/urandom", fmt.Sprintf("of=%v", testdataFile),
 				"bs=1M", "count=100").Output()
@@ -1483,8 +1482,10 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		9	Delete pod1
 		10	Delete pvc, sc and SPBM policy created for this test
 	*/
-	ginkgo.It("[csi-supervisor][csi-block-vanilla][csi-block-vanilla-parallelized][csi-guest]"+
-		"[csi-wcp-vsan-direct] Relocate volume to another same type datastore", func() {
+	ginkgo.It("[ef-vanilla-block][ef-svc-volallowcation][cflater-wcp][csi-supervisor][csi-block-vanilla]"+
+		"[csi-block-vanilla-parallelized][csi-guest][csi-wcp-vsan-direct][pq-vks-thickthin] Relocate volume to "+
+		"another same type datastore", ginkgo.Label(p0, vanilla, block, thickThin, wcp, tkg, stable, vsanDirect,
+		vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1803,8 +1804,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		12.	Delete the SC created in step 2
 		13.	Deleted the SPBM policy created in step 1
 	*/
-	ginkgo.It("[csi-guest][csi-supervisor][csi-block-vanilla]"+
-		"[csi-wcp-vsan-direct] Verify EZT offline volume expansion", func() {
+	ginkgo.It("[ef-vanilla-block][ef-svc-volallowcation][csi-guest][csi-supervisor][csi-block-vanilla]"+
+		"[csi-wcp-vsan-direct][ef-vks-thickthin] Verify EZT offline volume expansion", ginkgo.Label(p0, vanilla, block,
+		thickThin, wcp, tkg, windows, stable, vsanDirect, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -2139,7 +2141,8 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		14	Delete the SCs created in step 2
 		15	Delete the SPBM policies created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla] verify volume allocation change post snapshot deletion works fine", func() {
+	ginkgo.It("[ef-vanilla-block][csi-block-vanilla] verify volume allocation change post snapshot deletion works"+
+		" fine", ginkgo.Label(p0, vanilla, block, thickThin, stable, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -2377,12 +2380,17 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 		11	Delete the SCs created in step 2
 		12	Deleted the SPBM policies created in step 1
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-guest][csi-supervisor] Verify expansion during Thin -> EZT, LZT -> EZT"+
-		" conversion (should take >vpxd task timeout)", func() {
+	ginkgo.It("[pq-svc-volallowcation-neg][csi-block-vanilla][csi-guest][csi-supervisor][pq-vanilla-block]"+
+		"[pq-vks-thickthin] Verify expansion during Thin -> EZT, LZT -> EZT conversion (should take >vpxd "+
+		"task timeout)", ginkgo.Label(p0, vanilla, block, thickThin, wcp, tkg, windows, stable, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		setVpxdTaskTimeout(ctx, vpxdReducedTaskTimeoutSecsInt)
+		defer func() {
+			setVpxdTaskTimeout(ctx, 0)
+		}()
 		sharedvmfsURL := os.Getenv(envSharedVMFSDatastoreURL)
 		if sharedvmfsURL == "" {
 			ginkgo.Skip(fmt.Sprintf("Env %v is missing", envSharedVMFSDatastoreURL))
@@ -2625,7 +2633,7 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 			17. Delete SPBM policies created
 	*/
 	ginkgo.It("[csi-wcp-vsan-direct] Relocate from vmfs datastore to vsand datastore "+
-		"and vice versa", func() {
+		"and vice versa", ginkgo.Label(p0, wcp, thickThin, stable, vsanDirect, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -2842,8 +2850,8 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 			11. Verify online volume conversion is successful.
 			12. Delete all the objects created during the test.
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-block-vanilla-parallelized]"+
-		" Start attached volume's conversion and relocation in parallel", func() {
+	ginkgo.It("[ef-vanilla-block][csi-block-vanilla][csi-block-vanilla-parallelized] Start attached volume's "+
+		"conversion and relocation in parallel", ginkgo.Label(p0, vanilla, block, thickThin, stable, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -3067,9 +3075,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 			11. Verify online volume conversion is successful.
 			12. Delete all the objects created during the test.
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-block-vanilla-parallelized]"+
-		" Start attached volume's conversion and relocation of volume"+
-		" with updation of its metadata in parallel", func() {
+	ginkgo.It("[ef-vanilla-block][csi-block-vanilla][csi-block-vanilla-parallelized] Start attached volume's "+
+		"conversion and relocation of volume with updation of its metadata in parallel", ginkgo.Label(p0, vanilla,
+		block, thickThin, stable, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -3312,9 +3320,9 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 			11. Verify online volume conversion is successful.
 			12. Delete all the objects created during the test.
 	*/
-	ginkgo.It("[csi-block-vanilla][csi-block-vanilla-parallelized]"+
+	ginkgo.It("[csi-block-vanilla][csi-block-vanilla-parallelized][pq-vanilla-block]"+
 		" Start attached volume's conversion while creation of snapshot and"+
-		" relocation of volume in parallel", func() {
+		" relocation of volume in parallel", ginkgo.Label(p0, vanilla, block, thickThin, stable, vc70), func() {
 
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -3570,379 +3578,3 @@ var _ = ginkgo.Describe("[vol-allocation] Policy driven volume space allocation 
 	})
 
 })
-
-// fillVolumesInPods fills the volumes in pods after leaving 100m for FS metadata
-func fillVolumeInPods(f *framework.Framework, client clientset.Interface, pods []*v1.Pod) {
-	for _, pod := range pods {
-		size, err := getFileSystemSizeForOsType(f, client, pod)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		writeRandomDataOnPod(pod, size-100) // leaving 100m for FS metadata
-	}
-}
-
-// writeRandomDataOnPod runs dd on the given pod and write count in Mib
-func writeRandomDataOnPod(pod *v1.Pod, count int64) {
-	var cmd []string
-	if windowsEnv {
-		cmd = []string{
-			"exec",
-			pod.Name,
-			"--namespace=" + pod.Namespace,
-			"powershell.exe",
-			"$out = New-Object byte[] 536870912; (New-Object Random).NextBytes($out); " +
-				"[System.IO.File]::WriteAllBytes('/mnt/volume1/testdata2.txt', $out)",
-		}
-	} else {
-		cmd = []string{"--namespace=" + pod.Namespace, "-c", pod.Spec.Containers[0].Name, "exec", pod.Name, "--",
-			"/bin/sh", "-c", "dd if=/dev/urandom of=/mnt/volume1/f1 bs=1M count=" + strconv.FormatInt(count, 10)}
-	}
-	_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmd...)
-}
-
-// setVpxdTaskTimeout sets vpxd task timeout to given number of seconds
-// Following cases will be handled here
-//  1. Timeout is not set, and we want to set it
-//  2. Timeout is set we want to clear it
-//  3. different timeout is set, we want to change it
-//  4. timeout is not set/set to a number, and that is what we want
-//
-// default task timeout is 40 mins
-// if taskTimeout param is 0 we will remove the timeout entry in cfg file and default timeout will kick-in
-func setVpxdTaskTimeout(ctx context.Context, taskTimeout int) {
-	var err error
-	timeoutMatches := false
-	diffTimeoutExists := false
-
-	// Read hosts sshd port number
-	ip, portNum, err := getPortNumAndIP(vcAddress)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	addr := ip + ":" + portNum
-
-	grepCmd := "grep '<timeout>' /etc/vmware-vpx/vpxd.cfg"
-	framework.Logf("Invoking command '%v' on vCenter host %v", grepCmd, ip)
-	result, err := fssh.SSH(ctx, grepCmd, addr, framework.TestContext.Provider)
-	if err != nil {
-		fssh.LogResult(result)
-		err = fmt.Errorf("couldn't execute command: %s on vCenter host %v: %v", grepCmd, addr, err)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}
-
-	// cmd to add the timeout value to the file
-	sshCmd := fmt.Sprintf(
-		"sed -i 's/<task>/<task>\\n    <timeout>%v<\\/timeout>/' /etc/vmware-vpx/vpxd.cfg", taskTimeout)
-	if result.Code == 0 {
-		grepCmd2 := fmt.Sprintf("grep '<timeout>%v</timeout>' /etc/vmware-vpx/vpxd.cfg", taskTimeout)
-		framework.Logf("Invoking command '%v' on vCenter host %v", grepCmd2, addr)
-		result2, err := fssh.SSH(ctx, grepCmd2, addr, framework.TestContext.Provider)
-		if err != nil {
-			fssh.LogResult(result)
-			err = fmt.Errorf("couldn't execute command: %s on vCenter host %v: %v", grepCmd2, addr, err)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-		}
-		if result2.Code == 0 {
-			timeoutMatches = true
-		} else {
-			diffTimeoutExists = true
-		}
-	} else {
-		if taskTimeout == 0 {
-			timeoutMatches = true
-		}
-	}
-	if timeoutMatches {
-		framework.Logf("vpxd timeout already matches, nothing to do ...")
-		return
-	}
-	if diffTimeoutExists {
-		sshCmd = fmt.Sprintf(
-			"sed -i 's/<timeout>[0-9]*<\\/timeout>/<timeout>%v<\\/timeout>/' /etc/vmware-vpx/vpxd.cfg", taskTimeout)
-	}
-	if taskTimeout == 0 {
-		sshCmd = "sed -i '/<timeout>[0-9]*<\\/timeout>/d' /etc/vmware-vpx/vpxd.cfg"
-	}
-
-	framework.Logf("Invoking command '%v' on vCenter host %v", sshCmd, addr)
-	result, err = fssh.SSH(ctx, sshCmd, addr, framework.TestContext.Provider)
-	if err != nil || result.Code != 0 {
-		fssh.LogResult(result)
-		err = fmt.Errorf("couldn't execute command: %s on vCenter host %v: %v", sshCmd, addr, err)
-		gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	}
-
-	// restart vpxd after changing the timeout
-	err = invokeVCenterServiceControl(ctx, restartOperation, vpxdServiceName, vcAddress)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	err = waitVCenterServiceToBeInState(ctx, vpxdServiceName, vcAddress, svcRunningMessage)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-
-	connect(ctx, &e2eVSphere)
-
-	govmomiClient := newClient(ctx, &e2eVSphere)
-	pc = newPbmClient(ctx, govmomiClient)
-}
-
-// writeKnownData2PodInParallel writes known 1mb data to a file in given pod's volume until 200mb is left in the volume
-// in parallel
-func writeKnownData2PodInParallel(
-	f *framework.Framework, client clientset.Interface, pod *v1.Pod, testdataFile string, wg *sync.WaitGroup,
-	size ...int64) {
-
-	defer ginkgo.GinkgoRecover()
-	defer wg.Done()
-	writeKnownData2Pod(f, client, pod, testdataFile, size...)
-}
-
-// writeKnownData2Pod writes known 1mb data to a file in given pod's volume until 200mb is left in the volume
-func writeKnownData2Pod(f *framework.Framework, client clientset.Interface, pod *v1.Pod, testdataFile string,
-	size ...int64) {
-	var svcMasterIp string
-	var sshWcpConfig *ssh.ClientConfig
-	if wcpVsanDirectCluster {
-		svcMasterIp = GetAndExpectStringEnvVar(svcMasterIP)
-		svcMasterPwd := GetAndExpectStringEnvVar(svcMasterPassword)
-		framework.Logf("svc master ip: %s", svcMasterIp)
-		sshWcpConfig = &ssh.ClientConfig{
-			User: rootUser,
-			Auth: []ssh.AuthMethod{
-				ssh.Password(svcMasterPwd),
-			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		}
-
-		_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp", testdataFile, fmt.Sprintf(
-			"%v/%v:data0/testdata", pod.Namespace, pod.Name))
-	} else {
-		if windowsEnv {
-			cmdTestData := []string{
-				"exec",
-				pod.Name,
-				"--namespace=" + pod.Namespace,
-				"powershell.exe",
-				"$out = New-Object byte[] 104857600; (New-Object Random).NextBytes($out); " +
-					"[System.IO.File]::WriteAllBytes('/mnt/volume1/testdata2.txt', $out)",
-			}
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmdTestData...)
-		} else {
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp", testdataFile, fmt.Sprintf(
-				"%v/%v:mnt/volume1/testdata", pod.Namespace, pod.Name))
-		}
-	}
-
-	var cmd []string
-	fsSize, err := getFileSystemSizeForOsType(f, client, pod)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	iosize := fsSize - spareSpace
-	if len(size) != 0 {
-		iosize = size[0]
-	}
-	iosize = iosize / 100 * 100 // will keep it as multiple of 100
-	framework.Logf("Total IO size: %v", iosize)
-	for i := int64(0); i < iosize; i = i + 100 {
-		seek := fmt.Sprintf("%v", i)
-		if wcpVsanDirectCluster {
-			command := fmt.Sprintf("kubectl exec %s -n %s -- /bin/sh -c "+
-				" dd if=/data0/testdata of=/mnt/file1 bs=1M count=100 seek=%s", pod.Name, pod.Namespace, seek)
-			writeDataOnPodInSupervisor(sshWcpConfig, svcMasterIp, command)
-		} else {
-			var cmd []string
-			if windowsEnv {
-				cmd = []string{
-					"exec",
-					pod.Name,
-					"--namespace=" + pod.Namespace,
-					"powershell.exe -Command",
-					"$inputFile = '/mnt/volume1/testdata2.txt'; " +
-						"$outputFile = '/mnt/volume1/testdata3.txt'; " +
-						"$blockSize = 1MB; " +
-						"$count = 100; " +
-						"$seek =" + seek +
-						"$fs = [System.IO.File]::Open($outputFile, 'OpenOrCreate', 'Write'); " +
-						"$fs.Seek($seek * $blockSize, [System.IO.SeekOrigin]::Begin) | Out-Null; " +
-						"[byte[]]$buffer = New-Object byte[] $blockSize; " +
-						"$input = [System.IO.File]::Open($inputFile, 'Open', 'Read'); " +
-						"1..$count | ForEach-Object { " +
-						"$bytesRead = $input.Read($buffer, 0, $blockSize); " +
-						"if ($bytesRead -le 0) { break } " +
-						"$fs.Write($buffer, 0, $bytesRead) }; " +
-						"$input.Close(); " +
-						"$fs.Close()",
-				}
-			} else {
-				cmd = []string{"--namespace=" + pod.Namespace, "-c", pod.Spec.Containers[0].Name, "exec", pod.Name, "--",
-					"/bin/sh", "-c", "dd if=/mnt/volume1/testdata of=/mnt/volume1/f1 bs=1M count=100 seek=" + seek}
-			}
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmd...)
-		}
-
-	}
-
-	if wcpVsanDirectCluster {
-		cmd = []string{"--namespace=" + pod.Namespace, "-c", pod.Spec.Containers[0].Name, "exec", pod.Name, "--",
-			"/bin/sh", "-c", "rm /data0/testdata"}
-	} else {
-		if windowsEnv {
-			cmd = []string{
-				"exec",
-				pod.Name,
-				"--namespace=" + pod.Namespace,
-				"powershell.exe",
-				"Remove-Item -Path '/mnt/volume1/testdata2.txt' " +
-					"-Force",
-			}
-		} else {
-			cmd = []string{"--namespace=" + pod.Namespace, "-c", pod.Spec.Containers[0].Name, "exec", pod.Name, "--",
-				"/bin/sh", "-c", "rm /mnt/volume1/testdata"}
-		}
-	}
-	_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmd...)
-
-}
-
-// verifyKnownDataInPod verify known data on a file in given pod's volume in 100mb loop
-func verifyKnownDataInPod(f *framework.Framework, client clientset.Interface, pod *v1.Pod, testdataFile string,
-	size ...int64) {
-	var svcMasterIp string
-	var sshWcpConfig *ssh.ClientConfig
-	if wcpVsanDirectCluster {
-		svcMasterIp = GetAndExpectStringEnvVar(svcMasterIP)
-		svcMasterPwd := GetAndExpectStringEnvVar(svcMasterPassword)
-		framework.Logf("svc master ip: %s", svcMasterIp)
-		sshWcpConfig = &ssh.ClientConfig{
-			User: rootUser,
-			Auth: []ssh.AuthMethod{
-				ssh.Password(svcMasterPwd),
-			},
-			HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		}
-
-		_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp", testdataFile, fmt.Sprintf(
-			"%v/%v:data0/testdata", pod.Namespace, pod.Name))
-	} else {
-		if windowsEnv {
-			cmdTestData := []string{
-				"exec",
-				pod.Name,
-				"--namespace=" + pod.Namespace,
-				"powershell.exe",
-				"Copy-Item -Path '/mnt/volume1/testdata2.txt' " +
-					"-Destination '/mnt/volume1/testdata2_pod.txt'",
-			}
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmdTestData...)
-		} else {
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp", testdataFile, fmt.Sprintf(
-				"%v/%v:mnt/volume1/testdata", pod.Namespace, pod.Name))
-		}
-	}
-	fsSize, err := getFileSystemSizeForOsType(f, client, pod)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	iosize := fsSize - spareSpace
-	if len(size) != 0 {
-		iosize = size[0]
-	}
-	iosize = iosize / 100 * 100 // will keep it as multiple of 100
-	framework.Logf("Total IO size: %v", iosize)
-	for i := int64(0); i < iosize; i = i + 100 {
-		skip := fmt.Sprintf("%v", i)
-		var cmd []string
-		if wcpVsanDirectCluster {
-			command := fmt.Sprintf("kubectl exec %s -n %s -- /bin/sh -c "+
-				" dd if=/mnt/file1 of=/data0/testdata bs=1M count=100 skip=%s", pod.Name, pod.Namespace, skip)
-			writeDataOnPodInSupervisor(sshWcpConfig, svcMasterIp, command)
-		} else {
-			if windowsEnv {
-				cmd = []string{
-					"exec",
-					pod.Name,
-					"--namespace=" + pod.Namespace,
-					"powershell.exe -Command",
-					"$inputFile = '/mnt/volume1/testdata3.txt'; " +
-						"$outputFile = '/mnt/volume1/testdata2.txt'; " +
-						"$blockSize = 1MB; " +
-						"$count = 100; " +
-						"$seek =10" +
-						"$fs = [System.IO.File]::Open($outputFile, 'OpenOrCreate', 'Write'); " +
-						"$fs.Seek($seek * $blockSize, [System.IO.SeekOrigin]::Begin) | Out-Null; " +
-						"[byte[]]$buffer = New-Object byte[] $blockSize; " +
-						"$input = [System.IO.File]::Open($inputFile, 'Open', 'Read'); " +
-						"1..$count | ForEach-Object { " +
-						"$bytesRead = $input.Read($buffer, 0, $blockSize); " +
-						"if ($bytesRead -le 0) { break } " +
-						"$fs.Write($buffer, 0, $bytesRead) }; " +
-						"$input.Close(); " +
-						"$fs.Close()",
-				}
-			} else {
-				cmd = []string{"--namespace=" + pod.Namespace, "-c", pod.Spec.Containers[0].Name, "exec", pod.Name, "--",
-					"/bin/sh", "-c", "dd if=/mnt/volume1/f1 of=/mnt/volume1/testdata bs=1M count=100 skip=" + skip}
-			}
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmd...)
-		}
-
-		if wcpVsanDirectCluster {
-			_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp",
-				fmt.Sprintf("%v/%v:/data0/testdata", pod.Namespace, pod.Name),
-				testdataFile+pod.Name)
-		} else {
-			if windowsEnv {
-				cmdTestData := []string{
-					"exec",
-					pod.Name,
-					"--namespace=" + pod.Namespace,
-					"powershell.exe",
-					"Copy-Item -Path '/mnt/volume1/testdata2.txt' " +
-						"-Destination '/mnt/volume1/testdata2_pod.txt'",
-				}
-				_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, cmdTestData...)
-			} else {
-				_ = e2ekubectl.RunKubectlOrDie(pod.Namespace, "cp",
-					fmt.Sprintf("%v/%v:/mnt/volume1/testdata", pod.Namespace, pod.Name),
-					testdataFile+pod.Name)
-			}
-		}
-
-		framework.Logf("Running diff with source file and file from pod %v for 100M starting %vM", pod.Name, skip)
-		if windowsEnv {
-			cmdTestData := []string{
-				"exec",
-				pod.Name,
-				"--namespace=" + pod.Namespace,
-				"powershell.exe",
-				"((Get-FileHash '/mnt/volume1/testdata2.txt' -Algorithm SHA256).Hash -eq " +
-					"(Get-FileHash '/mnt/volume1/testdata2_pod.txt' -Algorithm SHA256).Hash)",
-			}
-			diffNotFound := strings.TrimSpace(e2ekubectl.RunKubectlOrDie(pod.Namespace, cmdTestData...))
-			gomega.Expect(diffNotFound).To(gomega.Equal("True"))
-		} else {
-			op, err := exec.Command("diff", testdataFile, testdataFile+pod.Name).Output()
-			framework.Logf("diff: %v", op)
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			gomega.Expect(len(op)).To(gomega.BeZero())
-		}
-	}
-}
-
-func reconfigPolicyParallel(ctx context.Context, volID string, policyId string, wg *sync.WaitGroup) {
-	defer ginkgo.GinkgoRecover()
-	defer wg.Done()
-	err := e2eVSphere.reconfigPolicy(ctx, volID, policyId)
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-}
-
-// writeDataOnPodInSupervisor writes data on supervisor pod by executing commands
-// on svc master IP
-func writeDataOnPodInSupervisor(sshClientConfig *ssh.ClientConfig, svcMasterIP string,
-	cmd string) {
-
-	res, err := sshExec(sshClientConfig, svcMasterIP,
-		cmd)
-	if err != nil || res.Code != 0 {
-		fssh.LogResult(res)
-		framework.Logf("contains: %v", strings.Contains(res.Stderr, "copied"))
-		if !(strings.Contains(res.Stderr, "copied") || strings.Contains(res.Stderr, "Error from server: \n")) {
-			framework.Failf("couldn't execute command: %s on host: %v , error: %s",
-				cmd, svcMasterIP, err)
-		}
-
-	}
-
-}

@@ -2,11 +2,8 @@ package vsphere
 
 import (
 	"context"
-	"crypto/tls"
-	"encoding/pem"
 	"errors"
 	"fmt"
-	"net/url"
 	"reflect"
 	"strconv"
 	"strings"
@@ -14,10 +11,6 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
-	"github.com/vmware/govmomi/sts"
-	"github.com/vmware/govmomi/vapi/rest"
-	"github.com/vmware/govmomi/vapi/tags"
-	"github.com/vmware/govmomi/vim25"
 	"github.com/vmware/govmomi/vim25/soap"
 	"github.com/vmware/govmomi/vim25/types"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
@@ -33,6 +26,9 @@ const (
 	// VSphere80u3Version is a 3 digit value to indicate the minimum vSphere
 	// version to ensure calling supported 8.0u3 APIs
 	VSphere80u3Version int = 803
+	// VSphere91VersionInt is a 3 digit value to indicate the minimum vSphere
+	// version to ensure calling supported 9.1.0 APIs
+	VSphere91VersionInt = 910
 )
 
 var (
@@ -97,7 +93,7 @@ func IsVimFaultNotFoundError(err error) bool {
 func IsCnsSnapshotCreatedFaultError(err error) bool {
 	isCnsSnapshotCreatedFaultError := false
 	if soap.IsVimFault(err) {
-		_, isCnsSnapshotCreatedFaultError = soap.ToVimFault(err).(cnstypes.CnsSnapshotCreatedFault)
+		_, isCnsSnapshotCreatedFaultError = soap.ToVimFault(err).(*cnstypes.CnsSnapshotCreatedFault)
 	}
 	return isCnsSnapshotCreatedFaultError
 }
@@ -106,7 +102,7 @@ func IsCnsSnapshotCreatedFaultError(err error) bool {
 func IsCnsSnapshotNotFoundError(err error) bool {
 	isCnsSnapshotNotFoundError := false
 	if soap.IsVimFault(err) {
-		_, isCnsSnapshotNotFoundError = soap.ToVimFault(err).(cnstypes.CnsSnapshotNotFoundFault)
+		_, isCnsSnapshotNotFoundError = soap.ToVimFault(err).(*cnstypes.CnsSnapshotNotFoundFault)
 	}
 	return isCnsSnapshotNotFoundError
 }
@@ -198,6 +194,12 @@ func GetVirtualCenterConfig(ctx context.Context, cfg *config.Config) (*VirtualCe
 		ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
 		MigrationDataStoreURL:       cfg.VirtualCenter[host].MigrationDataStoreURL,
 		FileVolumeActivated:         cfg.VirtualCenter[host].FileVolumeActivated,
+		VCSessionManagerURL:         cfg.VirtualCenter[host].VCSessionManagerURL,
+		VCSessionManagerToken:       cfg.VirtualCenter[host].VCSessionManagerToken,
+	}
+
+	if vcConfig.VCSessionManagerURL != "" {
+		log.Infof("Using Shared Session Manager: %s", vcConfig.VCSessionManagerURL)
 	}
 
 	log.Debugf("Setting the queryLimit = %v, ListVolumeThreshold = %v", vcConfig.QueryLimit, vcConfig.ListVolumeThreshold)
@@ -244,6 +246,8 @@ func GetVirtualCenterConfigs(ctx context.Context, cfg *config.Config) ([]*Virtua
 			QueryLimit:                  cfg.Global.QueryLimit,
 			ListVolumeThreshold:         cfg.Global.ListVolumeThreshold,
 			FileVolumeActivated:         cfg.VirtualCenter[vCenterIP].FileVolumeActivated,
+			VCSessionManagerURL:         cfg.VirtualCenter[vCenterIP].VCSessionManagerURL,
+			VCSessionManagerToken:       cfg.VirtualCenter[vCenterIP].VCSessionManagerToken,
 		}
 		if vcConfig.CAFile == "" {
 			vcConfig.CAFile = cfg.Global.CAFile
@@ -302,62 +306,6 @@ func CompareKubernetesMetadata(ctx context.Context, k8sMetaData *cnstypes.CnsKub
 		labelsMatch, spew.Sdump(GetLabelsMapFromKeyValue(k8sMetaData.Labels)),
 		spew.Sdump(GetLabelsMapFromKeyValue(cnsMetaData.Labels)))
 	return labelsMatch
-}
-
-// Signer decodes the certificate and private key and returns SAML token needed
-// for authentication.
-func signer(ctx context.Context, client *vim25.Client, username string, password string) (*sts.Signer, error) {
-	pemBlock, _ := pem.Decode([]byte(username))
-	if pemBlock == nil {
-		return nil, nil
-	}
-	certificate, err := tls.X509KeyPair([]byte(username), []byte(password))
-	if err != nil {
-		return nil, fmt.Errorf("failed to load X509 key pair. Error: %+v", err)
-	}
-	tokens, err := sts.NewClient(ctx, client)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create STS client. err: %+v", err)
-	}
-	req := sts.TokenRequest{
-		Certificate: &certificate,
-		Delegatable: true,
-	}
-	signer, err := tokens.Issue(ctx, req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to issue SAML token. err: %+v", err)
-	}
-	return signer, nil
-}
-
-// GetTagManager returns tagManager connected to given VirtualCenter.
-func GetTagManager(ctx context.Context, vc *VirtualCenter) (*tags.Manager, error) {
-	log := logger.GetLogger(ctx)
-	// Validate input.
-	if vc == nil || vc.Client == nil || vc.Client.Client == nil {
-		return nil, fmt.Errorf("vCenter not initialized")
-	}
-
-	restClient := rest.NewClient(vc.Client.Client)
-	signer, err := signer(ctx, vc.Client.Client, vc.Config.Username, vc.Config.Password)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create the Signer. Error: %v", err)
-	}
-	if signer == nil {
-		user := url.UserPassword(vc.Config.Username, vc.Config.Password)
-		err = restClient.Login(ctx, user)
-	} else {
-		err = restClient.LoginByToken(restClient.WithSigner(ctx, signer))
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to login for the rest client. Error: %v", err)
-	}
-	tagManager := tags.NewManager(restClient)
-	if tagManager == nil {
-		return nil, fmt.Errorf("failed to create a tagManager")
-	}
-	log.Infof("New tag manager with useragent '%s'", tagManager.UserAgent)
-	return tagManager, nil
 }
 
 // GetCandidateDatastoresInClusters gets the shared datastores and vSAN-direct
@@ -543,6 +491,29 @@ func IsvSphereVersion80U3orAbove(ctx context.Context, aboutInfo types.AboutInfo)
 		}
 	}
 	// For all other versions.
+	return false, nil
+}
+
+// IsvSphereVersion91orAbove checks if specified version is 9.1 or higher
+// The method takes aboutInfo{} as input which contains details about
+// VC version, build number and so on.
+// If the version is 9.1 higher, the method returns true, else returns false
+// along with appropriate errors during failure cases
+func IsvSphereVersion91orAbove(ctx context.Context, aboutInfo types.AboutInfo) (bool, error) {
+	log := logger.GetLogger(ctx)
+	items := strings.Split(aboutInfo.Version, ".")
+	version := strings.Join(items[:], "")
+	if len(version) >= 3 {
+		vSphereVersionInt, err := strconv.Atoi(version[0:3])
+		if err != nil {
+			return false, logger.LogNewErrorf(log, "error while converting version %q to integer, err %+v", version, err)
+		}
+		// Check if the current vSphere version is 9.1.0 or higher
+		if vSphereVersionInt >= VSphere91VersionInt {
+			return true, nil
+		}
+	}
+	// For all other versions
 	return false, nil
 }
 

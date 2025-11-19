@@ -31,7 +31,8 @@ import (
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 )
 
-var _ = ginkgo.Describe("[csi-guest] File Share on Non File Service enabled setups", func() {
+var _ = ginkgo.Describe("[csi-guest][ef-vks] [ef-vks-n1][ef-vks-n2]File Share on Non "+
+	"File Service enabled setups", func() {
 	f := framework.NewDefaultFramework("e2e-file-volumes")
 
 	var (
@@ -81,7 +82,8 @@ var _ = ginkgo.Describe("[csi-guest] File Share on Non File Service enabled setu
 		4. Verify the error message returned on PVC failure is correct
 		5. Delete PVC in GC
 	*/
-	ginkgo.It("Verify File share creation fails on non-file service enabled setup for TKG", func() {
+	ginkgo.It("Verify File share creation fails on non-file service enabled setup for TKG", ginkgo.Label(p2,
+		file, tkg, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		var storageclasspvc *storagev1.StorageClass

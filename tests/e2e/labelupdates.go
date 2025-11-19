@@ -26,24 +26,20 @@ import (
 
 	"github.com/onsi/ginkgo/v2"
 	"github.com/onsi/gomega"
+	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/object"
-
-	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
-	admissionapi "k8s.io/pod-security-admission/api"
-
 	clientset "k8s.io/client-go/kubernetes"
+	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
 	"k8s.io/kubernetes/test/e2e/framework"
 	fnodes "k8s.io/kubernetes/test/e2e/framework/node"
 	fpod "k8s.io/kubernetes/test/e2e/framework/pod"
 	fpv "k8s.io/kubernetes/test/e2e/framework/pv"
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
-
-	_ "k8s.io/client-go/plugin/pkg/client/auth/oidc"
+	admissionapi "k8s.io/pod-security-admission/api"
 )
 
 /*
@@ -124,8 +120,9 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		}
 	})
 
-	ginkgo.It("[csi-supervisor] verify labels are created in CNS after updating pvc "+
-		"and/or pv with new labels", ginkgo.Label(p1, block, vanilla, windows, wcp, core), func() {
+	ginkgo.It("[ef-vanilla-block][cf-wcp] [csi-supervisor] verify labels are created in CNS after updating pvc "+
+		"and/or pv with new labels", ginkgo.Label(p1, block, vanilla, windows, wcp,
+		core), func() {
 		ginkgo.By("Invoking test to verify labels creation")
 		var sc *storagev1.StorageClass
 		var pvc *v1.PersistentVolumeClaim
@@ -197,8 +194,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 
 	})
 
-	ginkgo.It("[csi-supervisor] verify labels are removed in CNS after removing them from pvc and/or "+
-		"pv", ginkgo.Label(p0, block, vanilla, windows, wcp, core), func() {
+	ginkgo.It("[ef-vanilla-block][csi-supervisor] verify labels are removed in CNS after removing them from pvc "+
+		"and/or pv", ginkgo.Label(p0, block, vanilla, windows, wcp, core), func() {
 		ginkgo.By("Invoking test to verify labels deletion")
 		labels := make(map[string]string)
 		labels[labelKey] = labelValue
@@ -285,7 +282,7 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 
 	})
 
-	ginkgo.It("[csi-supervisor] verify podname label is created/deleted when pod with cns volume is "+
+	ginkgo.It("[cf-vanilla-block][csi-supervisor] verify podname label is created/deleted when pod with cns volume is "+
 		"created/deleted.", ginkgo.Label(p0, block, vanilla, windows, wcp, core), func() {
 		ginkgo.By("Invoking test to verify pod name label updates")
 		var sc *storagev1.StorageClass
@@ -397,7 +394,7 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		8. Delete SC
 	*/
 
-	ginkgo.It("Verify PVC name is removed from PV entry on CNS after PVC is deleted "+
+	ginkgo.It("[ef-vanilla-block]Verify PVC name is removed from PV entry on CNS after PVC is deleted "+
 		"when Reclaim Policy is set to retain.", ginkgo.Label(p0, block, vanilla, windows, core), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
@@ -527,7 +524,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		13. Delete SC
 	*/
 
-	ginkgo.It("Verify label updates on statically provisioned volume.", ginkgo.Label(p0, block, vanilla, windows,
+	ginkgo.It("[cf-vanilla-block] Verify label updates on statically provisioned volume.", ginkgo.Label(p0,
+		block, vanilla, windows,
 		core), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
@@ -661,8 +659,8 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 		10. Delete PVCs
 		11. Delete SC
 	*/
-	ginkgo.It("[csi-supervisor] Verify label updates on PVC and PV attached to a stateful "+
-		"set.", ginkgo.Label(p0, block, vanilla, windows, wcp, core), func() {
+	ginkgo.It("[cf-wcp][cf-vanilla-block][csi-supervisor] Verify label updates on PVC and PV"+
+		" attached to a stateful set.", ginkgo.Label(p0, block, vanilla, windows, wcp, core), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		// decide which test setup is available to run
@@ -782,22 +780,3 @@ var _ bool = ginkgo.Describe("[csi-block-vanilla] [csi-block-vanilla-parallelize
 	})
 
 })
-
-func waitForPodNameLabelRemoval(ctx context.Context, volumeID string, podname string, namespace string) error {
-	err := wait.PollUntilContextTimeout(ctx, poll, pollTimeout, true,
-		func(ctx context.Context) (bool, error) {
-			_, err := e2eVSphere.getLabelsForCNSVolume(volumeID,
-				string(cnstypes.CnsKubernetesEntityTypePOD), podname, namespace)
-			if err != nil {
-				framework.Logf("pod name label is successfully removed")
-				return true, err
-			}
-			framework.Logf("waiting for pod name label to be removed by metadata-syncer for volume: %q", volumeID)
-			return false, nil
-		})
-	// unable to retrieve pod name label from vCenter
-	if err != nil {
-		return nil
-	}
-	return fmt.Errorf("pod name label is not removed from cns")
-}

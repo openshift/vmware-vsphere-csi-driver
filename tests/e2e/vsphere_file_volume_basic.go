@@ -71,8 +71,8 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		7. Delete PVC
 		8. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic provisioning with ReadWriteMany access mode, "+
-		"when no storage policy is offered", func() {
+	ginkgo.It("[cf-vanilla-file][csi-file-vanilla] verify dynamic provisioning with ReadWriteMany access mode, "+
+		"when no storage policy is offered", ginkgo.Label(p0, file, vanilla, vc70), func() {
 		testHelperForCreateFileVolumeWithNoDatastoreURLInSC(f, client, namespace, v1.ReadWriteMany)
 	})
 
@@ -89,7 +89,7 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		7. Delete PVC
 		8. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic provisioning with ReadWriteMany access mode with "+
+	ginkgo.It("[csi-file-vanilla] [ef-file-vanilla] verify dynamic provisioning with ReadWriteMany access mode with "+
 		"datastoreURL is set in storage class, when no storage policy is offered", func() {
 		datastoreURL := GetAndExpectStringEnvVar(envSharedDatastoreURL)
 		testHelperForCreateFileVolumeWithDatastoreURLInSC(f, client, namespace, v1.ReadWriteMany, datastoreURL, false)
@@ -105,8 +105,9 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		5. Delete PVC
 		6. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic provisioning with ReadWriteMany access mode with "+
-		"datastoreURL specified in storage class is a non-VSAN datastore, when no storage policy is offered", func() {
+	ginkgo.It("[csi-file-vanilla] [ef-file-vanilla]verify dynamic provisioning with ReadWriteMany access mode with "+
+		"datastoreURL specified in storage class is a non-VSAN datastore, when no storage policy is "+
+		"offered", ginkgo.Label(p1, negative, file, vanilla, vc70), func() {
 		nonVSANDatastoreURL := GetAndExpectStringEnvVar(envNonSharedStorageClassDatastoreURL)
 		testHelperForCreateFileVolumeWithoutValidVSANDatastoreURLInSC(
 			f, client, namespace, v1.ReadWriteMany, nonVSANDatastoreURL)
@@ -124,8 +125,8 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		7. Delete PVC
 		8. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic provisioning with ReadOnlyMany access mode, "+
-		"when no storage policy is offered", func() {
+	ginkgo.It("[cf-vanilla-file][csi-file-vanilla] verify dynamic provisioning with ReadOnlyMany access mode, "+
+		"when no storage policy is offered", ginkgo.Label(p0, file, vanilla, vc70), func() {
 		testHelperForCreateFileVolumeWithNoDatastoreURLInSC(f, client, namespace, v1.ReadOnlyMany)
 	})
 
@@ -139,8 +140,9 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		5. Delete PVC
 		6. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic volume provisioning fails for VSAN datastore "+
-		"specified in sc.datastoreUrl but doesn't have VSAN FS enabled", func() {
+	ginkgo.It("[csi-file-vanilla] [ef-file-vanilla]verify dynamic volume provisioning fails for VSAN datastore "+
+		"specified in sc.datastoreUrl but doesn't have VSAN FS enabled", ginkgo.Label(p1,
+		negative, file, vanilla, vc70), func() {
 		datastoreURL := os.Getenv(envFileServiceDisabledSharedDatastoreURL)
 		if datastoreURL == "" {
 			ginkgo.Skip("env variable FILE_SERVICE_DISABLED_SHARED_VSPHERE_DATASTORE_URL is not set, skip the test")
@@ -157,8 +159,8 @@ var _ = ginkgo.Describe("[csi-file-vanilla] Basic Testing", func() {
 		5. Delete PVC
 		6. Delete Storage class
 	*/
-	ginkgo.It("[csi-file-vanilla] verify dynamic volume provisioning fails for VSAN datastore "+
-		"in datacenter doesn't have VSAN FS enabled", func() {
+	ginkgo.It("[csi-file-vanilla] [ef-file-vanilla]verify dynamic volume provisioning fails for VSAN datastore "+
+		"in datacenter doesn't have VSAN FS enabled", ginkgo.Label(p1, negative, file, vanilla, vc70), func() {
 		testHelperForCreateFileVolumeFailWhenFileServiceIsDisabled(f, client, namespace, v1.ReadWriteMany, "")
 	})
 

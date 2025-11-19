@@ -27,7 +27,8 @@ import (
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
 	cnstypes "github.com/vmware/govmomi/cns/types"
-	"github.com/vmware/govmomi/simulator"
+	"github.com/vmware/govmomi/find"
+	"github.com/vmware/govmomi/vim25/mo"
 	vimtypes "github.com/vmware/govmomi/vim25/types"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -40,6 +41,7 @@ import (
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/unittestcommon"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	csitypes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/types"
 	k8s "sigs.k8s.io/vsphere-csi-driver/v3/pkg/kubernetes"
 )
@@ -123,7 +125,7 @@ func TestSyncerWorkflows(t *testing.T) {
 	configInfo := &cnsconfig.ConfigurationInfo{}
 	configInfo.Cfg = csiConfig
 
-	virtualCenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, configInfo, false)
+	virtualCenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterConfig(ctx, cnsVCenterConfig, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,9 +155,12 @@ func TestSyncerWorkflows(t *testing.T) {
 	}
 
 	// Initialize metadata syncer object.
-	metadataSyncer = &metadataSyncInformer{}
+	metadataSyncer = &metadataSyncInformer{
+		volumeManagers: make(map[string]cnsvolumes.Manager),
+	}
 	metadataSyncer.configInfo = configInfo
 	metadataSyncer.volumeManager = volumeManager
+	metadataSyncer.volumeManagers[virtualCenter.Config.Host] = volumeManager
 	metadataSyncer.host = virtualCenter.Config.Host
 	volumeOperationsLock = make(map[string]*sync.Mutex)
 	volumeOperationsLock[metadataSyncer.host] = &sync.Mutex{}
@@ -185,7 +190,16 @@ func TestSyncerWorkflows(t *testing.T) {
 	if v := os.Getenv("VSPHERE_DATASTORE_URL"); v != "" {
 		sharedDatastore = v
 	} else {
-		sharedDatastore = simulator.Map.Any("Datastore").(*simulator.Datastore).Info.GetDatastoreInfo().Url
+		datastores, err := find.NewFinder(virtualCenter.Client.Client).DatastoreList(ctx, "*")
+		if err != nil {
+			t.Fatalf("failed to get datastores. Err: %v", err)
+		}
+		var ds mo.Datastore
+		err = virtualCenter.Client.RetrieveOne(ctx, datastores[0].Reference(), []string{"info"}, &ds)
+		if err != nil {
+			t.Fatalf("failed to get datastore info. Err: %v", err)
+		}
+		sharedDatastore = ds.Info.GetDatastoreInfo().Url
 	}
 	dc, err = virtualCenter.GetDatacenters(ctx)
 	if err != nil || len(dc) == 0 {
@@ -203,6 +217,7 @@ func TestSyncerWorkflows(t *testing.T) {
 	dsList = append(dsList, datastoreInfoObj.Datastore.Reference())
 	runTestMetadataSyncInformer(t)
 	runTestFullSyncWorkflows(t)
+	runTestCsiFullSync_WorkloadCluster(t)
 	t.Log("TestSyncerWorkflows: end")
 }
 
@@ -268,7 +283,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	}
 
 	// Verify if volume is created.
-	queryResult, err := virtualCenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +310,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	pvUpdated(oldPv, newPv, metadataSyncer)
 
 	// Verify pv label of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PV, newPv.Name, testPVLabelValue); err != nil {
@@ -326,7 +341,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	pvUpdated(oldPv, newPv, metadataSyncer)
 
 	// Verify pv label of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PV, newPv.Name, testPVLabelValue); err != nil {
@@ -352,7 +367,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	pvcUpdated(oldPvc, newPvc, metadataSyncer)
 
 	// Verify pvc label of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PVC, newPvc.Name, testPVCLabelValue); err != nil {
@@ -374,7 +389,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	podUpdated(oldPod, newPod, metadataSyncer)
 
 	// Verify pod label of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, POD, newPod.Name, ""); err != nil {
@@ -383,7 +398,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 
 	// Test podDeleted workflow on VC.
 	podDeleted(newPod, metadataSyncer)
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyDeleteOperation(queryResult, volumeInfo.VolumeID.Id, POD); err != nil {
@@ -393,7 +408,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 	// Test pvcDelete workflow.
 	waitForListerSync()
 	pvcDeleted(newPvc, metadataSyncer)
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyDeleteOperation(queryResult, volumeInfo.VolumeID.Id, PVC); err != nil {
@@ -402,7 +417,7 @@ func runTestMetadataSyncInformer(t *testing.T) {
 
 	// Test pvDelete workflow.
 	pvDeleted(newPv, metadataSyncer)
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyDeleteOperation(queryResult, volumeInfo.VolumeID.Id, PV); err != nil {
@@ -623,7 +638,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	}
 
 	// Verify if volume is created.
-	queryResult, err := virtualCenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +661,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	}
 
 	// Verify if volume has been deleted from cache.
-	queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -696,7 +711,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	}
 
 	// Verify pv label of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PV, pv.Name, testPVLabelValue); err != nil {
@@ -725,7 +740,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	}
 	// Verify pv label value has been updated in CNS cache.
 
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PV, pv.Name, newTestPVLabelValue); err != nil {
@@ -748,7 +763,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 
 	// Verify pvc label value has been updated in CNS cache.
 
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, PVC, pvc.Name, newTestPVCLabelValue); err != nil {
@@ -770,7 +785,7 @@ func runTestFullSyncWorkflows(t *testing.T) {
 	}
 
 	// Verify Pod metadata of volume matches that of updated metadata.
-	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, queryFilter); err != nil {
+	if queryResult, err = virtualCenter.CnsClient.QueryVolume(ctx, &queryFilter); err != nil {
 		t.Fatal(err)
 	}
 	if err = verifyUpdateOperation(queryResult, volumeInfo.VolumeID.Id, POD, pod.Name, ""); err != nil {
@@ -977,4 +992,48 @@ func TestGetVCForTopologySegments(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCsiFullSync_WorkloadCluster tests that CsiFullSync works correctly for WORKLOAD clusters
+// This test runs as a subtest within TestSyncerWorkflows to ensure proper initialization
+func runTestCsiFullSync_WorkloadCluster(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initialize commonco.ContainerOrchestratorUtility for WORKLOAD cluster testing
+	// This is required for CsiFullSync to work properly with WORKLOAD clusters
+	fakeCommonCO, err := unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
+	if err != nil {
+		t.Fatalf("Failed to get fake CO interface: %v", err)
+	}
+	// Store the original value to restore later
+	originalCO := commonco.ContainerOrchestratorUtility
+	commonco.ContainerOrchestratorUtility = fakeCommonCO
+	defer func() {
+		commonco.ContainerOrchestratorUtility = originalCO
+	}()
+
+	// Create a WORKLOAD cluster metadataSyncer (note: volumeManagers map is NOT populated)
+	// This simulates the real WORKLOAD cluster setup where only volumeManager is set
+	workloadMetadataSyncer := &metadataSyncInformer{
+		clusterFlavor:     cnstypes.CnsClusterFlavorWorkload,
+		volumeManager:     volumeManager, // Use the initialized global volumeManager
+		host:              virtualCenter.Config.Host,
+		configInfo:        metadataSyncer.configInfo,        // Use the global metadataSyncer's configInfo
+		coCommonInterface: metadataSyncer.coCommonInterface, // Use the global metadataSyncer's coCommonInterface
+		// Copy the Kubernetes listers from the global metadataSyncer
+		pvLister:  metadataSyncer.pvLister,
+		pvcLister: metadataSyncer.pvcLister,
+		podLister: metadataSyncer.podLister,
+		// volumeManagers map is intentionally NOT populated to simulate real WORKLOAD cluster
+	}
+
+	// Test that CsiFullSync works for WORKLOAD cluster - this is the high-level test
+	// that verifies the entire full sync flow doesn't fail due to the regression
+	err = CsiFullSync(ctx, workloadMetadataSyncer, virtualCenter.Config.Host)
+	if err != nil {
+		t.Errorf("CsiFullSync failed for WORKLOAD cluster: %v", err)
+	}
+
+	t.Logf("CsiFullSync completed successfully for WORKLOAD cluster")
 }

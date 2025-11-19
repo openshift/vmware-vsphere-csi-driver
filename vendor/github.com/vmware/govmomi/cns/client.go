@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2019 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package cns
 
@@ -169,7 +157,7 @@ func (c *Client) DetachVolume(ctx context.Context, detachSpecList []cnstypes.Cns
 }
 
 // QueryVolume calls the CNS QueryVolume API.
-func (c *Client) QueryVolume(ctx context.Context, queryFilter cnstypes.CnsQueryFilter) (*cnstypes.CnsQueryResult, error) {
+func (c *Client) QueryVolume(ctx context.Context, queryFilter cnstypes.BaseCnsQueryFilter) (*cnstypes.CnsQueryResult, error) {
 	req := cnstypes.CnsQueryVolume{
 		This:   CnsVolumeManagerInstance,
 		Filter: queryFilter,
@@ -314,6 +302,33 @@ func (c *Client) SyncDatastore(ctx context.Context, dsURL string, fullSync bool)
 		FullSync:     &fullSync,
 	}
 	res, err := methods.CnsSyncDatastore(ctx, c, &req)
+	if err != nil {
+		return nil, err
+	}
+	return object.NewTask(c.vim25Client, res.Returnval), nil
+}
+
+// SyncVolume calls the CnsSyncVolume API
+func (c *Client) SyncVolume(ctx context.Context, syncSpecs []cnstypes.CnsSyncVolumeSpec) (*object.Task, error) {
+	req := cnstypes.CnsSyncVolume{
+		This:      CnsVolumeManagerInstance,
+		SyncSpecs: syncSpecs,
+	}
+	res, err := methods.CnsSyncVolume(ctx, c, &req)
+	if err != nil {
+		return nil, err
+	}
+	return object.NewTask(c.vim25Client, res.Returnval), nil
+}
+
+// UnregisterVolume calls the CNS UnregisterVolume API
+func (c *Client) UnregisterVolume(ctx context.Context, spec []cnstypes.CnsUnregisterVolumeSpec) (*object.Task, error) {
+	req := cnstypes.CnsUnregisterVolume{
+		This:           CnsVolumeManagerInstance,
+		UnregisterSpec: spec,
+	}
+
+	res, err := methods.CnsUnregisterVolume(ctx, c, &req)
 	if err != nil {
 		return nil, err
 	}

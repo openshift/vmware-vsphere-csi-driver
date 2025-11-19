@@ -29,13 +29,15 @@ import (
 	"github.com/google/uuid"
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
+	"github.com/vmware/govmomi/find"
 	"github.com/vmware/govmomi/pbm"
 	"github.com/vmware/govmomi/pbm/types"
+	"github.com/vmware/govmomi/vim25"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/prototext"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/vmware/govmomi/simulator"
 	clientset "k8s.io/client-go/kubernetes"
 	testclient "k8s.io/client-go/kubernetes/fake"
 
@@ -75,10 +77,31 @@ type controllerTest struct {
 type FakeNodeManager struct {
 	cnsNodeManager node.Manager
 	k8sClient      clientset.Interface
+	vimClient      *vim25.Client
 }
 
 type FakeAuthManager struct {
 	vcenter *cnsvsphere.VirtualCenter
+}
+
+// MockTopologyCalculator is a mock implementation for testing
+type MockTopologyCalculator struct {
+	shouldSkip bool
+}
+
+// CalculateAccessibleTopology mocks the topology calculation
+func (m *MockTopologyCalculator) CalculateAccessibleTopology(ctx context.Context,
+	params TopologyCalculationParams) ([]map[string]string, error) {
+	if m.shouldSkip {
+		// Return empty topology (skipping calculation like the old isTestEnvironment logic)
+		return []map[string]string{}, nil
+	}
+	// For non-test scenarios, could return mock topology segments
+	return []map[string]string{
+		{
+			"topology.csi.vmware.com/k8s-zone": "zone-1",
+		},
+	}, nil
 }
 
 func (f *FakeNodeManager) Initialize(ctx context.Context) error {
@@ -86,12 +109,14 @@ func (f *FakeNodeManager) Initialize(ctx context.Context) error {
 	f.cnsNodeManager.SetKubernetesClient(f.k8sClient)
 	var t *testing.T
 
-	objVMs := simulator.Map.All("VirtualMachine")
+	objVMs, err := find.NewFinder(f.vimClient).VirtualMachineList(ctx, "*")
+	if err != nil {
+		return err
+	}
 	var i int
 	for _, vm := range objVMs {
 		i++
-		obj := vm.(*simulator.VirtualMachine)
-		nodeUUID := obj.Config.Uuid
+		nodeUUID := vm.UUID(ctx)
 		nodeName := "k8s-node-" + strconv.Itoa(i)
 		err := f.cnsNodeManager.RegisterNode(ctx, nodeUUID, nodeName)
 		if err != nil {
@@ -229,6 +254,14 @@ func getControllerTest(t *testing.T) *controllerTest {
 			VolumeManager:  volumeManager,
 			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 		}
+		managers := &common.Managers{
+			VcenterConfigs: make(map[string]*cnsvsphere.VirtualCenterConfig),
+			CnsConfig:      config,
+			VolumeManagers: make(map[string]cnsvolume.Manager),
+			VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
+		}
+		managers.VcenterConfigs[vcenterconfig.Host] = vcenterconfig
+		managers.VolumeManagers[vcenterconfig.Host] = volumeManager
 
 		var k8sClient clientset.Interface
 		if k8senv := os.Getenv("KUBECONFIG"); k8senv != "" {
@@ -241,19 +274,29 @@ func getControllerTest(t *testing.T) *controllerTest {
 		}
 
 		nodeManager := &FakeNodeManager{
-			k8sClient: k8sClient}
+			k8sClient: k8sClient,
+			vimClient: vcenter.Client.Client,
+		}
 		err = nodeManager.Initialize(ctx)
 		if err != nil {
 			t.Fatalf("Failed to initialize node manager, err = %v", err)
 		}
 
-		c := &controller{
-			manager: manager,
-			nodeMgr: nodeManager,
-			authMgr: &FakeAuthManager{
-				vcenter: vcenter,
-			},
+		fakeAuthMgr := FakeAuthManager{
+			vcenter: vcenter,
 		}
+
+		c := &controller{
+			manager:      manager,
+			managers:     managers,
+			nodeMgr:      nodeManager,
+			authMgr:      &fakeAuthMgr,
+			authMgrs:     make(map[string]*common.AuthManager),
+			topologyCalc: &MockTopologyCalculator{shouldSkip: true}, // Skip topology calculation in tests
+		}
+		c.authMgrs[vcenterconfig.Host], _ =
+			common.GetAuthorizationServiceForTesting(ctx,
+				vcenter, fakeAuthMgr.GetDatastoreMapForBlockVolumes(ctx), nil)
 
 		commonco.ContainerOrchestratorUtility, err =
 			unittestcommon.GetFakeContainerOrchestratorInterface(common.Kubernetes)
@@ -325,7 +368,7 @@ func TestCreateVolumeWithStoragePolicy(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +409,7 @@ func TestCreateVolumeWithStoragePolicy(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +526,7 @@ func TestCreateVolumeWithNewlyCreatedStoragePolicy(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -507,7 +550,7 @@ func TestCreateVolumeWithNewlyCreatedStoragePolicy(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,7 +601,7 @@ func TestCreateVolumeWithMultipleDatastores(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +620,7 @@ func TestCreateVolumeWithMultipleDatastores(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -730,7 +773,7 @@ func TestExtendVolume(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -766,7 +809,7 @@ func TestExtendVolume(t *testing.T) {
 		},
 		VolumeCapability: capabilities[0],
 	}
-	t.Logf("ControllerExpandVolume will be called with req +%v", *reqExpand)
+	t.Logf("ControllerExpandVolume will be called with req +%v", prototext.Format(reqExpand))
 	respExpand, err := ct.controller.ControllerExpandVolume(ctx, reqExpand)
 	if err != nil {
 		t.Fatal(err)
@@ -785,7 +828,7 @@ func TestExtendVolume(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +847,7 @@ func TestExtendVolume(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -824,7 +867,7 @@ func TestMigratedExtendVolume(t *testing.T) {
 			RequiredBytes: 1024,
 		},
 	}
-	t.Logf("ControllerExpandVolume will be called with req +%v", *reqExpand)
+	t.Logf("ControllerExpandVolume will be called with req +%v", prototext.Format(reqExpand))
 	_, err := ct.controller.ControllerExpandVolume(ctx, reqExpand)
 	if err != nil {
 		t.Logf("Expected error received. migrated volume with VMDK path can not be expanded")
@@ -872,7 +915,7 @@ func TestCompleteControllerFlow(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -903,7 +946,11 @@ func TestCompleteControllerFlow(t *testing.T) {
 	if v := os.Getenv("VSPHERE_K8S_NODE"); v != "" {
 		NodeID = v
 	} else {
-		NodeID = simulator.Map.Any("VirtualMachine").(*simulator.VirtualMachine).Config.Uuid
+		vms, err := find.NewFinder(ct.vcenter.Client.Client).VirtualMachineList(ctx, "*")
+		if err != nil {
+			t.Fatal(err)
+		}
+		NodeID = vms[0].UUID(ctx)
 	}
 
 	// Attach.
@@ -913,7 +960,7 @@ func TestCompleteControllerFlow(t *testing.T) {
 		VolumeCapability: capabilities[0],
 		Readonly:         false,
 	}
-	t.Logf("ControllerPublishVolume will be called with req +%v", *reqControllerPublishVolume)
+	t.Logf("ControllerPublishVolume will be called with req +%v", prototext.Format(reqControllerPublishVolume))
 	respControllerPublishVolume, err := ct.controller.ControllerPublishVolume(ctx, reqControllerPublishVolume)
 	if err != nil {
 		t.Fatal(err)
@@ -926,7 +973,8 @@ func TestCompleteControllerFlow(t *testing.T) {
 		VolumeId: volID,
 		NodeId:   NodeID,
 	}
-	t.Logf("ControllerUnpublishVolume will be called with req +%v", *reqControllerUnpublishVolume)
+	t.Logf("ControllerUnpublishVolume will be called with req +%v",
+		prototext.Format(reqControllerUnpublishVolume))
 	_, err = ct.controller.ControllerUnpublishVolume(ctx, reqControllerUnpublishVolume)
 	if err != nil {
 		t.Fatal(err)
@@ -943,7 +991,7 @@ func TestCompleteControllerFlow(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1081,7 +1129,7 @@ func TestCreateBlockVolumeSnapshotWithIdempotency(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1119,7 +1167,7 @@ func TestCreateBlockVolumeSnapshotWithIdempotency(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1256,7 +1304,7 @@ func TestCreateBlockVolumeSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1294,7 +1342,7 @@ func TestCreateBlockVolumeSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1397,7 +1445,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1435,7 +1483,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1500,7 +1548,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1520,7 +1568,7 @@ func TestCreateVolumeFromSnapshot(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1603,7 +1651,7 @@ func TestListSnapshotsOnSpecificVolumeAndSnapshot(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1676,7 +1724,7 @@ func TestListSnapshotsOnSpecificVolumeAndSnapshot(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1725,7 +1773,7 @@ func TestListSnapshotsOnSpecificVolume(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1848,7 +1896,7 @@ func TestListSnapshots(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1970,7 +2018,7 @@ func TestListSnapshotsWithToken(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2102,7 +2150,7 @@ func TestExpandVolumeWithSnapshots(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2165,7 +2213,7 @@ func TestExpandVolumeWithSnapshots(t *testing.T) {
 	}
 
 	// Verify the volume has been deleted.
-	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2214,7 +2262,7 @@ func TestDeleteBlockVolumeSnapshotWithManagedObjectNotFound(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2252,7 +2300,7 @@ func TestDeleteBlockVolumeSnapshotWithManagedObjectNotFound(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2323,7 +2371,7 @@ func TestCreateSnapshotWithManagedObjectNotFound(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2361,7 +2409,7 @@ func TestCreateSnapshotWithManagedObjectNotFound(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -2448,7 +2496,7 @@ func TestCreateSnapshotWithCnsSnapshotCreatedFault(t *testing.T) {
 			},
 		},
 	}
-	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+	queryResult, err := ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2486,7 +2534,7 @@ func TestCreateSnapshotWithCnsSnapshotCreatedFault(t *testing.T) {
 		}
 
 		// Verify the volume has been deleted.
-		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, queryFilter)
+		queryResult, err = ct.vcenter.CnsClient.QueryVolume(ctx, &queryFilter)
 		if err != nil {
 			t.Fatal(err)
 		}

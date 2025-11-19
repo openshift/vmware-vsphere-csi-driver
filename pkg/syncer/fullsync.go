@@ -21,19 +21,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	versioned "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"slices"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
+	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"google.golang.org/grpc/codes"
@@ -87,7 +89,7 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 	}
 	// Sync VolumeInfo CRs for the below conditions:
 	// Either it is a Vanilla k8s deployment with Multi-VC configuration or, it's a StretchSupervisor cluster
-	if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 ||
+	if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 ||
 		(metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload && IsPodVMOnStretchSupervisorFSSEnabled) {
 		volumeInfoCRFullSync(ctx, metadataSyncer, vc)
 		cleanUpVolumeInfoCrDeletionMap(ctx, metadataSyncer, vc)
@@ -180,18 +182,10 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 
 	var vcenter *cnsvsphere.VirtualCenter
 	// Get VC instance.
-	if isMultiVCenterFssEnabled {
-		vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, vc, true)
-		if err != nil {
-			log.Errorf("failed to get virtual center instance for VC: %s. Error: %v", vc, err)
-			return err
-		}
-	} else {
-		vcenter, err = cnsvsphere.GetVirtualCenterInstance(ctx, metadataSyncer.configInfo, false)
-		if err != nil {
-			log.Errorf("failed to get virtual center instance with error: %v", err)
-			return err
-		}
+	vcenter, err = cnsvsphere.GetVirtualCenterInstanceForVCenterHost(ctx, vc, true)
+	if err != nil {
+		log.Errorf("failed to get virtual center instance for VC: %s. Error: %v", vc, err)
+		return err
 	}
 
 	// Iterate through all the k8sPVs to find all PVs with node affinity missing and
@@ -230,17 +224,31 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 		}
 	}
 
-	queryAllResult, err := utils.QueryAllVolumesForCluster(ctx, volManager,
-		metadataSyncer.configInfo.Cfg.Global.ClusterID, cnstypes.CnsQuerySelection{})
-	if err != nil {
-		log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
-		return err
+	var queryAllResult *cnstypes.CnsQueryResult
+	if metadataSyncer.configInfo.Cfg.Global.ClusterID != "" {
+		// Cluster ID is removed from vSphere Config Secret post 9.0 release in Supervisor
+		queryAllResult, err = utils.QueryAllVolumesForCluster(ctx, volManager,
+			metadataSyncer.configInfo.Cfg.Global.ClusterID, cnstypes.CnsQuerySelection{})
+		if err != nil {
+			log.Errorf("FullSync for VC %s: QueryVolume failed with err=%+v", vc, err.Error())
+			return err
+		}
+	} else {
+		log.Infof("observed emptry string cluster-id in the vSphere Config secret. " +
+			"Skipping to replace volume metadata with older cluster-id to new supervisor-id")
 	}
 	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
 		commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.TKGsHA) {
-		// Replace Volume Metadata using old cluster ID and replace with the new SupervisorID
+		// Replace the Cluster-ID in the volume metadata with the new Supervisor-ID.
+		//
+		// Note:
+		// - In vSphere 9.1 and later, this replacement is not required because volume metadata already contains
+		//   the correct Supervisor-ID.
+		// - In vSphere 9.0, the Cluster ID field in the metadata stores the Supervisor-ID. volume metadata created
+		//   before 9.0 has already been updated to use the new Supervisor-ID.
+
 		var volumeIDsWithOldClusterID []cnstypes.CnsVolumeId
-		if len(queryAllResult.Volumes) > 0 {
+		if queryAllResult != nil && len(queryAllResult.Volumes) > 0 {
 			for _, volume := range queryAllResult.Volumes {
 				volumeIDsWithOldClusterID = append(volumeIDsWithOldClusterID, volume.VolumeId)
 			}
@@ -437,8 +445,7 @@ func getPVNodeAffinity(ctx context.Context, metadataSyncer *metadataSyncInformer
 		querySelection := cnstypes.CnsQuerySelection{
 			Names: []string{string(cnstypes.QuerySelectionNameTypeDataStoreUrl)},
 		}
-		queryResult, err := utils.QueryVolumeUtil(ctx, volManager, queryFilter, &querySelection,
-			true)
+		queryResult, err := utils.QueryVolumeUtil(ctx, volManager, queryFilter, &querySelection)
 		if err != nil || queryResult == nil || len(queryResult.Volumes) != 1 {
 			return nil, logger.LogNewErrorCodef(log, codes.Internal,
 				"failed to find the datastore on which volume %q is provisioned. "+
@@ -728,7 +735,7 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 		}
 		// Create VolumeInfo CR if not found.
 		if !crExists {
-			if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+			if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
 				err := volumeInfoService.CreateVolumeInfo(ctx, volumeID, vc)
 				if err != nil {
 					log.Errorf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
@@ -737,6 +744,7 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 				}
 			} else if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload &&
 				IsPodVMOnStretchSupervisorFSSEnabled {
+				isLinkedCloneVolume := false
 				pv := volumeIdTok8sPVMap[volumeID]
 				// claimref will be nil when volume is static provisioned or any available/released pv
 				// which are not claimed by pvc. added a check to handle such cases.
@@ -751,10 +759,14 @@ func volumeInfoCRFullSync(ctx context.Context, metadataSyncer *metadataSyncInfor
 							pv.Spec.ClaimRef.Namespace, pv.Spec.ClaimRef.Name, err)
 						continue
 					}
+					if IsLinkedCloneSupportFSSEnabled && metav1.HasAnnotation(pvc.ObjectMeta, common.AnnKeyLinkedClone) {
+						isLinkedCloneVolume = true
+					}
 					pvcCapacity := pvc.Status.Capacity[v1.ResourceStorage]
 					if pvc.Spec.StorageClassName != nil {
 						err = volumeInfoService.CreateVolumeInfoWithPolicyInfo(ctx, volumeID, pvc.Namespace,
-							scNameToPolicyIdMap[*pvc.Spec.StorageClassName], *pvc.Spec.StorageClassName, vc, &pvcCapacity)
+							scNameToPolicyIdMap[*pvc.Spec.StorageClassName], *pvc.Spec.StorageClassName, vc,
+							&pvcCapacity, isLinkedCloneVolume)
 						if err != nil {
 							log.Warnf("FullSync for VC %s: failed to create VolumeInfo CR for volume %s."+
 								"Error: %+v", vc, volumeID, err)
@@ -956,7 +968,7 @@ func fullSyncCreateVolumes(ctx context.Context, createSpecArray []cnstypes.CnsVo
 					staticVolumeProvisioningSuccessReason, staticVolumeProvisioningSuccessMessage)
 			}
 
-			if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+			if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
 				// Create CNSVolumeInfo CR for the volume ID.
 				err = volumeInfoService.CreateVolumeInfo(ctx, volumeID, vc)
 				if err != nil {
@@ -1053,7 +1065,7 @@ func fullSyncDeleteVolumes(ctx context.Context, volumeIDDeleteArray []cnstypes.C
 					continue
 				}
 
-				if isMultiVCenterFssEnabled && len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
+				if len(metadataSyncer.configInfo.Cfg.VirtualCenter) > 1 {
 					// Delete CNSVolumeInfo CR for the volume ID.
 					err = volumeInfoService.DeleteVolumeInfo(ctx, volume.VolumeId.Id)
 					if err != nil {
@@ -1281,7 +1293,7 @@ func fullSyncGetVolumeSpecs(ctx context.Context, vCenterVersion string, pvList [
 		switch operationType {
 		case "createVolume":
 			var volumeType string
-			if IsMultiAttachAllowed(pv) {
+			if IsFileVolume(pv) {
 				// We should never reach here in case of multi VC deployment as file share volumes are already filtered out.
 				volumeType = common.FileVolumeType
 			} else {
@@ -1314,7 +1326,7 @@ func fullSyncGetVolumeSpecs(ctx context.Context, vCenterVersion string, pvList [
 			// to update this volume.
 			log.Debugf("FullSync for VC %s: Volume with id %q added to volume update list", vc, volumeHandle)
 			var volumeType string
-			if IsMultiAttachAllowed(pv) {
+			if IsFileVolume(pv) {
 				// We should never reach here in case of multi VC deployment as file share volumes are already filtered out.
 				volumeType = common.FileVolumeType
 			} else {
@@ -1561,6 +1573,166 @@ func cleanupCnsMaps(k8sPVs map[string]string, vc string) {
 	}
 }
 
+func RemoveCNSFinalizerFromPVCIfTKGClusterDeleted(ctx context.Context, k8sClient clientset.Interface,
+	pvc *v1.PersistentVolumeClaim, finalizerToRemove string, isNamespaceBeingDeleted bool) {
+	log := logger.GetLogger(ctx)
+	// Create client to operator on Cluster object
+	restClientConfig, err := k8s.GetKubeConfig(ctx)
+	if err != nil {
+		msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: Failed to initialize rest clientconfig. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+	ccClient, err := k8s.NewClientForGroup(ctx, restClientConfig, ccV1beta1.GroupVersion.Group)
+	if err != nil {
+		msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: Failed to get vmOperatorClient. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+	log.Debugf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted called for pvc %s/%s finalizer %d", pvc.Namespace, pvc.Name,
+		len(pvc.ObjectMeta.Finalizers))
+	okToRemoveFinalizer := false
+	if len(pvc.ObjectMeta.Finalizers) != 0 &&
+		(slices.Contains(pvc.ObjectMeta.Finalizers, finalizerToRemove)) {
+		if !isNamespaceBeingDeleted {
+			// Fetch guest cluster name from PVC label and check if that guest cluster,
+			// where associated PVC was created, is running or not.
+			// NOTE: This is to be executed only when not called on namespace deletion.
+			var tkcClusterName string
+			for key := range pvc.ObjectMeta.Labels {
+				if strings.Contains(key, "TKGService") {
+					tkcDetails := strings.Split(key, "/")
+					tkcClusterName = tkcDetails[0]
+					break
+				}
+			}
+			if tkcClusterName == "" {
+				if finalizerToRemove == cnsoperatortypes.CNSVolumeFinalizer {
+					msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: failed to get Cluster Name "+
+						"from PVC %q in %q namespace. Err: %+v", pvc.Name, pvc.Namespace, err)
+					log.Error(msg)
+				} else {
+					okToRemoveFinalizer = true
+				}
+			} else {
+				cc := &ccV1beta1.Cluster{}
+				err := ccClient.Get(ctx, client.ObjectKey{
+					Namespace: pvc.Namespace,
+					Name:      tkcClusterName,
+				}, cc)
+				if err != nil && !apierrors.IsNotFound(err) {
+					msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: failed to get Cluster %q "+
+						"in %q namespace. Err: %+v", tkcClusterName, pvc.Namespace, err)
+					log.Error(msg)
+				} else if ((err == nil) && (cc.Status.Phase != "Running")) || apierrors.IsNotFound(err) {
+					okToRemoveFinalizer = true
+				}
+			}
+		} else {
+			// In case of namespace deletion, do not check for guest cluster.
+			// Directly delete the CNS finalizer added from guest cluster.
+			okToRemoveFinalizer = true
+		}
+		if okToRemoveFinalizer {
+			// Remove finalizer if associated guest cluster is not-running/deleted or Namespace being deleted
+			log.Infof("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: Removing %q finalizer from PVC "+
+				"with name: %q on namespace: %q in Terminating state",
+				cnsoperatortypes.CNSVolumeFinalizer, pvc.Name, pvc.Namespace)
+			controllerutil.RemoveFinalizer(pvc, finalizerToRemove)
+			_, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx,
+				pvc, metav1.UpdateOptions{})
+			if err != nil {
+				msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: failed to update "+
+					"supervisor PVC %q in %q namespace. Err: %+v", pvc.Name, pvc.Namespace, err)
+				log.Error(msg)
+			}
+		}
+	}
+}
+
+func RemoveCNSFinalizerFromSnapIfTKGClusterDeleted(ctx context.Context, snapshotterClient versioned.Interface,
+	vs *snapv1.VolumeSnapshot, finalizerToRemove string, isNamespaceBeingDeleted bool) {
+	log := logger.GetLogger(ctx)
+	log.Infof("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted called for vs %s/%s", vs.Namespace, vs.Name)
+	// Create client to operator on Cluster object
+	restClientConfig, err := k8s.GetKubeConfig(ctx)
+	if err != nil {
+		msg := fmt.Sprintf("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted: Failed to initialize rest clientconfig. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+	ccClient, err := k8s.NewClientForGroup(ctx, restClientConfig, ccV1beta1.GroupVersion.Group)
+	if err != nil {
+		msg := fmt.Sprintf("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted: Failed to get vmOperatorClient. "+
+			"Err: %+v", err)
+		log.Error(msg)
+		return
+	}
+	log.Debugf("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted called for vs %s/%s finalizer %d", vs.Namespace, vs.Name,
+		len(vs.ObjectMeta.Finalizers))
+	okToRemoveFinalizer := false
+	if (len(vs.ObjectMeta.Finalizers) != 0) &&
+		(slices.Contains(vs.ObjectMeta.Finalizers, finalizerToRemove)) {
+		if !isNamespaceBeingDeleted {
+			// Fetch guest cluster name from snapshot label and check if that guest cluster,
+			// where associated snapshot was created, is running or not.
+			// NOTE: This is to be executed only when not called on namespace deletion.
+			var tkcClusterName string
+			for key := range vs.ObjectMeta.Labels {
+				if strings.Contains(key, "TKGService") {
+					tkcDetails := strings.Split(key, "/")
+					tkcClusterName = tkcDetails[0]
+					break
+				}
+			}
+			if tkcClusterName == "" {
+				if finalizerToRemove == cnsoperatortypes.CNSSnapshotFinalizer {
+					msg := fmt.Sprintf("RemoveCNSFinalizerFromPVCIfTKGClusterDeleted: failed to get Cluster Name "+
+						"from VolumeSnapshot %q in %q namespace. Err: %+v", vs.Name, vs.Namespace, err)
+					log.Error(msg)
+				} else {
+					okToRemoveFinalizer = true
+				}
+			} else {
+				cc := &ccV1beta1.Cluster{}
+				err := ccClient.Get(ctx, client.ObjectKey{
+					Namespace: vs.Namespace,
+					Name:      tkcClusterName,
+				}, cc)
+				if err != nil && !apierrors.IsNotFound(err) {
+					msg := fmt.Sprintf("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted: failed to get Cluster %q "+
+						"in %q namespace. Err: %+v", tkcClusterName, vs.Namespace, err)
+					log.Error(msg)
+				} else if ((err == nil) && (cc.Status.Phase != "Running") && (cc.Status.Phase != "Provisioned")) ||
+					apierrors.IsNotFound(err) {
+					okToRemoveFinalizer = true
+				}
+			}
+		} else {
+			// In case of namespace deletion, do not check for guest cluster.
+			// Directly delete the CNS finalizer added from guest cluster.
+			okToRemoveFinalizer = true
+		}
+		if okToRemoveFinalizer {
+			// Remove finalizer if associated guest cluster is not-running/deleted or Namespace being deleted
+			log.Infof("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted: Removing %q finalizer from VolumeSnapshot "+
+				"with name: %q on namespace: %q in Terminating state",
+				cnsoperatortypes.CNSSnapshotFinalizer, vs.Name, vs.Namespace)
+			controllerutil.RemoveFinalizer(vs, finalizerToRemove)
+			_, err = snapshotterClient.SnapshotV1().VolumeSnapshots(vs.Namespace).Update(ctx,
+				vs, metav1.UpdateOptions{})
+			if err != nil {
+				msg := fmt.Sprintf("RemoveCNSFinalizerFromSnapIfTKGClusterDeleted: failed to update "+
+					"supervisor VolumeSnapshot %q in %q namespace. Err: %+v", vs.Name, vs.Namespace, err)
+				log.Error(msg)
+			}
+		}
+	}
+}
+
 // cleanupUnusedPVCsAndSnapshotsFromGuestCluster iterates over all PVCs and VolumeSnapshots and
 // filter ones with DeletionTimestamp set but CNS specific finalizer present. These finalizers are added to
 // PVCs and VolumeSnapshots from guest cluster during their creation.
@@ -1581,22 +1753,6 @@ func cleanupUnusedPVCsAndSnapshotsFromGuestCluster(ctx context.Context) {
 		return
 	}
 
-	// Create client to operator on Cluster object
-	restClientConfig, err := k8s.GetKubeConfig(ctx)
-	if err != nil {
-		msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Failed to initialize rest clientconfig. "+
-			"Err: %+v", err)
-		log.Error(msg)
-		return
-	}
-	ccClient, err := k8s.NewClientForGroup(ctx, restClientConfig, ccV1beta1.GroupVersion.Group)
-	if err != nil {
-		msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Failed to get vmOperatorClient. "+
-			"Err: %+v", err)
-		log.Error(msg)
-		return
-	}
-
 	// Get all VolumeSnapshots and check if any marked for deletion but has finalizer
 	// "cns.vmware.com/volumesnapshot-protection", set while creation from guest cluster.
 	// If found, remove the finalizer "cns.vmware.com/volumesnapshot-protection" from that snapshot.
@@ -1608,53 +1764,18 @@ func cleanupUnusedPVCsAndSnapshotsFromGuestCluster(ctx context.Context) {
 	}
 	for _, vs := range vsList.Items {
 		// Check if snapshot is being deleted and has "cns.vmware.com/volumesnapshot-protection" finalizer
-		if (vs.ObjectMeta.DeletionTimestamp != nil) &&
-			(len(vs.ObjectMeta.Finalizers) != 0) {
-			for i, finalizer := range vs.ObjectMeta.Finalizers {
-				if finalizer != cnsoperatortypes.CNSSnapshotFinalizer {
-					continue
-				}
-				// Fetch guest cluster name from snapshot label and check if that guest cluster,
-				// where associated snapshot was created, is running or not.
-				var tkcClusterName string
-				for key := range vs.ObjectMeta.Labels {
-					if strings.Contains(key, "TKGService") {
-						tkcDetails := strings.Split(key, "/")
-						tkcClusterName = tkcDetails[0]
-						break
-					}
-				}
-				cc := &ccV1beta1.Cluster{}
-				err := ccClient.Get(ctx, client.ObjectKey{
-					Namespace: vs.Namespace,
-					Name:      tkcClusterName,
-				}, cc)
-				if err != nil && !apierrors.IsNotFound(err) {
-					msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to get Cluster %q "+
-						"in %q namespace. Err: %+v", tkcClusterName, vs.Namespace, err)
-					log.Error(msg)
-				} else if ((err == nil) && (cc.Status.Phase != "Running")) || apierrors.IsNotFound(err) {
-					// Remove finalizer if associated guest cluster is not-running/deleted already
-					log.Infof("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Removing %q finalizer from VolumeSnapshot "+
-						"with name: %q on namespace: %q in Terminating state",
-						cnsoperatortypes.CNSSnapshotFinalizer, vs.Name, vs.Namespace)
-					vs.ObjectMeta.Finalizers = slices.Delete(vs.ObjectMeta.Finalizers, i,
-						i+1)
-					_, err = snapshotterClient.SnapshotV1().VolumeSnapshots(vs.Namespace).Update(ctx,
-						&vs, metav1.UpdateOptions{})
-					if err != nil {
-						msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to update "+
-							"supervisor VolumeSnapshot %q in %q namespace. Err: %+v", vs.Name, vs.Namespace, err)
-						log.Error(msg)
-					}
-				}
-			}
+		// Note: Above finalizer will only be removed in 2 cases
+		//       1. Namespace is deleted
+		//       2. Guest cluster, from which this smapshot is created, is deleted.
+		if vs.ObjectMeta.DeletionTimestamp != nil {
+			RemoveCNSFinalizerFromSnapIfTKGClusterDeleted(ctx, snapshotterClient, &vs,
+				cnsoperatortypes.CNSSnapshotFinalizer, false)
 		}
 	}
 
-	// Get all PVCs and check if any marked for deletion but have finalizer "cns.vmware.com/pvc-protection",
+	// Get all PVCs and check if any marked for deletion but have finalizer "cns.vmware.com/pvc-delete-protection",
 	// set while creation from guest cluster.
-	// If found, remove the finalizer "cns.vmware.com/pvc-protection" from that PVC.
+	// If found, remove the finalizer "cns.vmware.com/pvc-delete-protection" from that PVC.
 	pvcList, err := k8sClient.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
 	if err != nil {
 		log.Errorf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to list PersistentVolumeClaims."+
@@ -1662,48 +1783,13 @@ func cleanupUnusedPVCsAndSnapshotsFromGuestCluster(ctx context.Context) {
 		return
 	}
 	for _, pvc := range pvcList.Items {
-		// Check if PVC is being deleted and has "cns.vmware.com/pvc-protection" finalizer
-		if (pvc.ObjectMeta.DeletionTimestamp != nil) &&
-			(len(pvc.ObjectMeta.Finalizers) != 0) {
-			for i, finalizer := range pvc.ObjectMeta.Finalizers {
-				if finalizer != cnsoperatortypes.CNSVolumeFinalizer {
-					continue
-				}
-				// Fetch guest cluster name from PVC label and check if that guest cluster,
-				// where associated PVC was created, is running or not.
-				var tkcClusterName string
-				for key := range pvc.ObjectMeta.Labels {
-					if strings.Contains(key, "TKGService") {
-						tkcDetails := strings.Split(key, "/")
-						tkcClusterName = tkcDetails[0]
-						break
-					}
-				}
-				cc := &ccV1beta1.Cluster{}
-				err := ccClient.Get(ctx, client.ObjectKey{
-					Namespace: pvc.Namespace,
-					Name:      tkcClusterName,
-				}, cc)
-				if err != nil && !apierrors.IsNotFound(err) {
-					msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to get Cluster %q "+
-						"in %q namespace. Err: %+v", tkcClusterName, pvc.Namespace, err)
-					log.Error(msg)
-				} else if ((err == nil) && (cc.Status.Phase != "Running")) || apierrors.IsNotFound(err) {
-					// Remove finalizer if associated guest cluster is not-running/deleted already
-					log.Infof("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: Removing %q finalizer from PVC "+
-						"with name: %q on namespace: %q in Terminating state",
-						cnsoperatortypes.CNSVolumeFinalizer, pvc.Name, pvc.Namespace)
-					pvc.ObjectMeta.Finalizers = slices.Delete(pvc.ObjectMeta.Finalizers, i,
-						i+1)
-					_, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx,
-						&pvc, metav1.UpdateOptions{})
-					if err != nil {
-						msg := fmt.Sprintf("cleanupUnusedPVCsAndSnapshotsFromGuestCluster: failed to update "+
-							"supervisor PVC %q in %q namespace. Err: %+v", pvc.Name, pvc.Namespace, err)
-						log.Error(msg)
-					}
-				}
-			}
+		// Check if PVC is being deleted and has "cns.vmware.com/pvc-delete-protection" finalizer
+		// Note: Above finalizer will only be removed in 2 cases
+		//       1. Namespace is deleted
+		//       2. Guest cluster, from which this PVC is created, is deleted.
+		if pvc.ObjectMeta.DeletionTimestamp != nil {
+			RemoveCNSFinalizerFromPVCIfTKGClusterDeleted(ctx, k8sClient, &pvc,
+				cnsoperatortypes.CNSVolumeFinalizer, false)
 		}
 	}
 }

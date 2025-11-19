@@ -64,7 +64,7 @@ rules:
     verbs: ["get", "update", "watch", "list"]
   - apiGroups: [ "snapshot.storage.k8s.io" ]
     resources: [ "volumesnapshots" ]
-    verbs: [ "get", "list", "patch" ]
+    verbs: [ "get", "list", "patch"]
   - apiGroups: [ "snapshot.storage.k8s.io" ]
     resources: [ "volumesnapshotclasses" ]
     verbs: [ "watch", "get", "list" ]
@@ -200,6 +200,7 @@ spec:
             - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
+            - "--enable-profile-server=false"
           imagePullPolicy: "IfNotPresent"
           ports:
             - containerPort: 2112
@@ -270,6 +271,7 @@ spec:
             - "--supervisor-fss-namespace=$(CSI_NAMESPACE)"
             - "--fss-name=internal-feature-states.csi.vsphere.vmware.com"
             - "--fss-namespace=$(CSI_NAMESPACE)"
+            - "--enable-profile-server=false"
           imagePullPolicy: "IfNotPresent"
           ports:
             - containerPort: 2113
@@ -323,6 +325,7 @@ spec:
             - "--leader-election-retry-period=30s"
             - "--enable-capacity=true"
             - "--capacity-ownerref-level=-1"
+            - "--extra-create-metadata"
           imagePullPolicy: "IfNotPresent"
           env:
             - name: ADDRESS
@@ -676,8 +679,6 @@ metadata:
 ---
 apiVersion: v1
 data:
-  "volume-extend": "true"
-  "volume-health": "true"
   "online-volume-extend": "true"
   "file-volume": "true"
   "csi-sv-feature-states-replication": "false" # Do not enable for guest cluster, Refer PR#2386 for details
@@ -686,7 +687,8 @@ data:
   "cnsmgr-suspend-create-volume": "true"
   "csi-windows-support": "true"
   "workload-domain-isolation": "true"
-  "sv-pvc-snapshot-protection-finalizer": "false"
+  "sv-pvc-snapshot-protection-finalizer": "true"
+  "linked-clone-support": "false"
 kind: ConfigMap
 metadata:
   name: internal-feature-states.csi.vsphere.vmware.com

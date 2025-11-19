@@ -19,16 +19,16 @@ package cnsvolumemetadata
 import (
 	"context"
 	"fmt"
-	"os"
 	"reflect"
-	"strconv"
 	"sync"
 	"time"
 
+	"k8s.io/apimachinery/pkg/types"
 	commonconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/logger"
+	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/syncer/cnsoperator/util"
 
 	"github.com/davecgh/go-spew/spew"
 	v1 "k8s.io/api/core/v1"
@@ -60,7 +60,8 @@ import (
 )
 
 const (
-	defaultMaxWorkerThreadsToProcessCnsVolumeMetadata = 3
+	workerThreadsEnvVar     = "WORKER_THREADS_VOLUME_METADATA"
+	defaultMaxWorkerThreads = 3
 )
 
 // backOffDuration is a map of cnsvolumemetadata name's to the time after which
@@ -68,7 +69,7 @@ const (
 // instances and for instances whose latest reconcile operation succeeded.
 // If the reconcile fails, backoff is incremented exponentially.
 var (
-	backOffDuration         map[string]time.Duration
+	backOffDuration         map[types.NamespacedName]time.Duration
 	backOffDurationMapMutex = sync.Mutex{}
 )
 
@@ -112,7 +113,8 @@ func newReconciler(mgr manager.Manager, configInfo *commonconfig.ConfigurationIn
 // add adds a new Controller to mgr with r as the reconcile.Reconciler.
 func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	ctx, log := logger.GetNewContextWithLogger()
-	maxWorkerThreads := getMaxWorkerThreadsToReconcileCnsVolumeMetadata(ctx)
+	maxWorkerThreads := util.GetMaxWorkerThreads(ctx,
+		workerThreadsEnvVar, defaultMaxWorkerThreads)
 	// Create a new controller.
 	c, err := controller.New("cnsvolumemetadata-controller", mgr,
 		controller.Options{Reconciler: r, MaxConcurrentReconciles: maxWorkerThreads})
@@ -120,7 +122,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 		log.Errorf("failed to create new CnsVolumeMetadata controller with error: %+v", err)
 		return err
 	}
-	backOffDuration = make(map[string]time.Duration)
+	backOffDuration = make(map[types.NamespacedName]time.Duration)
 	// Predicates are used to determine under which conditions
 	// the reconcile callback will be made for an instance.
 
@@ -207,10 +209,10 @@ func (r *ReconcileCnsVolumeMetadata) Reconcile(ctx context.Context,
 	// Initialize backOffDuration for the instance, if required.
 	backOffDurationMapMutex.Lock()
 	var timeout time.Duration
-	if _, exists := backOffDuration[instance.Name]; !exists {
-		backOffDuration[instance.Name] = time.Second
+	if _, exists := backOffDuration[request.NamespacedName]; !exists {
+		backOffDuration[request.NamespacedName] = time.Second
 	}
-	timeout = backOffDuration[instance.Name]
+	timeout = backOffDuration[request.NamespacedName]
 	backOffDurationMapMutex.Unlock()
 	// Validate input instance fields.
 	if err = validateReconileRequest(instance); err != nil {
@@ -257,7 +259,7 @@ func (r *ReconcileCnsVolumeMetadata) Reconcile(ctx context.Context,
 		}
 		// Cleanup instance entry from backOffDuration map.
 		backOffDurationMapMutex.Lock()
-		delete(backOffDuration, instance.Name)
+		delete(backOffDuration, request.NamespacedName)
 		backOffDurationMapMutex.Unlock()
 		return reconcile.Result{}, nil
 	}
@@ -498,52 +500,25 @@ func validateReconileRequest(req *cnsv1alpha1.CnsVolumeMetadata) error {
 func recordEvent(ctx context.Context, r *ReconcileCnsVolumeMetadata,
 	instance *cnsv1alpha1.CnsVolumeMetadata, eventtype string, msg string) {
 	log := logger.GetLogger(ctx)
+	namespacedName := types.NamespacedName{
+		Name:      instance.Name,
+		Namespace: instance.Namespace,
+	}
 	switch eventtype {
 	case v1.EventTypeWarning:
 		// Double backOff duration.
 		backOffDurationMapMutex.Lock()
-		backOffDuration[instance.Name] = backOffDuration[instance.Name] * 2
+		backOffDuration[namespacedName] = min(backOffDuration[namespacedName]*2,
+			cnsoperatortypes.MaxBackOffDurationForReconciler)
 		backOffDurationMapMutex.Unlock()
 		r.recorder.Event(instance, v1.EventTypeWarning, "UpdateFailed", msg)
 		log.Error(msg)
 	case v1.EventTypeNormal:
 		// Reset backOff duration to one second.
 		backOffDurationMapMutex.Lock()
-		backOffDuration[instance.Name] = time.Second
+		backOffDuration[namespacedName] = time.Second
 		backOffDurationMapMutex.Unlock()
 		r.recorder.Event(instance, v1.EventTypeNormal, "UpdateSucceeded", msg)
 		log.Info(msg)
 	}
-}
-
-// getMaxWorkerThreadsToReconcileCnsVolumeMetadata returns the maximum number
-// of worker threads which can be run to reconcile CnsVolumeMetadata instances.
-// If environment variable WORKER_THREADS_VOLUME_METADATA is set and valid,
-// return the value read from environment variable. Otherwise, use the default
-// value.
-func getMaxWorkerThreadsToReconcileCnsVolumeMetadata(ctx context.Context) int {
-	log := logger.GetLogger(ctx)
-	workerThreads := defaultMaxWorkerThreadsToProcessCnsVolumeMetadata
-	if v := os.Getenv("WORKER_THREADS_VOLUME_METADATA"); v != "" {
-		if value, err := strconv.Atoi(v); err == nil {
-			if value <= 0 {
-				log.Warnf("Maximum number of worker threads to run set in env variable WORKER_THREADS_VOLUME_METADATA %s is "+
-					"less than 1, will use the default value %d", v, defaultMaxWorkerThreadsToProcessCnsVolumeMetadata)
-			} else if value > defaultMaxWorkerThreadsToProcessCnsVolumeMetadata {
-				log.Warnf("Maximum number of worker threads to run set in env variable WORKER_THREADS_VOLUME_METADATA %s "+
-					"is greater than %d, will use the default value %d",
-					v, defaultMaxWorkerThreadsToProcessCnsVolumeMetadata, defaultMaxWorkerThreadsToProcessCnsVolumeMetadata)
-			} else {
-				workerThreads = value
-				log.Debugf("Maximum number of worker threads to run is set to %d", workerThreads)
-			}
-		} else {
-			log.Warnf("Maximum number of worker threads to run set in env variable WORKER_THREADS_VOLUME_METADATA %s "+
-				"is invalid, will use the default value %d", v, defaultMaxWorkerThreadsToProcessCnsVolumeMetadata)
-		}
-	} else {
-		log.Debugf("WORKER_THREADS_VOLUME_METADATA is not set. Picking the default value %d",
-			defaultMaxWorkerThreadsToProcessCnsVolumeMetadata)
-	}
-	return workerThreads
 }

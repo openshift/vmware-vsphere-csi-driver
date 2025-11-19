@@ -124,7 +124,7 @@ const (
 // VirtualMachinePort is unused and can be considered deprecated.
 type VirtualMachinePort struct {
 	Port     int             `json:"port"`
-	Ip       string          `json:"ip"` //nolint:revive,stylecheck
+	Ip       string          `json:"ip"` //nolint:revive
 	Name     string          `json:"name"`
 	Protocol corev1.Protocol `json:"protocol"`
 }
@@ -480,7 +480,7 @@ type VirtualMachineSpec struct {
 
 	// VmMetadata describes any optional metadata that should be passed to the Guest OS.
 	// +optional
-	VmMetadata *VirtualMachineMetadata `json:"vmMetadata,omitempty"` //nolint:revive,stylecheck
+	VmMetadata *VirtualMachineMetadata `json:"vmMetadata,omitempty"` //nolint:revive
 
 	// StorageClass describes the name of a StorageClass that should be used to configure storage-related attributes of the VirtualMachine
 	// instance.
@@ -591,7 +591,7 @@ type VirtualMachineVolumeStatus struct {
 	Attached bool `json:"attached"`
 
 	// DiskUuid represents the underlying virtual disk UUID and is present when attachment succeeds.
-	DiskUuid string `json:"diskUUID"` //nolint:revive,stylecheck
+	DiskUuid string `json:"diskUUID"` //nolint:revive
 
 	// Error represents the last error seen when attaching or detaching a volume.  Error will be empty if attachment succeeds.
 	Error string `json:"error"`
@@ -608,7 +608,7 @@ type NetworkInterfaceStatus struct {
 
 	// IpAddresses represents zero, one or more IP addresses assigned to the network interface in CIDR notation.
 	// For eg, "192.0.2.1/16".
-	IpAddresses []string `json:"ipAddresses,omitempty"` //nolint:revive,stylecheck
+	IpAddresses []string `json:"ipAddresses,omitempty"` //nolint:revive
 }
 
 // VirtualMachineStatus defines the observed state of a VirtualMachine instance.
@@ -616,6 +616,16 @@ type VirtualMachineStatus struct {
 	// Host describes the hostname or IP address of the infrastructure host that the VirtualMachine is executing on.
 	// +optional
 	Host string `json:"host,omitempty"`
+
+	// +optional
+
+	// HostName describes the observed hostname reported by the VirtualMachine's
+	// guest operating system.
+	//
+	// Please note, this value is only reported if VMware Tools is installed in
+	// the guest, and the value may or may not be a fully qualified domain name
+	// (FQDN), it simply depends on what is reported by the guest.
+	HostName string `json:"hostName,omitempty"`
 
 	// PowerState describes the current power state of the VirtualMachine.
 	// +optional
@@ -633,7 +643,7 @@ type VirtualMachineStatus struct {
 	// Multiple IPs can be available for the VirtualMachine. Refer to networkInterfaces in the VirtualMachine
 	// status for additional IPs
 	// +optional
-	VmIp string `json:"vmIp,omitempty"` //nolint:revive,stylecheck
+	VmIp string `json:"vmIp,omitempty"` //nolint:revive
 
 	// UniqueID describes a unique identifier that is provided by the underlying infrastructure provider, such as
 	// vSphere.

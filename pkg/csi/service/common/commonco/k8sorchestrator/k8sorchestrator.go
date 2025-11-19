@@ -19,30 +19,40 @@ package k8sorchestrator
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"google.golang.org/grpc/codes"
+	"k8s.io/client-go/util/retry"
+
 	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	pbmtypes "github.com/vmware/govmomi/pbm/types"
-	"google.golang.org/grpc/codes"
 	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	clientconfig "sigs.k8s.io/controller-runtime/pkg/client/config"
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
+	wcpcapapis "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/wcpcapabilities"
+	wcpcapv1alph1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/wcpcapabilities/v1alpha1"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsconfig "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/config"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common"
@@ -70,8 +80,9 @@ var (
 	operationMode            string
 	svFssCRMutex             = &sync.RWMutex{}
 	k8sOrchestratorInitMutex = &sync.RWMutex{}
-	// wcpCapabilityFssMap is the cache variable which stores the data of wcp-cluster-capabilities configmap.
-	wcpCapabilityFssMap map[string]string
+	// WcpCapabilitiesMap is the cached map which stores supervisor capabilities name to value map after fetching
+	// the data from supervisor-capabilities CR.
+	WcpCapabilitiesMap *sync.Map
 )
 
 // FSSConfigMapInfo contains details about the FSS configmap(s) present in
@@ -92,6 +103,15 @@ type volumeIDToPvcMap struct {
 	items map[string]string
 }
 
+// Map of pvc to volumeID.
+// Key is the namespaced pvc name and value volumeID.
+// The methods to add, remove and get entries from the map in a threadsafe
+// manner are defined.
+type pvcToVolumeIDMap struct {
+	*sync.RWMutex
+	items map[string]string
+}
+
 // Adds an entry to volumeIDToPvcMap in a thread safe manner.
 func (m *volumeIDToPvcMap) add(volumeHandle, pvcName string) {
 	m.Lock()
@@ -107,10 +127,33 @@ func (m *volumeIDToPvcMap) remove(volumeHandle string) {
 }
 
 // Returns the namespaced pvc name corresponding to volumeHandle.
-func (m *volumeIDToPvcMap) get(volumeHandle string) string {
+func (m *volumeIDToPvcMap) get(volumeHandle string) (string, bool) {
 	m.RLock()
 	defer m.RUnlock()
-	return m.items[volumeHandle]
+	pvcname, found := m.items[volumeHandle]
+	return pvcname, found
+}
+
+// Adds an entry to pvcToVolumeIDMap in a thread safe manner.
+func (m *pvcToVolumeIDMap) add(pvcName, volumeHandle string) {
+	m.Lock()
+	defer m.Unlock()
+	m.items[pvcName] = volumeHandle
+}
+
+// Removes a pvcName from pvcToVolumeIDMap in a thread safe manner.
+func (m *pvcToVolumeIDMap) remove(pvcName string) {
+	m.Lock()
+	defer m.Unlock()
+	delete(m.items, pvcName)
+}
+
+// Returns the volumeID corresponding to the pvc name.
+func (m *pvcToVolumeIDMap) get(pvcName string) (string, bool) {
+	m.RLock()
+	defer m.RUnlock()
+	volumeID, found := m.items[pvcName]
+	return volumeID, found
 }
 
 // Map of the volumeName which refers to the PVName, to the list of node names in the cluster.
@@ -204,6 +247,7 @@ type K8sOrchestrator struct {
 	informerManager      *k8s.InformerManager
 	clusterFlavor        cnstypes.CnsClusterFlavor
 	volumeIDToPvcMap     *volumeIDToPvcMap
+	pvcToVolumeIDMap     *pvcToVolumeIDMap
 	nodeIDToNameMap      *nodeIDToNameMap
 	volumeNameToNodesMap *volumeNameToNodesMap // used when ListVolume FSS is enabled
 	volumeIDToNameMap    *volumeIDToNameMap    // used when ListVolume FSS is enabled
@@ -343,18 +387,14 @@ func Newk8sOrchestrator(ctx context.Context, controllerClusterFlavor cnstypes.Cn
 
 func getReleasedVanillaFSS() map[string]struct{} {
 	return map[string]struct{}{
-		common.CSIMigration:                   {},
-		common.OnlineVolumeExtend:             {},
-		common.AsyncQueryVolume:               {},
-		common.BlockVolumeSnapshot:            {},
-		common.CSIWindowsSupport:              {},
-		common.ListVolumes:                    {},
-		common.CnsMgrSuspendCreateVolume:      {},
-		common.TopologyPreferentialDatastores: {},
-		common.MaxPVSCSITargetsPerVM:          {},
-		common.MultiVCenterCSITopology:        {},
-		common.CSIInternalGeneratedClusterID:  {},
-		common.TopologyAwareFileVolume:        {},
+		common.CSIMigration:                  {},
+		common.OnlineVolumeExtend:            {},
+		common.BlockVolumeSnapshot:           {},
+		common.CSIWindowsSupport:             {},
+		common.ListVolumes:                   {},
+		common.CnsMgrSuspendCreateVolume:     {},
+		common.CSIInternalGeneratedClusterID: {},
+		common.TopologyAwareFileVolume:       {},
 	}
 }
 
@@ -597,13 +637,6 @@ func initFSS(ctx context.Context, k8sClient clientset.Interface,
 		},
 		// Update.
 		func(oldObj interface{}, newObj interface{}) {
-			if controllerClusterFlavor == cnstypes.CnsClusterFlavorGuest &&
-				operationMode != "WEBHOOK_SERVER" &&
-				serviceMode != "node" &&
-				k8sOrchestratorInstance.IsPVCSIFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) &&
-				!k8sOrchestratorInstance.IsCNSCSIFSSEnabled(ctx, common.WorkloadDomainIsolationFSS) {
-				handleEnablementOfWLDIFSS(oldObj, newObj)
-			}
 			configMapUpdated(oldObj, newObj)
 		},
 		// Delete.
@@ -750,50 +783,6 @@ func configMapUpdated(oldObj, newObj interface{}) {
 	}
 }
 
-// handleEnablementOfWLDIFSS checks if workload-domain-isolation FSS is enabled in csi-feature-states configmap
-// if workload-domain-isolation FSS wsa disabled and found enabled, container will be restarted
-func handleEnablementOfWLDIFSS(oldObj, newObj interface{}) {
-	var err error
-	ctx := context.Background()
-	log := logger.GetLogger(ctx)
-	oldFssConfigMap, ok := oldObj.(*v1.ConfigMap)
-	if oldFssConfigMap == nil || !ok {
-		log.Warnf("configMapUpdated: unrecognized old object %+v", oldObj)
-		return
-	}
-	newFssConfigMap, ok := newObj.(*v1.ConfigMap)
-	if newFssConfigMap == nil || !ok {
-		log.Warnf("configMapUpdated: unrecognized new object %+v", newObj)
-		return
-	}
-	if oldFssConfigMap.Name == cnsconfig.DefaultSupervisorFSSConfigMapName {
-		log.Infof("Observed Configmap update for %q in namespace %q",
-			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace)
-		var oldfssValBool, newfssValBool bool
-		if oldFSSValue, ok := oldFssConfigMap.Data[common.WorkloadDomainIsolationFSS]; ok {
-			oldfssValBool, err = strconv.ParseBool(oldFSSValue)
-			if err != nil {
-				log.Errorf("failed to parse fss value: %q for fss: %q",
-					oldFSSValue, common.WorkloadDomainIsolationFSS)
-				os.Exit(1)
-			}
-		}
-		if newFSSValue, ok := newFssConfigMap.Data[common.WorkloadDomainIsolationFSS]; ok {
-			newfssValBool, err = strconv.ParseBool(newFSSValue)
-			if err != nil {
-				log.Errorf("failed to parse fss value: %q for fss: %q",
-					newFSSValue, common.WorkloadDomainIsolationFSS)
-				os.Exit(1)
-			}
-		}
-		if !oldfssValBool && newfssValBool {
-			log.Infof("Detected Enablement of FSS: %q. Restarting Container.",
-				common.WorkloadDomainIsolationFSS)
-			os.Exit(1)
-		}
-	}
-}
-
 // configMapDeleted clears the feature state switch values from the feature
 // states map.
 func configMapDeleted(obj interface{}) {
@@ -924,6 +913,11 @@ func initVolumeHandleToPvcMap(ctx context.Context, controllerClusterFlavor cnsty
 		items:   make(map[string]string),
 	}
 
+	k8sOrchestratorInstance.pvcToVolumeIDMap = &pvcToVolumeIDMap{
+		RWMutex: &sync.RWMutex{},
+		items:   make(map[string]string),
+	}
+
 	k8sOrchestratorInstance.volumeIDToNameMap = &volumeIDToNameMap{
 		RWMutex: &sync.RWMutex{},
 		items:   make(map[string]string),
@@ -972,27 +966,27 @@ func initVolumeHandleToPvcMap(ctx context.Context, controllerClusterFlavor cnsty
 // the existing PVCs as well.
 func pvcAdded(obj interface{}) {}
 
-// pvAdded adds a volume to the volumeIDToPvcMap if it's already in Bound phase.
+// pvAdded adds a volume to the volumeIDToPvcMap and  pvcToVolumeIDMap if it's already in Bound phase.
 // This ensures that all existing PVs in the cluster are added to the map, even
 // across container restarts.
 func pvAdded(obj interface{}) {
-	_, log := logger.GetNewContextWithLogger()
+	ctx, log := logger.GetNewContextWithLogger()
 	pv, ok := obj.(*v1.PersistentVolume)
 	if pv == nil || !ok {
 		log.Warnf("pvAdded: unrecognized object %+v", obj)
 		return
 	}
 
-	if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == csitypes.Name &&
-		pv.Spec.ClaimRef != nil && pv.Status.Phase == v1.VolumeBound {
-		if !isFileVolume(pv) { // We should not be caching file volumes to the map.
-
+	if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == csitypes.Name {
+		if !isFileVolume(ctx, pv) && pv.Spec.ClaimRef != nil && pv.Status.Phase == v1.VolumeBound {
+			// We should not be caching file volumes to the map.
 			// Add volume handle to PVC mapping.
 			objKey := pv.Spec.CSI.VolumeHandle
 			objVal := pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name
 
 			k8sOrchestratorInstance.volumeIDToPvcMap.add(objKey, objVal)
-			log.Debugf("pvAdded: Added '%s -> %s' pair to volumeIDToPvcMap", objKey, objVal)
+			k8sOrchestratorInstance.pvcToVolumeIDMap.add(objVal, objKey)
+			log.Debugf("pvAdded: Added '%s and %s' mapping to volumeIDToPvcMap and pvcToVolumeIDMap", objKey, objVal)
 		}
 		k8sOrchestratorInstance.volumeIDToNameMap.add(pv.Spec.CSI.VolumeHandle, pv.Name)
 		log.Debugf("pvAdded: Added '%s -> %s' pair to volumeIDToNameMap", pv.Spec.CSI.VolumeHandle, pv.Name)
@@ -1010,9 +1004,9 @@ func pvAdded(obj interface{}) {
 	}
 }
 
-// pvUpdated updates the volumeIDToPvcMap when a PV goes to Bound phase.
+// pvUpdated updates the volumeIDToPvcMap and pvcToVolumeIDMap when a PV goes to Bound phase.
 func pvUpdated(oldObj, newObj interface{}) {
-	_, log := logger.GetNewContextWithLogger()
+	ctx, log := logger.GetNewContextWithLogger()
 	// Get old and new PV objects.
 	oldPv, ok := oldObj.(*v1.PersistentVolume)
 	if oldPv == nil || !ok {
@@ -1030,7 +1024,7 @@ func pvUpdated(oldObj, newObj interface{}) {
 	if oldPv.Status.Phase != v1.VolumeBound && newPv.Status.Phase == v1.VolumeBound {
 		if newPv.Spec.CSI != nil && newPv.Spec.CSI.Driver == csitypes.Name &&
 			newPv.Spec.ClaimRef != nil {
-			if !isFileVolume(newPv) {
+			if !isFileVolume(ctx, newPv) {
 
 				log.Debugf("pvUpdated: PV %s went to Bound phase", newPv.Name)
 				// Add volume handle to PVC mapping.
@@ -1038,7 +1032,9 @@ func pvUpdated(oldObj, newObj interface{}) {
 				objVal := newPv.Spec.ClaimRef.Namespace + "/" + newPv.Spec.ClaimRef.Name
 
 				k8sOrchestratorInstance.volumeIDToPvcMap.add(objKey, objVal)
-				log.Debugf("pvUpdated: Added '%s -> %s' pair to volumeIDToPvcMap", objKey, objVal)
+				k8sOrchestratorInstance.pvcToVolumeIDMap.add(objVal, objKey)
+				log.Debugf("pvUpdated: Added '%s and %s' mapping to pvcToVolumeIDMap and pvcToVolumeID",
+					objKey, objVal)
 			}
 			k8sOrchestratorInstance.volumeIDToNameMap.add(newPv.Spec.CSI.VolumeHandle, newPv.Name)
 			log.Debugf("pvUpdated: Added '%s -> %s' pair to volumeIDToNameMap", newPv.Spec.CSI.VolumeHandle, newPv.Name)
@@ -1059,7 +1055,7 @@ func pvUpdated(oldObj, newObj interface{}) {
 	}
 }
 
-// pvDeleted deletes an entry from volumeIDToPvcMap when a PV gets deleted.
+// pvDeleted deletes an entry from volumeIDToPvcMap and pvcToVolumeIDMap when a PV gets deleted.
 func pvDeleted(obj interface{}) {
 	_, log := logger.GetNewContextWithLogger()
 	pv, ok := obj.(*v1.PersistentVolume)
@@ -1067,14 +1063,16 @@ func pvDeleted(obj interface{}) {
 		log.Warnf("PVDeleted: unrecognized object %+v", obj)
 		return
 	}
-	log.Debugf("PV: %s deleted. Removing entry from volumeIDToPvcMap", pv.Name)
+	log.Debugf("PV: %s deleted. Removing entry from volumeIDToPvcMap and pvcToVolumeIDMap", pv.Name)
 
 	if pv.Spec.CSI != nil && pv.Spec.CSI.Driver == csitypes.Name {
 		k8sOrchestratorInstance.volumeIDToPvcMap.remove(pv.Spec.CSI.VolumeHandle)
 		log.Debugf("k8sorchestrator: Deleted key %s from volumeIDToPvcMap", pv.Spec.CSI.VolumeHandle)
 		k8sOrchestratorInstance.volumeIDToNameMap.remove(pv.Spec.CSI.VolumeHandle)
 		log.Debugf("k8sorchestrator: Deleted key %s from volumeIDToNameMap", pv.Spec.CSI.VolumeHandle)
-
+		k8sOrchestratorInstance.pvcToVolumeIDMap.remove(pv.Spec.ClaimRef.Namespace + "/" + pv.Spec.ClaimRef.Name)
+		log.Debugf("k8sorchestrator: Deleted key %s from pvcToVolumeID",
+			pv.Spec.ClaimRef.Namespace+"/"+pv.Spec.ClaimRef.Name)
 	}
 	if pv.Spec.VsphereVolume != nil && k8sOrchestratorInstance.IsFSSEnabled(context.Background(), common.CSIMigration) {
 		k8sOrchestratorInstance.volumeIDToNameMap.remove(pv.Spec.VsphereVolume.VolumePath)
@@ -1092,6 +1090,146 @@ func (c *K8sOrchestrator) GetAllK8sVolumes() []string {
 		volumeIDs = append(volumeIDs, volumeID)
 	}
 	return volumeIDs
+}
+
+// isSyncMapEmpty checks if given sync map is empty or not and returns bool value accordingly
+func isSyncMapEmpty(m *sync.Map) bool {
+	isEmpty := true
+	if m != nil {
+		m.Range(func(key, value interface{}) bool {
+			// If we find any element, the map is not empty
+			isEmpty = false
+			// Stop iteration immediately
+			return false
+		})
+	}
+	return isEmpty
+}
+
+// printCapabilitiesMap converts Capabilities sync map to regular map and prints it
+func printCapabilitiesMap(ctx context.Context, m *sync.Map) {
+	log := logger.GetLogger(ctx)
+	if m != nil {
+		printableMap := make(map[string]bool)
+		m.Range(func(key, value interface{}) bool {
+			printableMap[key.(string)] = value.(bool)
+			// Return true to continue iteration
+			return true
+		})
+
+		log.Infof("WCP cluster capabilities map - %+v", printableMap)
+	}
+}
+
+// HandleLateEnablementOfCapability starts a ticker and checks after every 2 minutes if
+// capability is enabled in capabilities CR or not.
+// If this capability was disabled and now got enabled, then container will be restarted.
+func (c *K8sOrchestrator) HandleLateEnablementOfCapability(ctx context.Context,
+	clusterFlavor cnstypes.CnsClusterFlavor, capability,
+	gcPort, gcEndpoint string) {
+	log := logger.GetLogger(ctx)
+	log.Infof("Starting a routine to handle late enablement for capability: %q", capability)
+	var restClientConfig *restclient.Config
+	var err error
+
+	if clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		restClientConfig, err = clientconfig.GetConfig()
+		if err != nil {
+			log.Errorf("failed to get Kubernetes config. Err: %+v", err)
+			os.Exit(1)
+		}
+	} else if clusterFlavor == cnstypes.CnsClusterFlavorGuest {
+		restClientConfig = k8s.GetRestClientConfigForSupervisor(ctx,
+			gcEndpoint, gcPort)
+		for {
+			// If supervisor is old but TKR is new, it could happen that Capabilities CR is not
+			// registered on the supervisor. So, before starting a ticker check if Capabilities
+			// CR is registered on the supervisor.
+			apiextensionsClientSet, err := apiextensionsclientset.NewForConfig(restClientConfig)
+			if err != nil {
+				log.Errorf("failed to create apiextension clientset using config. Err: %+v", err)
+				os.Exit(1)
+			}
+			_, err = apiextensionsClientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx,
+				"capabilities.iaas.vmware.com", metav1.GetOptions{})
+			if err != nil {
+				if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+					// If capabilities CR is not registered on supervisor, then sleep for some time and check
+					// again if CR has been registered on supervisor. If TKR is new, but supervisor is old, then
+					// it could happen that capabilities CR is not registered on the supervisor cluster.
+					// But when supervisor cluster is upgraded, capabilities CR might get registered and in that
+					// case we have to start a ticker to watch on capability value changes.
+					log.Infof("CR instance capabilities.iaas.vmware.com is not registered on supervisor, " +
+						"sleep for some time and check again if the CR instance is registered " +
+						"on the supervisor cluster.")
+					time.Sleep(10 * time.Minute)
+					continue
+				} else {
+					log.Errorf("failed to check if Capabilities CR is registered. Err: %v", err)
+					os.Exit(1)
+				}
+			}
+			break
+		}
+	}
+
+	wcpCapabilityApiClient, err := k8s.NewClientForGroup(ctx, restClientConfig, wcpcapapis.GroupName)
+	if err != nil {
+		log.Errorf("failed to create wcpCapabilityApi client. Err: %+v", err)
+		os.Exit(1)
+	}
+	ticker := time.NewTicker(time.Duration(2) * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		err := SetWcpCapabilitiesMap(ctx, wcpCapabilityApiClient)
+		if err != nil {
+			log.Errorf("failed to set WCP capabilities map, Err: %+v", err)
+			os.Exit(1)
+		}
+		if capVal, ok := WcpCapabilitiesMap.Load(capability); ok && capVal.(bool) {
+			log.Infof("Capability %s changed state to %t in capabilities CR %s. "+
+				"Restarting the container as capability has changed.", capability, capVal.(bool),
+				common.WCPCapabilitiesCRName)
+			if clusterFlavor == cnstypes.CnsClusterFlavorWorkload && capability == common.WorkloadDomainIsolation {
+				// when  Workload_Domain_Isolation_Supported Capability is enabled, enable workload-domain-isolation FSS
+				// in the config secret
+				// This is required for backward compatibility of released TKR versions on newer version of supervisor
+				err = c.EnableFSS(ctx, common.WorkloadDomainIsolationFSS)
+				if err != nil {
+					log.Errorf("failed to enable CNS-CSI FSS %q, err: %+v",
+						common.WorkloadDomainIsolationFSS, err)
+					os.Exit(1)
+				}
+				log.Infof("Successfully updated CNS-CSI FSS: %q to true", common.WorkloadDomainIsolationFSS)
+			}
+			os.Exit(1)
+		}
+	}
+}
+
+// SetWcpCapabilitiesMap reads the capabilities values from 'supervisor-capabilities' CR in
+// supervisor cluster and sets values in global wcp capabilities map.
+func SetWcpCapabilitiesMap(ctx context.Context, wcpCapabilityApiClient client.Client) error {
+	log := logger.GetLogger(ctx)
+	// Check the 'supervisor-capabilities' CR in supervisor
+	wcpCapabilities := &wcpcapv1alph1.Capabilities{}
+	err := wcpCapabilityApiClient.Get(ctx, k8stypes.NamespacedName{
+		Name: common.WCPCapabilitiesCRName},
+		wcpCapabilities)
+	if err != nil {
+		log.Errorf("failed to fetch Capabilities CR instance "+
+			" with name %q Error: %+v", common.WCPCapabilitiesCRName, err)
+		return err
+	}
+
+	if WcpCapabilitiesMap == nil {
+		log.Debug("Initializing WcpCapabilitiesMap")
+		WcpCapabilitiesMap = &sync.Map{}
+	}
+	for capName, capStatus := range wcpCapabilities.Status.Supervisor {
+		WcpCapabilitiesMap.Store(string(capName), capStatus.Activated)
+	}
+	return nil
 }
 
 // IsFSSEnabled utilises the cluster flavor to check their corresponding FSS
@@ -1131,61 +1269,63 @@ func (c *K8sOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) 
 	} else if c.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
 		// Check if it is WCP defined feature state.
 		if _, exists := common.WCPFeatureStates[featureName]; exists {
-			log.Infof("Feature %q is a WCP defined feature state. Reading the %q configmap in %q namespace.",
-				featureName, common.WCPCapabilityConfigMapName, common.KubeSystemNamespace)
-			// Check the `wcp-cluster-capabilities` configmap in supervisor for the FSS value.
-			if wcpCapabilityFssMap == nil {
-				wcpCapabilityConfigMap, err := c.k8sClient.CoreV1().ConfigMaps(common.KubeSystemNamespace).Get(ctx,
-					common.WCPCapabilityConfigMapName, metav1.GetOptions{})
-				if err != nil {
-					log.Errorf("failed to fetch WCP FSS configmap %q/%q. Setting the feature state "+
-						"to false. Error: %+v", common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
-					return false
-				}
-				wcpCapabilityFssMap = wcpCapabilityConfigMap.Data
-				log.Infof("WCP cluster capabilities map - %+v", wcpCapabilityFssMap)
-			}
-			if fssVal, exists := wcpCapabilityFssMap[featureName]; exists {
-				supervisorFeatureState, err = strconv.ParseBool(fssVal)
-				if err != nil {
-					log.Errorf("Error while converting %q feature state with value: %q in "+
-						"%q/%q configmap to boolean. Setting the feature state to false. Error: %+v", featureName,
-						fssVal, common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
-					return false
-				}
-				log.Debugf("Supervisor feature state %q in WCP cluster capabilities is set to %t", featureName,
-					supervisorFeatureState)
+			log.Debugf("Feature %q is a WCP defined feature state. Reading the capabilities CR %q.",
+				featureName, common.WCPCapabilitiesCRName)
 
-				if !supervisorFeatureState {
-					// if capability can be enabled after upgrading CSI, we need to fetch config again and confirm FSS
-					// is still disabled, or it got enabled
+			if isSyncMapEmpty(WcpCapabilitiesMap) {
+				restConfig, err := clientconfig.GetConfig()
+				if err != nil {
+					log.Errorf("failed to get Kubernetes config. Err: %+v", err)
+					return false
+				}
+				wcpCapabilityApiClient, err := k8s.NewClientForGroup(ctx, restConfig, wcpcapapis.GroupName)
+				if err != nil {
+					log.Errorf("failed to create wcpCapabilityApi client. Err: %+v", err)
+					return false
+				}
+				err = SetWcpCapabilitiesMap(ctx, wcpCapabilityApiClient)
+				if err != nil {
+					log.Errorf("failed to set WCP capabilities map, Err: %+v", err)
+					return false
+				}
+				printCapabilitiesMap(ctx, WcpCapabilitiesMap)
+			}
+			if supervisorFeatureState, exists := WcpCapabilitiesMap.Load(featureName); exists {
+				log.Debugf("Supervisor capability %q is set to %t", featureName, supervisorFeatureState.(bool))
+
+				if !supervisorFeatureState.(bool) {
+					// if capability can be enabled after upgrading CSI, we need to fetch capabilities CR again and
+					// confirm FSS is still disabled, or it got enabled.
 					// WCPFeatureStatesSupportsLateEnablement contains capabilities which can be enabled later after
-					// CSI is upgraded and up and running
+					// CSI is upgraded and up and running.
 					if _, exists = common.WCPFeatureStatesSupportsLateEnablement[featureName]; exists {
-						wcpCapabilityConfigMap, err := c.k8sClient.CoreV1().ConfigMaps(common.KubeSystemNamespace).Get(ctx,
-							common.WCPCapabilityConfigMapName, metav1.GetOptions{})
+						restConfig, err := clientconfig.GetConfig()
 						if err != nil {
-							log.Errorf("failed to fetch WCP FSS configmap %q/%q. Setting the feature state "+
-								"to false. Error: %+v", common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
+							log.Errorf("failed to get Kubernetes config. Err: %+v", err)
 							return false
 						}
-						wcpCapabilityFssMap = wcpCapabilityConfigMap.Data
-						log.Infof("WCP cluster capabilities map - %+v", wcpCapabilityFssMap)
+						wcpCapabilityApiClient, err := k8s.NewClientForGroup(ctx, restConfig, wcpcapapis.GroupName)
+						if err != nil {
+							log.Errorf("failed to create wcpCapabilityApi client. Err: %+v", err)
+							return false
+						}
+						err = SetWcpCapabilitiesMap(ctx, wcpCapabilityApiClient)
+						if err != nil {
+							log.Errorf("failed to set WCP capabilities map, Err: %+v", err)
+							return false
+						}
 
-						if fssVal, exists := wcpCapabilityFssMap[featureName]; exists {
-							supervisorFeatureState, err = strconv.ParseBool(fssVal)
-							if err != nil {
-								log.Errorf("Error while converting %q feature state with value: %q in "+
-									"%q/%q configmap to boolean. Setting the feature state to false. Error: %+v", featureName,
-									fssVal, common.KubeSystemNamespace, common.WCPCapabilityConfigMapName, err)
-								return false
+						if supervisorFeatureState, exists = WcpCapabilitiesMap.Load(featureName); exists {
+							log.Debugf("Supervisor capability %q was disabled, "+
+								"now it is set to %t", featureName, supervisorFeatureState.(bool))
+							if supervisorFeatureState.(bool) {
+								log.Infof("Supervisor capabilty %q was disabled, but now it has been enabled.",
+									featureName)
 							}
-							log.Debugf("Supervisor feature state %q in WCP cluster capabilities is set to %t", featureName,
-								supervisorFeatureState)
 						}
 					}
 				}
-				return supervisorFeatureState
+				return supervisorFeatureState.(bool)
 			}
 			return false
 		}
@@ -1214,6 +1354,66 @@ func (c *K8sOrchestrator) IsFSSEnabled(ctx context.Context, featureName string) 
 				log.Info("CSI Windows Suppport is set to true in pvcsi fss configmap. Skipping SV FSS check")
 				return true
 			}
+
+			// If PVCSI FSS has associated WCP capability in supervisor cluster, then check if that WCP
+			// capability is enabled or disabled by fetching its value from capabilities CR on supervisor.
+			if wcpFeatureState, exists := common.WCPFeatureStateAssociatedWithPVCSI[featureName]; exists {
+				if isSyncMapEmpty(WcpCapabilitiesMap) {
+					// Read capabilities CR from supervisor cluster
+					cfg, err := cnsconfig.GetConfig(ctx)
+					if err != nil {
+						log.Errorf("failed to read config. Error: %+v", err)
+						return false
+					}
+					// Get rest client config for supervisor.
+					restClientConfig := k8s.GetRestClientConfigForSupervisor(ctx, cfg.GC.Endpoint, cfg.GC.Port)
+					// Check if CRD for capabilities exists
+					// If CRD does not exist on supervisor then skip further capability check
+					// this is case when tkr is newer and supervisor is older where capabilities CRD does not exist.
+					apiextensionsClientSet, err := apiextensionsclientset.NewForConfig(restClientConfig)
+					if err != nil {
+						log.Errorf("failed to create apiextension clientset using config. Err: %+v", err)
+						return false
+					}
+					_, err = apiextensionsClientSet.ApiextensionsV1().CustomResourceDefinitions().Get(ctx,
+						"capabilities.iaas.vmware.com", metav1.GetOptions{})
+					if err != nil {
+						if featureName == common.WorkloadDomainIsolationFSS {
+							// prefer CSI internal feature-state configmap for workload-domain-isolation feature
+							// in case capabilities CRD is not registred on supervisor
+							log.Info("CSI workload-domain-isolation is set to true in pvcsi fss configmap. " +
+								"check if it is enabled in cns-csi fss")
+							return c.IsCNSCSIFSSEnabled(ctx, featureName)
+						}
+						if apierrors.IsNotFound(err) || apierrors.IsForbidden(err) {
+							log.Info("CR instance capabilities.iaas.vmware.com is not registered on supervisor, " +
+								"considering feature to be false")
+							return false
+						}
+						log.Errorf("failed to check if Capabilities CR is registered. Err: %v", err)
+						return false
+					}
+					wcpCapabilityApiClient, err := k8s.NewClientForGroup(ctx, restClientConfig, wcpcapapis.GroupName)
+					if err != nil {
+						log.Errorf("failed to create wcpCapabilityApi client. Err: %+v", err)
+						return false
+					}
+					err = SetWcpCapabilitiesMap(ctx, wcpCapabilityApiClient)
+					if err != nil {
+						log.Errorf("failed to set WCP capabilities map, Err: %+v", err)
+						return false
+					}
+					printCapabilitiesMap(ctx, WcpCapabilitiesMap)
+				}
+
+				if supervisorFeatureState, exists := WcpCapabilitiesMap.Load(wcpFeatureState); exists {
+					log.Debugf("Supervisor capability %q is set to %t", wcpFeatureState,
+						supervisorFeatureState.(bool))
+					return supervisorFeatureState.(bool)
+				}
+				return false
+			}
+
 			return c.IsCNSCSIFSSEnabled(ctx, featureName)
 		}
 		return false
@@ -1282,30 +1482,26 @@ func (c *K8sOrchestrator) IsPVCSIFSSEnabled(ctx context.Context, featureName str
 // EnableFSS helps enable feature state switch in the FSS config map
 func (c *K8sOrchestrator) EnableFSS(ctx context.Context, featureName string) error {
 	log := logger.GetLogger(ctx)
-	if c.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
-		csifeaturestatesconfigmap, err := c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Get(ctx,
-			cnsconfig.DefaultSupervisorFSSConfigMapName, metav1.GetOptions{})
-		if err != nil {
-			log.Errorf("failed to "+
-				"get configmap: %q from namespace: %q. err: %v",
-				cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, err)
-			return err
-		}
-		csifeaturestatesconfigmap.Data[featureName] = "true"
-		csifeaturestatesconfigmap, err = c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Update(ctx,
-			csifeaturestatesconfigmap, metav1.UpdateOptions{})
-		if err != nil {
-			log.Errorf("failed to update configmap: %q in namespace: %q to enable FSS %q. err: %v",
-				cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName, err)
-			return err
-		}
-		log.Infof("Successfully updated configmap: %q in namespace: %q to enable FSS %q. ConfigMapData: %v",
-			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName,
-			csifeaturestatesconfigmap.Data)
-		return nil
-	} else {
-		return fmt.Errorf("EnableFSS is not implemented for clusterFlavor: %q", c.clusterFlavor)
+	csifeaturestatesconfigmap, err := c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Get(ctx,
+		cnsconfig.DefaultSupervisorFSSConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("failed to "+
+			"get configmap: %q from namespace: %q. err: %v",
+			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, err)
+		return err
 	}
+	csifeaturestatesconfigmap.Data[featureName] = "true"
+	csifeaturestatesconfigmap, err = c.k8sClient.CoreV1().ConfigMaps(cnsconfig.DefaultCSINamespace).Update(ctx,
+		csifeaturestatesconfigmap, metav1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("failed to update configmap: %q in namespace: %q to enable FSS %q. err: %v",
+			cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName, err)
+		return err
+	}
+	log.Infof("Successfully updated configmap: %q in namespace: %q to enable FSS %q. ConfigMapData: %v",
+		cnsconfig.DefaultSupervisorFSSConfigMapName, cnsconfig.DefaultCSINamespace, featureName,
+		csifeaturestatesconfigmap.Data)
+	return nil
 }
 
 // DisableFSS helps disable feature state switch in the FSS config map
@@ -1313,6 +1509,19 @@ func (c *K8sOrchestrator) DisableFSS(ctx context.Context, featureName string) er
 	log := logger.GetLogger(ctx)
 	return logger.LogNewErrorCode(log, codes.Unimplemented,
 		"DisableFSS is not implemented.")
+}
+
+// GetPvcObjectByName returns PVC object for the given pvc name in the said namespace.
+func (c *K8sOrchestrator) GetPvcObjectByName(ctx context.Context, pvcName string,
+	namespace string) (*v1.PersistentVolumeClaim, error) {
+	log := logger.GetLogger(ctx)
+	pvcObj, err := c.informerManager.GetPVCLister().PersistentVolumeClaims(namespace).Get(pvcName)
+	if err != nil {
+		log.Errorf("failed to get pvc: %s in namespace: %s. err=%v", pvcName, namespace, err)
+		return nil, err
+	}
+	return pvcObj, nil
+
 }
 
 // IsFakeAttachAllowed checks if the volume is eligible to be fake attached
@@ -1791,4 +2000,220 @@ func (c *K8sOrchestrator) CreateConfigMap(ctx context.Context, name string, name
 // GetPVNameFromCSIVolumeID retrieves the pv name from volumeID using volumeIDToNameMap.
 func (c *K8sOrchestrator) GetPVNameFromCSIVolumeID(volumeID string) (string, bool) {
 	return c.volumeIDToNameMap.get(volumeID)
+}
+
+// GetPVCNameFromCSIVolumeID returns `pvc name` and `pvc namespace` for the given volumeID using volumeIDToPvcMap.
+func (c *K8sOrchestrator) GetPVCNameFromCSIVolumeID(volumeID string) (
+	pvcName string, pvcNamespace string, exists bool) {
+	namespacedName, ok := c.volumeIDToPvcMap.get(volumeID)
+	if !ok {
+		return
+	}
+
+	parts := strings.Split(namespacedName, "/")
+	return parts[1], parts[0], true
+}
+
+// GetVolumeIDFromPVCName returns volumeID the given pvcName using pvcToVolumeIDMap.
+// PVC name is its namespaced name.
+func (c *K8sOrchestrator) GetVolumeIDFromPVCName(pvcName string) (string, bool) {
+	return c.pvcToVolumeIDMap.get(pvcName)
+}
+
+// IsLinkedCloneRequest checks if the pvc is a linked clone request
+func (c *K8sOrchestrator) IsLinkedCloneRequest(ctx context.Context, pvcName string, pvcNamespace string) (bool, error) {
+	log := logger.GetLogger(ctx)
+	if pvcName == "" || pvcNamespace == "" {
+		errMsg := "cannot determine if it's a LinkedClone request. PVC name and/or namespace are missing"
+		return false, logger.LogNewErrorf(log, "%s", errMsg)
+	}
+	pvcObj, err := c.k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Errorf("PVC %s is not found in namespace %s using informer manager, err: %+v",
+				pvcName, pvcNamespace, err)
+			return false, common.ErrNotFound
+		}
+		log.Errorf("failed to get pvc: %s in namespace: %s. err=%v", pvcName, pvcNamespace, err)
+		return false, err
+	}
+	hasLinkedCloneAnn := metav1.HasAnnotation(pvcObj.ObjectMeta, common.AnnKeyLinkedClone)
+	var fss string
+	if c.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		fss = common.LinkedCloneSupport
+	} else if c.clusterFlavor == cnstypes.CnsClusterFlavorGuest {
+		fss = common.LinkedCloneSupportFSS
+	} else {
+		// LinkedClone not supported in vanilla
+		return false, nil
+	}
+	isLinkedCloneSupported := c.IsFSSEnabled(ctx, fss)
+
+	if hasLinkedCloneAnn && !isLinkedCloneSupported {
+		log.Errorf("linked clone support is not enabled for the linked clone request pvc %s in namespace %s",
+			pvcName, pvcNamespace)
+		return false, errors.New("linked clone support is not enabled for the linked clone " +
+			"request pvc " + pvcName + " in namespace " + pvcNamespace)
+	}
+	if hasLinkedCloneAnn {
+		return true, nil
+	}
+	// default false
+	return false, nil
+}
+
+// GetLinkedCloneVolumeSnapshotSourceUUID retrieves the source of the LinkedClone. For now, it's going to be
+// the VolumeSnapshot
+func (c *K8sOrchestrator) GetLinkedCloneVolumeSnapshotSourceUUID(ctx context.Context, pvcName string,
+	pvcNamespace string) (string, error) {
+	log := logger.GetLogger(ctx)
+	if pvcName == "" || pvcNamespace == "" {
+		errMsg := "cannot retrieve LinkedClone's VolumeSnapshot source. PVC name and/or namespace are missing"
+		return "", logger.LogNewErrorf(log, "%s", errMsg)
+	}
+	linkedClonePVC, err := c.k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName,
+		metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Errorf("PVC %s is not found in namespace %s, err: %+v",
+				pvcName, pvcNamespace, err)
+			return "", common.ErrNotFound
+		}
+		log.Errorf("failed to get pvc: %s in namespace: %s. err=%v", pvcName, pvcNamespace, err)
+		return "", err
+	}
+
+	// Retrieve the VolumeSnapshot from which the LinkedClone is being created
+	dataSource, err := GetPVCDataSource(ctx, linkedClonePVC)
+	if err != nil {
+		log.Errorf("failed to get data source for linked clone PVC %s in "+
+			"namespace %s. err: %v", pvcName, pvcNamespace, err)
+		return "", err
+	}
+	volumeSnapshot, err := c.snapshotterClient.SnapshotV1().VolumeSnapshots(dataSource.Namespace).Get(ctx,
+		dataSource.Name, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("failed to get source volumesnaphot %s/%s for linked clone PVC %s in "+
+			"namespace %s. err: %v", dataSource.Namespace, dataSource.Name, pvcName, pvcNamespace, err)
+		return "", err
+	}
+	vsUID := string(volumeSnapshot.UID)
+	log.Debugf("volumesnaphot %s/%s  has UID: %s for linked clone PVC %s/%s ",
+		dataSource.Namespace, dataSource.Name, vsUID, pvcName, pvcNamespace)
+	return vsUID, nil
+}
+
+// PreLinkedCloneCreateAction updates the PVC label with the values specified in map
+func (c *K8sOrchestrator) PreLinkedCloneCreateAction(ctx context.Context, pvcName string, pvcNamespace string) error {
+	log := logger.GetLogger(ctx)
+	if pvcName == "" || pvcNamespace == "" {
+		errMsg := "error updating the LinkedClone PVC label as pvc name or namespace is empty"
+		return logger.LogNewErrorf(log, "%s", errMsg)
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+
+		linkedClonePVC, err := c.k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName,
+			metav1.GetOptions{})
+		if err != nil {
+			log.Errorf("failed to get pvc: %s in namespace: %s. err=%v", pvcName, pvcNamespace, err)
+			return err
+		}
+
+		if linkedClonePVC.Labels == nil {
+			linkedClonePVC.Labels = make(map[string]string)
+		}
+		// Add label
+		if _, ok := linkedClonePVC.Labels[common.AnnKeyLinkedClone]; !ok {
+			linkedClonePVC.Labels[common.LinkedClonePVCLabel] = linkedClonePVC.Annotations[common.AttributeIsLinkedClone]
+		}
+
+		_, err = c.k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Update(ctx, linkedClonePVC, metav1.UpdateOptions{})
+		if err != nil {
+			log.Errorf("failed to add linked clone label for PVC %s/%s. Error: %+v, retrying...",
+				pvcNamespace, pvcName, err)
+			return err
+		}
+		log.Infof("Successfully added linked clone label for PVC %s/%s",
+			pvcNamespace, pvcName)
+		return nil
+	})
+}
+
+// GetVolumeSnapshotPVCSource retrieves the PVC from which the VolumeSnapshot was taken.
+func (c *K8sOrchestrator) GetVolumeSnapshotPVCSource(ctx context.Context, volumeSnapshotNamespace string,
+	volumeSnapshotName string) (*v1.PersistentVolumeClaim, error) {
+	log := logger.GetLogger(ctx)
+	if volumeSnapshotNamespace == "" || volumeSnapshotName == "" {
+		errMsg := "error getting volume snapshot PVC source as volumesnapshot name and/or namespace is empty"
+		return nil, logger.LogNewErrorf(log, "%s", errMsg)
+	}
+	volumeSnapshot, err := c.snapshotterClient.SnapshotV1().VolumeSnapshots(volumeSnapshotNamespace).Get(
+		ctx, volumeSnapshotName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error getting snapshot %s/%s from API server. Error: %v",
+			volumeSnapshotNamespace, volumeSnapshotName, err)
+	}
+	sourcePVCName := volumeSnapshot.Spec.Source.PersistentVolumeClaimName
+	// Retrieve the source volume
+	sourcePVC, err := c.k8sClient.CoreV1().PersistentVolumeClaims(volumeSnapshotNamespace).Get(ctx, *sourcePVCName,
+		metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("error getting source PVC: %s for snapshot %s/%s from API server. Error: %v",
+			*sourcePVCName, volumeSnapshotNamespace, volumeSnapshotName, err)
+	}
+	log.Infof("GetVolumeSnapshotPVCSource: successfully retrieved source PVC %s for snapshot %s/%s",
+		sourcePVC.Name, volumeSnapshotNamespace, volumeSnapshotName)
+	return sourcePVC, nil
+}
+
+// UpdatePersistentVolumeLabel Updates the PV label with the specified key value.
+func (c *K8sOrchestrator) UpdatePersistentVolumeLabel(ctx context.Context,
+	pvName string, key string, value string) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		log := logger.GetLogger(ctx)
+		pv, err := c.k8sClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+		if err != nil {
+			return fmt.Errorf("error getting PV %s from API server: %w", pvName, err)
+		}
+		if pv.Labels == nil {
+			pv.Labels = make(map[string]string)
+		}
+		pv.Labels[key] = value
+		_, err = c.k8sClient.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
+		if err != nil {
+			errMsg := fmt.Sprintf("error updating PV %s with labels %s/%s. Error: %v", pvName, key, value, err)
+			log.Error(errMsg)
+			return err
+		}
+		log.Infof("Successfully updated PV %s with label key:%s value:%s", pvName, key, value)
+		return nil
+	})
+}
+
+// GetPVCDataSource Retrieves the VolumeSnapshot source when a PVC from VolumeSnapshot is being created.
+func GetPVCDataSource(ctx context.Context, claim *v1.PersistentVolumeClaim) (*v1.ObjectReference, error) {
+	var dataSource v1.ObjectReference
+	if claim.Spec.DataSourceRef != nil {
+		dataSource.Kind = claim.Spec.DataSourceRef.Kind
+		dataSource.Name = claim.Spec.DataSourceRef.Name
+		if claim.Spec.DataSourceRef.APIGroup != nil {
+			dataSource.APIVersion = *claim.Spec.DataSourceRef.APIGroup
+		}
+		if claim.Spec.DataSourceRef.Namespace != nil {
+			dataSource.Namespace = *claim.Spec.DataSourceRef.Namespace
+		} else {
+			dataSource.Namespace = claim.Namespace
+		}
+	} else if claim.Spec.DataSource != nil {
+		dataSource.Kind = claim.Spec.DataSource.Kind
+		dataSource.Name = claim.Spec.DataSource.Name
+
+		if claim.Spec.DataSource.APIGroup != nil {
+			dataSource.APIVersion = *claim.Spec.DataSource.APIGroup
+		}
+		dataSource.Namespace = claim.Namespace
+	} else {
+		return nil, nil
+	}
+	return &dataSource, nil
 }

@@ -33,7 +33,6 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -44,7 +43,8 @@ import (
 	admissionapi "k8s.io/pod-security-admission/api"
 )
 
-var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation policy retain", func() {
+var _ = ginkgo.Describe("[csi-guest][ef-vks] [ef-vks-n1][ef-vks-n2] Volume Expansion Tests "+
+	"with reclaimation policy retain", func() {
 	f := framework.NewDefaultFramework("gc-resize-reclaim-policy-retain")
 	f.NamespacePodSecurityEnforceLevel = admissionapi.LevelPrivileged
 	var (
@@ -127,7 +127,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 
 		// Replace second element with pod.Name.
 		if windowsEnv {
-			cmd = []string{"exec", "", "--namespace=" + namespace, "powershell.exe", "cat", "/mnt/volume1/fstype.txt"}
+			cmd = []string{"exec", "", "--namespace=" + namespace, "--", "powershell.exe", "-Command", "cat",
+				"/mnt/volume1/fstype.txt"}
 		} else {
 			cmd = []string{"exec", "", "--namespace=" + namespace, "--", "/bin/sh", "-c", "df -Tkm | grep /mnt/volume1"}
 		}
@@ -207,7 +208,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 	// 18. Delete PVC created in step 6.
 	// 19. Delete PV leftover in GC.
 	// 20. Delete SC created in step 1.
-	ginkgo.It("PV with reclaim policy can be reused and resized with pod", func() {
+	ginkgo.It("PV with reclaim policy can be reused and resized with pod", ginkgo.Label(p0, block, tkg,
+		windows, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		// Create a Pod to use this PVC, and verify volume has been attached.
@@ -412,7 +414,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 	// 16. delete SC created in step 1 and step 7.
 	// 17. delete GC2.
 	// Steps 6 and 17 need to run manually before and after this suite.
-	ginkgo.It("PV with reclaim policy retain can be resized when used in a fresh GC", func() {
+	ginkgo.It("[ef-vks-f] [ef-vks-n1-f][ef-vks-n2-f] PV with reclaim policy retain can be resized "+
+		"when used in a fresh GC", ginkgo.Label(p0, block, tkg, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		newGcKubconfigPath := os.Getenv("NEW_GUEST_CLUSTER_KUBE_CONFIG")
@@ -586,7 +589,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 				"exec",
 				pod.Name,
 				"--namespace=" + namespaceNewGC,
-				"powershell.exe",
+				"powershell.exe -Command",
 				"cat",
 				"/mnt/volume1/fstype.txt",
 			}
@@ -669,7 +672,8 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 		15. Delete SC
 
 	*/
-	ginkgo.It("Verify online volume expansion when PV with reclaim policy is reused to create PVC", func() {
+	ginkgo.It("Verify online volume expansion when PV with reclaim policy is reused to create PVC", ginkgo.Label(p0,
+		block, tkg, vc70), func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -804,6 +808,7 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 
 		ginkgo.By("File system resize finished successfully in GC")
 		ginkgo.By("Checking for PVC resize completion on SVC PVC")
+		time.Sleep(pollTimeoutShort)
 		gomega.Expect(verifyResizeCompletedInSupervisor(svcPVCName)).To(gomega.BeTrue())
 
 	})
@@ -833,7 +838,9 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 	//    16. delete SC created in step 1 and step 7.
 	//    17. delete GC1.
 
-	ginkgo.It("online volume expansion-PV with reclaim policy retain can be resized when used in a fresh GC", func() {
+	ginkgo.It("[ef-vks-f][ef-vks-n1-f][ef-vks-n2-f] online volume expansion-PV with reclaim "+
+		"policy retain can be resized when used in a fresh GC", ginkgo.Label(p0,
+		block, tkg, vc70), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -993,8 +1000,9 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 	// 11. verify File system size
 	// 12. Delete POD, PVC, PV and SC
 
-	ginkgo.It("Offline resize of PVC in GC1, Delete PVC and PV in GC1. Statically "+
-		"prov same PVC and PV in GC1 and deploy a Pod and trigger online volume expansion", func() {
+	ginkgo.It("[ef-vks-f][ef-vks-n1-f][ef-vks-n2-f] Offline resize of PVC in GC1, Delete PVC "+
+		"and PV in GC1. Statically prov same PVC and PV in GC1 and deploy a Pod and "+
+		"trigger online volume expansion", ginkgo.Label(p0, block, tkg, vc70), func() {
 		var err error
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -1134,19 +1142,3 @@ var _ = ginkgo.Describe("[csi-guest] Volume Expansion Tests with reclaimation po
 	})
 
 })
-
-func waitForPvToBeReleased(ctx context.Context, client clientset.Interface,
-	pvName string) (*v1.PersistentVolume, error) {
-	var pv *v1.PersistentVolume
-	var err error
-	waitErr := wait.PollUntilContextTimeout(ctx, resizePollInterval, pollTimeoutShort, true,
-		func(ctx context.Context) (bool, error) {
-			pv, err = client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
-			gomega.Expect(err).NotTo(gomega.HaveOccurred())
-			if pv.Status.Phase == v1.VolumeReleased {
-				return true, nil
-			}
-			return false, nil
-		})
-	return pv, waitErr
-}

@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2019 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-    http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package methods
 
@@ -358,6 +346,46 @@ func (b *CnsSyncDatastoreBody) Fault() *soap.Fault { return b.Fault_ }
 // Note: To be used only by VMware's internal support tools.
 func CnsSyncDatastore(ctx context.Context, r soap.RoundTripper, req *types.CnsSyncDatastore) (*types.CnsSyncDatastoreResponse, error) {
 	var reqBody, resBody CnsSyncDatastoreBody
+
+	reqBody.Req = req
+
+	if err := r.RoundTrip(ctx, &reqBody, &resBody); err != nil {
+		return nil, err
+	}
+
+	return resBody.Res, nil
+}
+
+type CnsSyncVolumeBody struct {
+	Req    *types.CnsSyncVolume         `xml:"urn:vsan CnsSyncVolume,omitempty"`
+	Res    *types.CnsSyncVolumeResponse `xml:"urn:vsan CnsSyncVolumeResponse,omitempty"`
+	Fault_ *soap.Fault                  `xml:"http://schemas.xmlsoap.org/soap/envelope/ Fault,omitempty"`
+}
+
+func (b *CnsSyncVolumeBody) Fault() *soap.Fault { return b.Fault_ }
+
+func CnsSyncVolume(ctx context.Context, r soap.RoundTripper, req *types.CnsSyncVolume) (*types.CnsSyncVolumeResponse, error) {
+	var reqBody, resBody CnsSyncVolumeBody
+
+	reqBody.Req = req
+
+	if err := r.RoundTrip(ctx, &reqBody, &resBody); err != nil {
+		return nil, err
+	}
+
+	return resBody.Res, nil
+}
+
+type CnsUnregisterVolumeBody struct {
+	Req    *types.CnsUnregisterVolume         `xml:"urn:vsan CnsUnregisterVolume,omitempty"`
+	Res    *types.CnsUnregisterVolumeResponse `xml:"urn:vsan CnsUnregisterVolumeResponse,omitempty"`
+	Fault_ *soap.Fault                        `xml:"http://schemas.xmlsoap.org/soap/envelope/ Fault,omitempty"`
+}
+
+func (b *CnsUnregisterVolumeBody) Fault() *soap.Fault { return b.Fault_ }
+
+func CnsUnregisterVolume(ctx context.Context, r soap.RoundTripper, req *types.CnsUnregisterVolume) (*types.CnsUnregisterVolumeResponse, error) {
+	var reqBody, resBody CnsUnregisterVolumeBody
 
 	reqBody.Req = req
 

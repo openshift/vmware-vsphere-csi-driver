@@ -19,6 +19,7 @@ package e2e
 import (
 	"bytes"
 	"context"
+	cryptoRand "crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
@@ -51,9 +52,10 @@ import (
 	vsanfstypes "github.com/vmware/govmomi/vsan/vsanfs/types"
 	"golang.org/x/crypto/ssh"
 	"gopkg.in/yaml.v2"
-
 	appsv1 "k8s.io/api/apps/v1"
+	authenticationv1 "k8s.io/api/authentication/v1"
 	v1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -68,6 +70,7 @@ import (
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	clientcmdapi "k8s.io/client-go/tools/clientcmd/api"
 	"k8s.io/kubectl/pkg/drain"
 	"k8s.io/kubectl/pkg/util/podutils"
 	"k8s.io/kubernetes/test/e2e/framework"
@@ -82,7 +85,6 @@ import (
 	fss "k8s.io/kubernetes/test/e2e/framework/statefulset"
 	"k8s.io/pod-security-admission/api"
 	"k8s.io/utils/strings/slices"
-
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	cnsoperatorv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator"
@@ -97,9 +99,7 @@ import (
 var (
 	defaultCluster         *object.ClusterComputeResource
 	svcClient              clientset.Interface
-	svcClient1             clientset.Interface
 	svcNamespace           string
-	svcNamespace1          string
 	vsanHealthClient       *VsanClient
 	clusterComputeResource []*object.ClusterComputeResource
 	defaultDatastore       *object.Datastore
@@ -586,11 +586,13 @@ func getVSphereStorageClassSpec(scName string, scParameters map[string]string,
 
 // getPvFromClaim returns PersistentVolume for requested claim.
 func getPvFromClaim(client clientset.Interface, namespace string, claimName string) *v1.PersistentVolume {
+
+	adminClient, client := initializeClusterClientsByUserRoles(client)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	pvclaim, err := client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, claimName, metav1.GetOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	pv, err := client.CoreV1().PersistentVolumes().Get(ctx, pvclaim.Spec.VolumeName, metav1.GetOptions{})
+	pv, err := adminClient.CoreV1().PersistentVolumes().Get(ctx, pvclaim.Spec.VolumeName, metav1.GetOptions{})
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return pv
 }
@@ -826,11 +828,12 @@ func createStorageClass(client clientset.Interface, scParameters map[string]stri
 	allowVolumeExpansion bool, scName string) (*storagev1.StorageClass, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	var storageclass *storagev1.StorageClass
+
 	var err error
+	adminClient, _ := initializeClusterClientsByUserRoles(client)
+	var storageclass *storagev1.StorageClass
 	isStorageClassPresent := false
 	p := map[string]string{}
-
 	if scParameters == nil && os.Getenv(envHciMountRemoteDs) == "true" {
 		p[scParamStoragePolicyName] = os.Getenv(envStoragePolicyNameForHCIRemoteDatastores)
 		scParameters = p
@@ -840,7 +843,7 @@ func createStorageClass(client clientset.Interface, scParameters map[string]stri
 		scName, scParameters, allowedTopologies, scReclaimPolicy, allowVolumeExpansion))
 
 	if supervisorCluster {
-		storageclass, err = client.StorageV1().StorageClasses().Get(ctx, scName, metav1.GetOptions{})
+		storageclass, err = adminClient.StorageV1().StorageClasses().Get(ctx, scName, metav1.GetOptions{})
 		if !apierrors.IsNotFound(err) {
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
@@ -851,7 +854,7 @@ func createStorageClass(client clientset.Interface, scParameters map[string]stri
 	}
 
 	if !isStorageClassPresent {
-		storageclass, err = client.StorageV1().StorageClasses().Create(ctx, getVSphereStorageClassSpec(scName,
+		storageclass, err = adminClient.StorageV1().StorageClasses().Create(ctx, getVSphereStorageClassSpec(scName,
 			scParameters, allowedTopologies, scReclaimPolicy, bindingMode, allowVolumeExpansion), metav1.CreateOptions{})
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(), fmt.Sprintf("Failed to create storage class with err: %v", err))
 	}
@@ -1067,7 +1070,7 @@ func bringDownCsiController(Client clientset.Interface, namespace ...string) {
 
 // bringDownTKGController helps to bring the TKG control manager pod down.
 // Its taks svc client as input.
-func bringDownTKGController(Client clientset.Interface) {
+func bringDownTKGController(Client clientset.Interface, vsphereTKGSystemNamespace string) {
 	updateDeploymentReplica(Client, 0, vsphereControllerManager, vsphereTKGSystemNamespace)
 	ginkgo.By("TKGControllManager replica is set to 0")
 }
@@ -1089,7 +1092,7 @@ func bringUpCsiController(Client clientset.Interface, csiReplicaCount int32, nam
 
 // bringUpTKGController helps to bring the TKG control manager pod up.
 // Its taks svc client as input.
-func bringUpTKGController(Client clientset.Interface, tkgReplica int32) {
+func bringUpTKGController(Client clientset.Interface, tkgReplica int32, vsphereTKGSystemNamespace string) {
 	err := updateDeploymentReplicawithWait(Client, tkgReplica, vsphereControllerManager, vsphereTKGSystemNamespace)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	ginkgo.By("TKGControllManager is up")
@@ -1105,31 +1108,6 @@ func getSvcClientAndNamespace() (clientset.Interface, string) {
 		svcNamespace = GetAndExpectStringEnvVar(envSupervisorClusterNamespace)
 	}
 	return svcClient, svcNamespace
-}
-
-// create kubernetes client for multi-supervisors clusters and returns it along with namespaces
-func getMultiSvcClientAndNamespace() ([]clientset.Interface, []string, []error) {
-	var err error
-	if svcClient == nil {
-		if k8senv := GetAndExpectStringEnvVar("KUBECONFIG"); k8senv != "" {
-			svcClient, err = createKubernetesClientFromConfig(k8senv)
-			if err != nil {
-				return []clientset.Interface{}, []string{}, []error{err, nil}
-			}
-		}
-		svcNamespace = GetAndExpectStringEnvVar(envSupervisorClusterNamespace)
-	}
-	if svcClient1 == nil {
-		if k8senv := GetAndExpectStringEnvVar("KUBECONFIG1"); k8senv != "" {
-			svcClient1, err = createKubernetesClientFromConfig(k8senv)
-			if err != nil {
-				return []clientset.Interface{}, []string{}, []error{nil, err}
-			}
-		}
-		svcNamespace1 = GetAndExpectStringEnvVar(envSupervisorClusterNamespace1)
-	}
-	// returns list of clientset, namespace and error if any for both svc
-	return []clientset.Interface{svcClient, svcClient1}, []string{svcNamespace, svcNamespace1}, []error{}
 }
 
 // updateCSIDeploymentTemplateFullSyncInterval helps to update the
@@ -2537,7 +2515,12 @@ func getVolumeIDFromSupervisorCluster(pvcName string) string {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	svNamespace := GetAndExpectStringEnvVar(envSupervisorClusterNamespace)
-	svcPV := getPvFromClaim(svcClient, svNamespace, pvcName)
+	svcPvclaim, err := svcClient.CoreV1().PersistentVolumeClaims(svNamespace).
+		Get(context.TODO(), pvcName, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	svcPV, err := svcClient.CoreV1().PersistentVolumes().
+		Get(context.TODO(), svcPvclaim.Spec.VolumeName, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	volumeHandle := svcPV.Spec.CSI.VolumeHandle
 	ginkgo.By(fmt.Sprintf("Found volume in Supervisor cluster with VolumeID: %s", volumeHandle))
 
@@ -2553,7 +2536,12 @@ func getPvFromSupervisorCluster(pvcName string) *v1.PersistentVolume {
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 	svNamespace := GetAndExpectStringEnvVar(envSupervisorClusterNamespace)
-	svcPV := getPvFromClaim(svcClient, svNamespace, pvcName)
+	svcPvclaim, err := svcClient.CoreV1().PersistentVolumeClaims(svNamespace).
+		Get(context.TODO(), pvcName, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	svcPV, err := svcClient.CoreV1().PersistentVolumes().
+		Get(context.TODO(), svcPvclaim.Spec.VolumeName, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return svcPV
 }
 
@@ -4039,7 +4027,21 @@ func waitForCNSRegisterVolumeToGetCreated(ctx context.Context, restConfig *rest.
 		}
 	}
 
+	if supervisorCluster {
+		describeCNSRegisterVolume(ctx, svcNamespace, cnsRegisterVolumeName)
+	}
+
 	return fmt.Errorf("cnsRegisterVolume %s creation is failed within %v", cnsRegisterVolumeName, timeout)
+}
+
+// describe CNS RegisterVolume
+func describeCNSRegisterVolume(ctx context.Context, namespace string, cnsRegVolName string) string {
+	// Command to write data and sync it
+	cmd := []string{"describe", "cnsregistervolumes.cns.vmware.com", cnsRegVolName}
+	output := e2ekubectl.RunKubectlOrDie(namespace, cmd...)
+	framework.Logf("Describe CNSRegistervolume : %s", output)
+
+	return output
 }
 
 // waitForCNSRegisterVolumeToGetDeleted waits for a cnsRegisterVolume to get
@@ -5021,8 +5023,9 @@ func verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx context.Cont
 	parallelStatefulSetCreation bool) error {
 	allowedTopologiesMap := createAllowedTopologiesMap(allowedTopologies)
 	var ssPodsBeforeScaleDown *v1.PodList
-	var err error
 
+	var err error
+	adminClient, client := initializeClusterClientsByUserRoles(client)
 	if parallelStatefulSetCreation {
 		ssPodsBeforeScaleDown = GetListOfPodsInSts(client, statefulset)
 	} else {
@@ -5057,7 +5060,7 @@ func verifyPVnodeAffinityAndPODnodedetailsForStatefulsetsLevel5(ctx context.Cont
 				}
 
 				// fetch node details
-				nodeList, err := fnodes.GetReadySchedulableNodes(ctx, client)
+				nodeList, err := fnodes.GetReadySchedulableNodes(ctx, adminClient)
 				if err != nil {
 					return err
 				}
@@ -5113,7 +5116,7 @@ func verifyPodLocationLevel5(pod *v1.Pod, nodeList *v1.NodeList,
 		if pod.Spec.NodeName == node.Name {
 			for labelKey, labelValue := range node.Labels {
 				if topologyValue, ok := allowedTopologiesMap[labelKey]; ok {
-					if !contains(topologyValue, labelValue) {
+					if !isValuePresentInTheList(topologyValue, labelValue) {
 						return false, fmt.Errorf("pod: %s is not running on node located in %s", pod.Name, labelValue)
 					}
 				}
@@ -5121,6 +5124,27 @@ func verifyPodLocationLevel5(pod *v1.Pod, nodeList *v1.NodeList,
 		}
 	}
 	return true, nil
+}
+
+/* This util will fetch list of nodes from  a particular zone*/
+func fetchAllNodesOfSpecificZone(nodeList *v1.NodeList,
+	allowedTopologiesMap map[string][]string) *v1.NodeList {
+
+	// Create a new NodeList to hold the matching nodes
+	filteredNodes := &v1.NodeList{}
+
+	for _, node := range nodeList.Items {
+		for labelKey, allowedValues := range allowedTopologiesMap {
+			if nodeValue, ok := node.Labels[labelKey]; ok {
+				if isValuePresentInTheList(allowedValues, nodeValue) {
+					filteredNodes.Items = append(filteredNodes.Items, node)
+					break
+				}
+			}
+		}
+	}
+
+	return filteredNodes
 }
 
 // udpate updates a statefulset, and it is only used within rest.go
@@ -6015,20 +6039,21 @@ This method is used to delete the CSI Controller Pod
 func deleteCsiControllerPodWhereLeaderIsRunning(ctx context.Context,
 	client clientset.Interface, csi_controller_pod string) error {
 	ignoreLabels := make(map[string]string)
-	csiPods, err := fpod.GetPodsInNamespace(ctx, client, csiSystemNamespace, ignoreLabels)
+	adminClient, _ := initializeClusterClientsByUserRoles(client)
+	csiPods, err := fpod.GetPodsInNamespace(ctx, adminClient, csiSystemNamespace, ignoreLabels)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	num_csi_pods := len(csiPods)
 	// Collecting and dumping csi pod logs before deleting them
-	collectPodLogs(ctx, client, csiSystemNamespace)
+	collectPodLogs(ctx, adminClient, csiSystemNamespace)
 	for _, csiPod := range csiPods {
 		if strings.Contains(csiPod.Name, vSphereCSIControllerPodNamePrefix) && csiPod.Name == csi_controller_pod {
 			framework.Logf("Deleting the pod: %s", csiPod.Name)
-			err = fpod.DeletePodWithWait(ctx, client, csiPod)
+			err = fpod.DeletePodWithWait(ctx, adminClient, csiPod)
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 		}
 	}
 	// wait for csi Pods to be in running ready state
-	err = fpod.WaitForPodsRunningReady(ctx, client, csiSystemNamespace, int(num_csi_pods),
+	err = fpod.WaitForPodsRunningReady(ctx, adminClient, csiSystemNamespace, int(num_csi_pods),
 		time.Duration(pollTimeout))
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	return nil
@@ -6225,7 +6250,7 @@ func enableFullSyncTriggerFss(ctx context.Context, client clientset.Interface, n
 			for _, pod := range csipods.Items {
 				fpod.DeletePodOrFail(ctx, client, csiSystemNamespace, pod.Name)
 			}
-			err = fpod.WaitForPodsRunningReady(ctx, client, csiSystemNamespace, int(csipods.Size()),
+			err = fpod.WaitForPodsRunningReady(ctx, client, csiSystemNamespace, int(len(csipods.Items)),
 				time.Duration(pollTimeout))
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			break
@@ -6304,7 +6329,7 @@ func startVCServiceWait4VPs(ctx context.Context, vcAddress string, service strin
 // assignPolicyToWcpNamespace assigns a set of storage policies to a wcp namespace
 func assignPolicyToWcpNamespace(client clientset.Interface, ctx context.Context,
 	namespace string, policyNames []string, resourceQuotaLimit string) {
-	var err error
+	adminClient, _ := initializeClusterClientsByUserRoles(client)
 	sessionId := createVcSession4RestApis(ctx)
 	curlStr := ""
 	policyNamesArrLength := len(policyNames)
@@ -6340,11 +6365,11 @@ func assignPolicyToWcpNamespace(client clientset.Interface, ctx context.Context,
 		gomega.Expect(err).NotTo(gomega.HaveOccurred(),
 			"couldn't execute command: %v due to err %v", curlCmd, err)
 	}
-	gomega.Expect(result.Stdout).To(gomega.Equal("204"))
+	gomega.Expect(strconv.Atoi(result.Stdout)).To(gomega.Equal(status_code_success))
 
 	// wait for sc to get created in SVC
 	for _, policyName := range policyNames {
-		err = waitForScToGetCreated(client, ctx, policyName)
+		err = waitForScToGetCreated(adminClient, ctx, policyName)
 		gomega.Expect(err).NotTo(gomega.HaveOccurred())
 	}
 
@@ -7092,7 +7117,7 @@ func DerefWithDefault[T any](t *T, defaulT T) T {
 
 // Get storagePolicyQuota consumption based on resourceType (i.e., either volume, snapshot, vmservice)
 func getStoragePolicyQuotaForSpecificResourceType(ctx context.Context, restClientConfig *rest.Config,
-	scName string, namespace string, extensionType string) (*resource.Quantity, *resource.Quantity) {
+	scName string, namespace string, extensionType string, islatebinding bool) (*resource.Quantity, *resource.Quantity) {
 	var usedQuota, reservedQuota *resource.Quantity
 	cnsOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, cnsoperatorv1alpha1.GroupName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -7105,19 +7130,39 @@ func getStoragePolicyQuotaForSpecificResourceType(ctx context.Context, restClien
 	scLevelQuotaStatusList := spq.Status.SCLevelQuotaStatuses
 
 	for _, item := range scLevelQuotaStatusList {
-		if item.StorageClassName == scName {
-			resourceTypeLevelQuotaStatusList := spq.Status.ResourceTypeLevelQuotaStatuses
+		expectedSCName := scName
 
-			for _, item := range resourceTypeLevelQuotaStatusList {
-				if item.ResourceExtensionName == extensionType {
-					usedQuota = item.ResourceTypeSCLevelQuotaStatuses[0].SCLevelQuotaUsage.Used
-					reservedQuota = item.ResourceTypeSCLevelQuotaStatuses[0].SCLevelQuotaUsage.Reserved
-					ginkgo.By(fmt.Sprintf("usedQuota %v, reservedQuota %v", usedQuota, reservedQuota))
-					break
-				}
-
-			}
+		if islatebinding {
+			expectedSCName += "-latebinding"
 		}
+
+		if item.StorageClassName != expectedSCName {
+			continue
+		}
+
+		// Find the matching ResourceExtensionName
+		for _, resItem := range spq.Status.ResourceTypeLevelQuotaStatuses {
+			if resItem.ResourceExtensionName != extensionType {
+				continue
+			}
+			// Choose the index based on late binding
+			index := 0
+			if islatebinding {
+				index = 1
+			}
+
+			if len(resItem.ResourceTypeSCLevelQuotaStatuses) <= index {
+				ginkgo.By(fmt.Sprintf("Quota status list index %d not available", index))
+				break
+			}
+
+			usedQuota = resItem.ResourceTypeSCLevelQuotaStatuses[index].SCLevelQuotaUsage.Used
+			reservedQuota = resItem.ResourceTypeSCLevelQuotaStatuses[index].SCLevelQuotaUsage.Reserved
+			ginkgo.By(fmt.Sprintf("usedQuota: %v, reservedQuota: %v", usedQuota, reservedQuota))
+			break
+		}
+
+		break // SC match found and processed; exit outer loop
 	}
 
 	return usedQuota, reservedQuota
@@ -7125,7 +7170,8 @@ func getStoragePolicyQuotaForSpecificResourceType(ctx context.Context, restClien
 
 // Get total quota consumption by storagePolicy
 func getTotalQuotaConsumedByStoragePolicy(ctx context.Context, restClientConfig *rest.Config,
-	scName string, namespace string) (*resource.Quantity, *resource.Quantity) {
+	scName string, namespace string, islatebinding bool) (*resource.Quantity, *resource.Quantity) {
+
 	var usedQuota, reservedQuota *resource.Quantity
 	cnsOperatorClient, err := k8s.NewClientForGroup(ctx, restClientConfig, cnsoperatorv1alpha1.GroupName)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -7134,12 +7180,21 @@ func getTotalQuotaConsumedByStoragePolicy(ctx context.Context, restClientConfig 
 	err = cnsOperatorClient.Get(ctx,
 		pkgtypes.NamespacedName{Name: scName + storagePolicyQuota, Namespace: namespace}, spq)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	scLevelQuotaStatusList := spq.Status.SCLevelQuotaStatuses
-	for _, item := range scLevelQuotaStatusList {
-		if item.StorageClassName == scName {
+
+	// Determine expected StorageClass name
+	expectedSCName := scName
+	if islatebinding {
+		expectedSCName += "-latebinding"
+	}
+
+	// Search for matching StorageClass entry
+	for _, item := range spq.Status.SCLevelQuotaStatuses {
+		if item.StorageClassName == expectedSCName {
+			framework.Logf("**TotalQuotaConsumed for storage policy: %s **", expectedSCName)
 			usedQuota = item.SCLevelQuotaUsage.Used
 			reservedQuota = item.SCLevelQuotaUsage.Reserved
 			ginkgo.By(fmt.Sprintf("usedQuota %v, reservedQuota %v", usedQuota, reservedQuota))
+			break // exit after match
 		}
 	}
 	return usedQuota, reservedQuota
@@ -7167,104 +7222,133 @@ func getStoragePolicyUsageForSpecificResourceType(ctx context.Context, restClien
 		usedQuota = spq.Status.ResourceTypeLevelQuotaUsage.Used
 		reservedQuota = spq.Status.ResourceTypeLevelQuotaUsage.Reserved
 	}
+	framework.Logf("** Storage_Policy_Usage for Resource : %s **", resourceUsage)
+	framework.Logf("** Storage_Policy_Usage usedQuota : %s, reservedQuota:%s **", usedQuota, reservedQuota)
 	return usedQuota, reservedQuota
 }
 
-func validate_totalStoragequota(ctx context.Context, diskSize int64, totalUsedQuotaBefore *resource.Quantity,
+func validate_totalStoragequota(ctx context.Context, diskSizes []string, totalUsedQuotaBefore *resource.Quantity,
 	totalUsedQuotaAfter *resource.Quantity) bool {
 	var validTotalQuota bool
 	validTotalQuota = false
+	var totalDiskStorage int64
 
+	//Convert string in the Form "1Gi" to quotaBefore=1 and suffix=Gi or Mi
 	out := make([]byte, 0, 64)
-	result, suffix := totalUsedQuotaBefore.CanonicalizeBytes(out)
+	result, diskUnit_quotaBefore := totalUsedQuotaBefore.CanonicalizeBytes(out)
 	value := string(result)
 	quotaBefore, err := strconv.ParseInt(string(value), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBefore, string(suffix)))
+	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBefore, string(diskUnit_quotaBefore)))
 
-	result1, suffix1 := totalUsedQuotaAfter.CanonicalizeBytes(out)
+	//Convert string in the Form "1Gi" to quotaAfter=1 and suffix=Gi or Mi
+	result1, diskunit_quotaAfter := totalUsedQuotaAfter.CanonicalizeBytes(out)
 	value1 := string(result1)
 	quotaAfter, err := strconv.ParseInt(string(value1), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(suffix1)))
+	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(diskunit_quotaAfter)))
 
-	if string(suffix) != string(suffix1) {
-		if string(suffix1) == "Mi" {
-			var bytes int64 = quotaBefore
-			// Convert to Gi
-			//kibibytes := float64(bytes) / 1024
-			quotaBefore = int64(bytes) * 1024
-			fmt.Printf("Converted quotaBefore to Mi :  %dMi\n", quotaBefore)
+	totalDiskStorage = sumupAlltheResourceDiskUsage(diskSizes, diskunit_quotaAfter)
+
+	//To calculate the ExpectedQuota, It is required to match the diskUnit's of
+	//storageQuota that was showing before and after the workload creation
+	if string(diskUnit_quotaBefore) != string(diskunit_quotaAfter) {
+		if string(diskunit_quotaAfter) == "Mi" {
+			if string(diskUnit_quotaBefore) == "Gi" {
+				var bytes int64 = quotaBefore
+				quotaBefore = int64(bytes) * 1024
+			}
+		}
+		if string(diskunit_quotaAfter) == "Gi" {
+			if string(diskUnit_quotaBefore) == "Mi" {
+				var mb int64 = quotaBefore
+				quotaBefore = mb / 1024
+			}
 		}
 	}
 
-	if string(suffix1) == "Gi" {
-		var bytes int64 = diskSize
-		// Convert to Gi
-		//kibibytes := float64(bytes) / 1024
-		diskSize = int64(bytes) / 1024
-		fmt.Printf("Storagequota size:  %dGi\n", diskSize)
-	}
-
 	ginkgo.By(fmt.Sprintf("quotaBefore+diskSize:  %v, quotaAfter : %v",
-		quotaBefore+diskSize, quotaAfter))
-	ginkgo.By(fmt.Sprintf("diskSize:  %v", diskSize))
+		quotaBefore+totalDiskStorage, quotaAfter))
+	ginkgo.By(fmt.Sprintf("totalDiskStorage:  %v", totalDiskStorage))
 
-	if quotaBefore+diskSize == quotaAfter {
+	if quotaBefore+totalDiskStorage == quotaAfter {
 		validTotalQuota = true
 		ginkgo.By(fmt.Sprintf("quotaBefore+diskSize:  %v, quotaAfter : %v",
-			quotaBefore+diskSize, quotaAfter))
-		ginkgo.By(fmt.Sprintf("diskSize:  %v", diskSize))
+			quotaBefore+totalDiskStorage, quotaAfter))
 		ginkgo.By(fmt.Sprintf("validTotalQuota on storagePolicy:  %v", validTotalQuota))
 
 	}
 	return validTotalQuota
 }
 
-func validate_totalStoragequota_afterCleanUp(ctx context.Context, diskSize int64,
-	totalUsedQuotaBefore *resource.Quantity, totalUsedQuotaAfterCleanup *resource.Quantity) bool {
+func validate_totalStoragequota_afterCleanUp(ctx context.Context, diskSize string,
+	totalUsedQuotaBeforeCleanup *resource.Quantity, totalUsedQuotaAfterCleanup *resource.Quantity) bool {
 	var validTotalQuota bool
 	validTotalQuota = false
 
 	out := make([]byte, 0, 64)
-	result, suffix := totalUsedQuotaBefore.CanonicalizeBytes(out)
+	result, diskUnit_quotaBefore := totalUsedQuotaBeforeCleanup.CanonicalizeBytes(out)
 	value := string(result)
-	quotaBefore, err := strconv.ParseInt(string(value), 10, 64)
+	quotaBeforeCleanUp, err := strconv.ParseInt(string(value), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBefore, string(suffix)))
+	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBeforeCleanUp, string(diskUnit_quotaBefore)))
 
-	result1, suffix1 := totalUsedQuotaAfterCleanup.CanonicalizeBytes(out)
+	result1, diskUnit_quotaAfter := totalUsedQuotaAfterCleanup.CanonicalizeBytes(out)
 	value1 := string(result1)
 	quotaAfter, err := strconv.ParseInt(string(value1), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(suffix1)))
+	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(diskUnit_quotaAfter)))
 
-	if string(suffix) == "Gi" {
-		var bytes int64 = diskSize
-		// Convert to Gi
-		//kibibytes := float64(bytes) / 1024
-		diskSize = int64(bytes) / 1024
-		fmt.Printf("diskSize:  %dGi\n", diskSize)
+	sizeStr := strings.TrimSpace(diskSize)
+	ginkgo.By(fmt.Sprintf(" diskSize :  %s", diskSize))
+	// Use regex to extract the numeric part
+	rex := regexp.MustCompile(`\d+`)
+	numStr := rex.FindString(sizeStr)
+
+	// Convert to int64
+	storage, err := strconv.ParseInt(numStr, 10, 64)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Determine the unit
+	diskSizeUnit := strings.ToUpper(strings.TrimPrefix(sizeStr, numStr))
+
+	//To calculate the ExpectedQuota, It is required to match the diskUnit's of
+	//storageQuota that was showing before and after the workload creation
+	if string(diskUnit_quotaBefore) != string(diskUnit_quotaAfter) {
+		if string(diskUnit_quotaAfter) == "Mi" && diskSizeUnit == "GI" {
+			if string(diskUnit_quotaBefore) == "Gi" {
+				var bytes int64 = quotaBeforeCleanUp
+				quotaBeforeCleanUp = int64(bytes) * 1024
+			}
+			storage = storage * 1024
+			fmt.Printf("Converted quotaBefore: %dMi and diskSiseUsed to Mi: %dMi\n", quotaBeforeCleanUp, storage)
+		}
+		if string(diskUnit_quotaAfter) == "Gi" && diskSizeUnit == "GI" {
+			if string(diskUnit_quotaBefore) == "Mi" {
+				var mb int64 = quotaBeforeCleanUp
+				quotaBeforeCleanUp = mb / 1024
+			}
+			fmt.Printf("Converted quotaBefore: %dGi and diskSiseUsed to Gi: %dGi\n", quotaBeforeCleanUp, storage)
+		}
+	} else {
+		if string(diskUnit_quotaAfter) == "Gi" && diskSizeUnit == "GI" {
+			fmt.Printf(" quotaBefore: %dGi and diskSiseUsed to Gi: %dGi\n", quotaBeforeCleanUp, storage)
+		}
+
+		if string(diskUnit_quotaAfter) == "Mi" && diskSizeUnit == "GI" {
+			storage = storage * 1024
+			fmt.Printf("Converted quotaBefore: %dMi and diskSiseUsed to Mi: %dMi\n", quotaBeforeCleanUp, storage)
+		}
 	}
 
-	quota := quotaBefore - diskSize
-
-	if string(suffix1) == "Gi" {
-		var bytes int64 = quota
-		// Convert to Gi
-		//kibibytes := float64(bytes) / 1024
-		quota = int64(bytes) / 1024
-		fmt.Printf("value:  %dGi\n", quota)
-	}
-
-	fmt.Printf("diskSize %v ", diskSize)
+	quota := quotaBeforeCleanUp - storage
 	fmt.Printf("cleanup quota : %v, quotaAfter: %v ", quota, quotaAfter)
 	if quota == quotaAfter {
 		validTotalQuota = true
-		ginkgo.By(fmt.Sprintf("quotaBefore - diskSize: %v, quotaAfter : %v", quota, quotaAfter))
+		ginkgo.By(fmt.Sprintf("quotaBeforeCleanUp - diskSize: %v, quotaAfter : %v", quota, quotaAfter))
 		ginkgo.By(fmt.Sprintf("validTotalQuota on storagePolicy:  %v", validTotalQuota))
 
 	}
@@ -7287,31 +7371,65 @@ func validate_reservedQuota_afterCleanUp(ctx context.Context, total_reservedQuot
 
 }
 
-func validate_increasedQuota(ctx context.Context, diskSize int64, totalUsedQuotaBefore *resource.Quantity,
+func validate_increasedQuota(ctx context.Context, diskSize string, totalUsedQuotaBefore *resource.Quantity,
 	totalUsedQuotaAfterexpansion *resource.Quantity) bool {
 	var validTotalQuota bool
 	validTotalQuota = false
 
 	out := make([]byte, 0, 64)
-	result, suffix := totalUsedQuotaBefore.CanonicalizeBytes(out)
+	result, diskUnit_quotaBefore := totalUsedQuotaBefore.CanonicalizeBytes(out)
 	value := string(result)
 	quotaBefore, err := strconv.ParseInt(string(value), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBefore, string(suffix)))
+	ginkgo.By(fmt.Sprintf(" quotaBefore :  %v%s", quotaBefore, string(diskUnit_quotaBefore)))
 
-	result1, suffix1 := totalUsedQuotaAfterexpansion.CanonicalizeBytes(out)
+	result1, diskUnit_quotaAfter := totalUsedQuotaAfterexpansion.CanonicalizeBytes(out)
 	value1 := string(result1)
 	quotaAfter, err := strconv.ParseInt(string(value1), 10, 64)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
-	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(suffix1)))
+	ginkgo.By(fmt.Sprintf(" quotaAfter :  %v%s", quotaAfter, string(diskUnit_quotaAfter)))
 
-	if string(suffix) == "Gi" {
-		var bytes int64 = diskSize
-		// Convert to Gi
-		diskSize = int64(bytes) / 1024
-		fmt.Printf("diskSize:  %dGi\n", diskSize)
+	sizeStr := strings.TrimSpace(diskSize)
+	ginkgo.By(fmt.Sprintf(" diskSize :  %s", diskSize))
+	// Use regex to extract the numeric part
+	rex := regexp.MustCompile(`\d+`)
+	numStr := rex.FindString(sizeStr)
 
+	// Convert to int64
+	storage, err := strconv.ParseInt(numStr, 10, 64)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	// Determine the unit
+	diskSizeUnit := strings.ToUpper(strings.TrimPrefix(sizeStr, numStr))
+
+	//To calculate the ExpectedQuota, It is required to match the diskUnit's of
+	//storageQuota that was showing before and after the workload creation
+	if string(diskUnit_quotaBefore) != string(diskUnit_quotaAfter) {
+		if string(diskUnit_quotaAfter) == "Mi" && diskSizeUnit == "GI" {
+			if string(diskUnit_quotaBefore) == "Gi" {
+				var bytes int64 = quotaBefore
+				quotaBefore = int64(bytes) * 1024
+			}
+			storage = storage * 1024
+			fmt.Printf("Converted quotaBefore: %dMi and diskSiseUsed to Mi: %dMi\n", quotaBefore, storage)
+		}
+		if string(diskUnit_quotaAfter) == "Gi" && diskSizeUnit == "GI" {
+			if string(diskUnit_quotaBefore) == "Mi" {
+				var mb int64 = quotaBefore
+				quotaBefore = mb / 1024
+			}
+			fmt.Printf("Converted quotaBefore: %dGi and diskSiseUsed to Gi: %dGi\n", quotaBefore, storage)
+		}
+	} else {
+		if string(diskUnit_quotaAfter) == "Gi" && diskSizeUnit == "GI" {
+			fmt.Printf(" quotaBefore: %dGi and diskSiseUsed to Gi: %dGi\n", quotaBefore, storage)
+		}
+
+		if string(diskUnit_quotaAfter) == "Mi" && diskSizeUnit == "GI" {
+			storage = storage * 1024
+			fmt.Printf("Converted quotaBefore: %dMi and diskSiseUsed to Mi: %dMi\n", quotaBefore, storage)
+		}
 	}
 
 	if quotaBefore < quotaAfter {
@@ -7358,68 +7476,82 @@ func startStorageQuotaWebhookPodInKubeSystem(ctx context.Context, client clients
 
 // getStoragePolicyUsedAndReservedQuotaDetails This method returns the used and reserved quota's from
 // storageQuota CR, storagePolicyQuota CR and storagePolicyUsage CR
-func getStoragePolicyUsedAndReservedQuotaDetails(ctx context.Context, restConfig *rest.Config, storagePolicyName string,
-	namespace string, resourceUsageName string, resourceExtensionName string) (*resource.Quantity, *resource.Quantity,
+func getStoragePolicyUsedAndReservedQuotaDetails(ctx context.Context, restConfig *rest.Config,
+	storagePolicyName string, namespace string, resourceUsageName string, resourceExtensionName string,
+	islatebinding bool) (*resource.Quantity, *resource.Quantity,
 	*resource.Quantity, *resource.Quantity, *resource.Quantity, *resource.Quantity) {
+
 	var totalQuotaUsed, totalQuotaReserved, storagePolicyQuotaCRUsed, storagePolicyQuotaCRReserved *resource.Quantity
 	var storagePolicyUsageCRUsed, storagePolicyUsageCRReserved *resource.Quantity
 
 	totalQuotaUsed, totalQuotaReserved = getTotalQuotaConsumedByStoragePolicy(ctx, restConfig,
-		storagePolicyName, namespace)
-	framework.Logf("totalQuotaUsed :%v, totalQuotaReserved:%v", totalQuotaUsed, totalQuotaReserved)
+		storagePolicyName, namespace, islatebinding)
+	framework.Logf("Namespace total-Quota-Used: %s,total-Quota-Reserved: %s ", totalQuotaUsed, totalQuotaReserved)
 
-	storagePolicyQuotaCRUsed, storagePolicyQuotaCRReserved = getStoragePolicyQuotaForSpecificResourceType(ctx,
-		restConfig, storagePolicyName, namespace, resourceExtensionName)
-	framework.Logf("pvcStoragePolicyQuotaUsed :%v, pvcStoragePolicyQuotaReserved : %v", storagePolicyQuotaCRUsed,
-		storagePolicyQuotaCRReserved)
+	if resourceExtensionName != "" {
+		framework.Logf("**resourceUsageName: %s, resourceExtensionName: %s **", resourceUsageName,
+			resourceExtensionName)
+		storagePolicyQuotaCRUsed, storagePolicyQuotaCRReserved = getStoragePolicyQuotaForSpecificResourceType(ctx,
+			restConfig, storagePolicyName, namespace, resourceExtensionName, islatebinding)
+		framework.Logf("Policy-Quota-CR-Used: %s, Policy-Quota-CR-Reserved: %s", storagePolicyQuotaCRUsed,
+			storagePolicyQuotaCRReserved)
+	} else {
+		storagePolicyQuotaCRUsed = nil
+		storagePolicyQuotaCRReserved = nil
+	}
 
-	storagePolicyUsageCRUsed, storagePolicyUsageCRReserved = getStoragePolicyUsageForSpecificResourceType(ctx,
-		restConfig, storagePolicyName, namespace, resourceUsageName)
-	framework.Logf("storagePolicyUsageCRUsed :%v, storagePolicyUsageCRReserved: %v", storagePolicyUsageCRUsed,
-		storagePolicyUsageCRReserved)
+	if resourceUsageName != "" {
+		if islatebinding {
+			storagePolicyUsageCRUsed, storagePolicyUsageCRReserved = getStoragePolicyUsageForSpecificResourceType(ctx,
+				restConfig, storagePolicyName+"-latebinding", namespace, resourceUsageName)
+		} else {
+			storagePolicyUsageCRUsed, storagePolicyUsageCRReserved = getStoragePolicyUsageForSpecificResourceType(ctx,
+				restConfig, storagePolicyName, namespace, resourceUsageName)
+		}
+		framework.Logf("Policy-Usage-CR-Used: %s, Policy-Usage-CR-Reserved: %s", storagePolicyUsageCRUsed,
+			storagePolicyUsageCRReserved)
+	} else {
+		storagePolicyUsageCRUsed = nil
+		storagePolicyUsageCRReserved = nil
+	}
 
 	return totalQuotaUsed, totalQuotaReserved,
 		storagePolicyQuotaCRUsed, storagePolicyQuotaCRReserved,
 		storagePolicyUsageCRUsed, storagePolicyUsageCRReserved
 }
 
-// validateQuotaUsageAfterResourceCreation Verifies the quota consumption before and after the resource creation
+// validateQuotaUsageAfterResourceCreation Verifies the quota consumption after the resource creation
+// resourceExtensionName :  volExtensionName / snapshotExtensionName / volExtensionName,
+// resourceUsage: pvcUsage / snapshotUsage / vmUsage
 func validateQuotaUsageAfterResourceCreation(ctx context.Context, restConfig *rest.Config, storagePolicyName string,
-	namespace string, resourceUsage string, resourceExtensionName string, size int64,
+	namespace string, resourceUsage string, resourceExtensionName string, size []string,
 	totalQuotaUsedBefore *resource.Quantity, storagePolicyQuotaBefore *resource.Quantity,
-	storagePolicyUsageBefore *resource.Quantity) (*resource.Quantity,
-	*resource.Quantity, *resource.Quantity) {
+	storagePolicyUsageBefore *resource.Quantity, islatebinding bool) (bool, bool) {
 
-	totalQuotaUsedAfter, _, storagePolicyQuotaAfter, _, storagePolicyUsageAfter, _ :=
+	_, _, storagePolicyQuotaAfter, _, storagePolicyUsageAfter, _ :=
 		getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
-			storagePolicyName, namespace, resourceUsage, resourceExtensionName)
+			storagePolicyName, namespace, resourceUsage, resourceExtensionName, islatebinding)
 
-	quotavalidationStatus := validate_totalStoragequota(ctx, size, totalQuotaUsedBefore,
-		totalQuotaUsedAfter)
-	framework.Logf("totalStoragequota validation status :%v", quotavalidationStatus)
-	gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
-	quotavalidationStatus = validate_totalStoragequota(ctx, size, storagePolicyQuotaBefore,
+	sp_quota_validation := validate_totalStoragequota(ctx, size, storagePolicyQuotaBefore,
 		storagePolicyQuotaAfter)
-	framework.Logf("toragePolicyQuota validation status :%v", quotavalidationStatus)
-	gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
-	quotavalidationStatus = validate_totalStoragequota(ctx, size, storagePolicyUsageBefore,
-		storagePolicyUsageAfter)
-	framework.Logf("storagePolicyUsage validation status :%v", quotavalidationStatus)
-	framework.Logf("quotavalidationStatus :%v", quotavalidationStatus)
-	gomega.Expect(quotavalidationStatus).NotTo(gomega.BeFalse())
+	framework.Logf("Storage-policy-Quota CR validation status :%v", sp_quota_validation)
 
-	return totalQuotaUsedAfter, storagePolicyQuotaAfter, storagePolicyUsageAfter
+	sp_usage_validation := validate_totalStoragequota(ctx, size, storagePolicyUsageBefore,
+		storagePolicyUsageAfter)
+	framework.Logf("Storage-policy-usage CR validation status :%v", sp_usage_validation)
+
+	return sp_quota_validation, sp_usage_validation
 }
 
 // validateQuotaUsageAfterCleanUp verifies the storagequota details shows up on all CR's after resource cleanup
 func validateQuotaUsageAfterCleanUp(ctx context.Context, restConfig *rest.Config, storagePolicyName string,
-	namespace string, resourceUsage string, resourceExtensionName string, diskSizeInMb int64,
+	namespace string, resourceUsage string, resourceExtensionName string, diskSizeInMb string,
 	totalQuotaUsedAfter *resource.Quantity, storagePolicyQuotaAfter *resource.Quantity,
-	storagePolicyUsageAfter *resource.Quantity) {
+	storagePolicyUsageAfter *resource.Quantity, islatebinding bool) {
 
 	totalQuotaUsedCleanup, totalQuotaReserved, storagePolicyQuotaAfterCleanup, storagePolicyQuotaReserved,
 		storagePolicyUsageAfterCleanup, storagePolicyUsageReserved := getStoragePolicyUsedAndReservedQuotaDetails(
-		ctx, restConfig, storagePolicyName, namespace, resourceUsage, resourceExtensionName)
+		ctx, restConfig, storagePolicyName, namespace, resourceUsage, resourceExtensionName, islatebinding)
 
 	quotavalidationStatusAfterCleanup := validate_totalStoragequota_afterCleanUp(ctx, diskSizeInMb,
 		totalQuotaUsedAfter, totalQuotaUsedCleanup)
@@ -7428,12 +7560,15 @@ func validateQuotaUsageAfterCleanUp(ctx context.Context, restConfig *rest.Config
 	quotavalidationStatusAfterCleanup = validate_totalStoragequota_afterCleanUp(ctx, diskSizeInMb,
 		storagePolicyQuotaAfter, storagePolicyQuotaAfterCleanup)
 	gomega.Expect(quotavalidationStatusAfterCleanup).NotTo(gomega.BeFalse())
+
 	quotavalidationStatusAfterCleanup = validate_totalStoragequota_afterCleanUp(ctx, diskSizeInMb,
 		storagePolicyUsageAfter, storagePolicyUsageAfterCleanup)
 	gomega.Expect(quotavalidationStatusAfterCleanup).NotTo(gomega.BeFalse())
+
 	reservedQuota := validate_reservedQuota_afterCleanUp(ctx, totalQuotaReserved,
 		storagePolicyQuotaReserved, storagePolicyUsageReserved)
 	gomega.Expect(reservedQuota).NotTo(gomega.BeFalse())
+
 	framework.Logf("quotavalidationStatus :%v reservedQuota:%v", quotavalidationStatusAfterCleanup,
 		reservedQuota)
 }
@@ -7468,7 +7603,7 @@ func execCommandOnGcWorker(sshClientConfig *ssh.ClientConfig, svcMasterIP string
 	}
 
 	cmdToGetContainerInfo := fmt.Sprintf("ssh -o StrictHostKeyChecking=no -i key %s@%s "+
-		"'%s' | grep -v 'Warning'", gcNodeUser, gcWorkerIp, cmd)
+		"'%s' 2> /dev/null", gcNodeUser, gcWorkerIp, cmd)
 	framework.Logf("Invoking command '%v' on host %v", cmdToGetContainerInfo,
 		svcMasterIP)
 	cmdResult, err = sshExec(sshClientConfig, svcMasterIP,
@@ -7560,6 +7695,18 @@ func restartWcpWithWg(ctx context.Context, vcAddress string, wg *sync.WaitGroup)
 	defer wg.Done()
 	err := restartWcp(ctx, vcAddress)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+}
+
+/*
+Stop VC service with WaitGroup
+*/
+func stopServiceWithWg(ctx context.Context, vcAddress string, serviceName string, wg *sync.WaitGroup, c chan<- error) {
+	var err error
+	defer wg.Done()
+	err = invokeVCenterServiceControl(ctx, stopOperation, serviceName, vcAddress)
+	if err != nil {
+		c <- err
+	}
 }
 
 /*
@@ -7806,4 +7953,440 @@ func ListStoragePolicyUsages(ctx context.Context, c clientset.Interface, restCli
 	}
 
 	fmt.Println("All required storage policy usages are available.")
+}
+
+func reconfigPolicyParallel(ctx context.Context, volID string, policyId string, wg *sync.WaitGroup) {
+	defer ginkgo.GinkgoRecover()
+	defer wg.Done()
+	err := e2eVSphere.reconfigPolicy(ctx, volID, policyId)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+}
+
+// when PVC is deleted, used following method to check for PV status
+func waitForPvToBeReleased(ctx context.Context, client clientset.Interface,
+	pvName string) (*v1.PersistentVolume, error) {
+	var pv *v1.PersistentVolume
+	var err error
+	waitErr := wait.PollUntilContextTimeout(ctx, resizePollInterval, pollTimeoutShort, true,
+		func(ctx context.Context) (bool, error) {
+			pv, err = client.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			if pv.Status.Phase == v1.VolumeReleased {
+				return true, nil
+			}
+			return false, nil
+		})
+	return pv, waitErr
+}
+
+// convertGiStrToMibInt64 returns integer numbers of Mb equivalent to string
+// of the form \d+Gi.
+func convertGiStrToMibInt64(size resource.Quantity) int64 {
+	r, err := regexp.Compile("[0-9]+")
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	sizeInt, err := strconv.Atoi(r.FindString(size.String()))
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	return int64(sizeInt * 1024)
+}
+
+// This method gets storageclass and creates resource quota
+// Returns restConfig,  storageclass and profileId
+// This is used in staticProvisioning for presetup.
+func staticProvisioningPreSetUpUtil(ctx context.Context, f *framework.Framework,
+	c clientset.Interface, storagePolicyName string) (*rest.Config, *storagev1.StorageClass, string) {
+	namespace := getNamespaceToRunTests(f)
+	adminClient, _ := initializeClusterClientsByUserRoles(c)
+	// Get a config to talk to the apiserver
+	k8senv := GetAndExpectStringEnvVar("KUBECONFIG")
+	restConfig, err := clientcmd.BuildConfigFromFlags("", k8senv)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	profileID := e2eVSphere.GetSpbmPolicyID(storagePolicyName)
+	framework.Logf("Profile ID :%s", profileID)
+	scParameters := make(map[string]string)
+	scParameters["storagePolicyID"] = profileID
+
+	if !supervisorCluster {
+		err = adminClient.StorageV1().StorageClasses().Delete(ctx, storagePolicyName, metav1.DeleteOptions{})
+		if !apierrors.IsNotFound(err) {
+			gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		}
+	}
+
+	storageclass, err := createStorageClass(c, scParameters, nil, "", "", true, storagePolicyName)
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	ginkgo.By(fmt.Sprintf("storageclass Name: %s", storageclass.GetName()))
+	storageclass, err = adminClient.StorageV1().StorageClasses().Get(ctx, storagePolicyName, metav1.GetOptions{})
+	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+
+	ginkgo.By("create resource quota")
+	createResourceQuota(adminClient, namespace, rqLimit, storagePolicyName)
+
+	return restConfig, storageclass, profileID
+}
+
+// Convert mb to String
+func convertInt64ToStrMbFormat(diskSize int64) string {
+	result := strconv.FormatInt(diskSize, 10) + "Mi"
+	fmt.Println(result)
+	return result
+}
+
+// Convert gb to String
+func convertInt64ToStrGbFormat(diskSize int64) string {
+	result := strconv.FormatInt(diskSize, 10) + "Gi"
+	fmt.Println(result)
+	return result
+}
+
+// Convert all the disks storage unit to the expected unit value and Sums up and returns the totalDiskStorage
+func sumupAlltheResourceDiskUsage(diskSizes []string, expectedUnit []byte) int64 {
+	var totalDiskStorage int64
+	var diskUnit string
+
+	fmt.Println("Length of slice:", len(diskSizes))
+
+	for _, diskSize := range diskSizes {
+		sizeStr := strings.TrimSpace(diskSize)
+		ginkgo.By(fmt.Sprintf("diskSize :  %s", diskSize))
+		ginkgo.By(fmt.Sprintf("present totalDiskStorage :  %d", totalDiskStorage))
+		// Use regex to extract the numeric part
+		rex := regexp.MustCompile(`\d+`)
+		numStr := rex.FindString(sizeStr)
+
+		// Convert to int64
+		storage, err := strconv.ParseInt(numStr, 10, 64)
+		gomega.Expect(err).NotTo(gomega.HaveOccurred())
+		framework.Logf("storage : %d", storage)
+
+		// Determine the unit
+		//diskUnit = strings.ToUpper(strings.TrimPrefix(sizeStr, numStr))
+		diskUnit = strings.TrimPrefix(sizeStr, numStr)
+		framework.Logf("diskUnit : %s", diskUnit)
+
+		if string(expectedUnit) == "Gi" {
+			if diskUnit == "Gi" {
+				totalDiskStorage = totalDiskStorage + storage
+			} else {
+				storageGi := storage / 1024
+				totalDiskStorage = totalDiskStorage + storageGi
+			}
+		} else if string(expectedUnit) == "Mi" {
+			if diskUnit == "Mi" {
+				totalDiskStorage = totalDiskStorage + storage
+			} else {
+				storageMi := storage * 1024
+				totalDiskStorage = totalDiskStorage + storageMi
+			}
+		}
+	}
+
+	framework.Logf("sum of all the disk storages = %d ", totalDiskStorage)
+	return totalDiskStorage
+
+}
+
+// Validate Total quota of all resources
+// size: will have array of disk size from PVC, snapshot's and vmserviceVm
+func validateTotalQuota(ctx context.Context, restConfig *rest.Config, storagePolicyName string,
+	namespace string, size []string,
+	totalQuotaUsedBefore *resource.Quantity, islatebinding bool) (*resource.Quantity, bool) {
+
+	totalQuotaUsedAfter, _, _, _, _, _ :=
+		getStoragePolicyUsedAndReservedQuotaDetails(ctx, restConfig,
+			storagePolicyName, namespace, "", "", islatebinding)
+
+	quotavalidationStatus := validate_totalStoragequota(ctx, size, totalQuotaUsedBefore,
+		totalQuotaUsedAfter)
+	framework.Logf("totalStoragequota validation status :%v", quotavalidationStatus)
+
+	return totalQuotaUsedAfter, quotavalidationStatus
+}
+
+/*
+This function creates a wcp namespace in a vSphere supervisor Cluster, associating it
+with multiple storage policies and zones.
+It constructs an API request and sends it to the vSphere REST API.
+*/
+func createtWcpNsWithZonesAndPolicies(
+	vcRestSessionId string, storagePolicyId []string,
+	supervisorId string, zoneNames []string,
+	vmClass string, contentLibId string) (string, int, error) {
+
+	r := rand.New(rand.NewSource(time.Now().Unix()))
+	namespace := fmt.Sprintf("csi-vmsvcns-%v", r.Intn(10000))
+	initailUrl := createInitialNsApiCallUrl()
+	nsCreationUrl := initailUrl + "v2"
+
+	var storageSpecs []map[string]string
+	for _, policyId := range storagePolicyId {
+		storageSpecs = append(storageSpecs, map[string]string{"policy": policyId})
+	}
+
+	var zones []map[string]string
+	for _, zone := range zoneNames {
+		zones = append(zones, map[string]string{"name": zone})
+	}
+
+	// Create request body struct
+	requestBody := map[string]interface{}{
+		"namespace":     namespace,
+		"storage_specs": storageSpecs,
+		"supervisor":    supervisorId,
+		"zones":         zones,
+	}
+
+	// Add vm_service_spec only if vmClass and contentLibId are provided
+	if vmClass != "" && contentLibId != "" {
+		requestBody["vm_service_spec"] = map[string]interface{}{
+			"vm_classes":        []string{vmClass},
+			"content_libraries": []string{contentLibId},
+		}
+	}
+
+	reqBodyBytes, err := json.Marshal(requestBody)
+	if err != nil {
+		return "", 500, fmt.Errorf("error marshalling request body: %w", err)
+	}
+
+	reqBody := string(reqBodyBytes)
+	fmt.Println(reqBody)
+
+	// Make the API request
+	_, statusCode := invokeVCRestAPIPostRequest(vcRestSessionId, nsCreationUrl, reqBody)
+
+	return namespace, statusCode, nil
+}
+
+// Generates random string of requested length
+func genrateRandomString(length int) (string, error) {
+	var generatedString string
+	rand.New(rand.NewSource(time.Now().UnixNano()))
+	b := make([]byte, length+2)
+	_, err := cryptoRand.Read(b)
+	if err != nil {
+		return generatedString, fmt.Errorf("error marshalling request body: %w", err)
+	}
+	generatedString = fmt.Sprintf("%x", b)[2 : length+2]
+	return generatedString, err
+}
+
+// WaitForPVClaimBoundPhase waits until all pvcs phase set to bound
+// client: framework generated client
+// pvclaims: list of PVCs
+// timeout: timeInterval to wait for PVCs to get into bound state
+// ctx: context package variable
+func WaitForPVClaimBoundPhase(ctx context.Context, client clientset.Interface,
+	pvclaims []*v1.PersistentVolumeClaim, timeout time.Duration) ([]*v1.PersistentVolume, error) {
+	persistentvolumes := make([]*v1.PersistentVolume, len(pvclaims))
+
+	adminClient, client := initializeClusterClientsByUserRoles(client)
+	for index, claim := range pvclaims {
+		err := fpv.WaitForPersistentVolumeClaimPhase(ctx, v1.ClaimBound, client,
+			claim.Namespace, claim.Name, framework.Poll, timeout)
+		if err != nil {
+			return persistentvolumes, err
+		}
+		// Get new copy of the claim
+		claim, err = client.CoreV1().PersistentVolumeClaims(claim.Namespace).
+			Get(ctx, claim.Name, metav1.GetOptions{})
+		if err != nil {
+			return persistentvolumes, fmt.Errorf("PVC Get API error: %w", err)
+		}
+		// Get the bounded PV
+		persistentvolumes[index], err = adminClient.CoreV1().PersistentVolumes().
+			Get(ctx, claim.Spec.VolumeName, metav1.GetOptions{})
+		if err != nil {
+			return persistentvolumes, fmt.Errorf("PV Get API error: %w", err)
+		}
+	}
+	return persistentvolumes, nil
+}
+
+// createScopedClient generates a kubernetes-client by constructing kubeconfig by
+// creating a user with minimal permissions and enable port forwarding. It takes
+// client: framework generated client
+// namespace: framework generated namespace name
+// saName: service account name
+// ctx: context package variable
+func createScopedClient(ctx context.Context, client clientset.Interface,
+	ns string, saName string) (clientset.Interface, error) {
+
+	roleName := ns + "role"
+	roleBindingName := roleName + "-binding"
+	contextName := "e2e-context"
+
+	_, err := client.CoreV1().ServiceAccounts(ns).Create(ctx, &v1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: saName,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create SA: %v", err)
+	}
+
+	// 2. Create Role
+	_, err = client.RbacV1().Roles(ns).Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: roleName,
+		},
+		Rules: []rbacv1.PolicyRule{
+			{
+				APIGroups: []string{""},
+				Resources: []string{"pods", "persistentvolumeclaims", "services"},
+				Verbs:     []string{"get", "watch", "list", "delete", "create", "update"},
+			},
+			{
+				APIGroups: []string{"apps"},
+				Resources: []string{"statefulsets", "deployments", "replicasets"},
+				Verbs:     []string{"get", "watch", "list", "delete", "create", "update"},
+			},
+			{
+				APIGroups: []string{""},
+				Resources: []string{"events"},
+				Verbs:     []string{"get", "list"},
+			},
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Role: %v", err)
+	}
+
+	time.Sleep(5 * time.Second)
+
+	_, err = client.RbacV1().RoleBindings(ns).Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: roleBindingName,
+		},
+		Subjects: []rbacv1.Subject{
+			{
+				Kind:      serviceAccountKeyword,
+				Name:      saName,
+				Namespace: ns,
+			},
+		},
+		RoleRef: rbacv1.RoleRef{
+			Kind:     roleKeyword,
+			Name:     roleName,
+			APIGroup: rbacApiGroup,
+		},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create RoleBinding: %v", err)
+	}
+
+	var token string
+
+	tr := &authenticationv1.TokenRequest{
+		Spec: authenticationv1.TokenRequestSpec{
+			Audiences: []string{audienceForSvcAccountName},
+		},
+	}
+
+	tokenRequest, err := client.CoreV1().ServiceAccounts(ns).CreateToken(ctx, saName, tr, metav1.CreateOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get token: %v", err)
+	}
+	token = tokenRequest.Status.Token
+
+	if token == "" {
+		return nil, fmt.Errorf("no token found for service account")
+	}
+	time.Sleep(60 * time.Second)
+	localPort := GetAndExpectStringEnvVar("RANDOM_PORT")
+	framework.Logf("Random port: %s", localPort)
+	kubeConfig := clientcmdapi.Config{
+		Clusters: map[string]*clientcmdapi.Cluster{
+			"e2e-cluster": {
+				Server:                fmt.Sprintf("https://127.0.0.1:%s", localPort),
+				InsecureSkipTLSVerify: true,
+			},
+		},
+		Contexts: map[string]*clientcmdapi.Context{
+			contextName: {
+				Cluster:   "e2e-cluster",
+				AuthInfo:  "e2e-user",
+				Namespace: ns,
+			},
+		},
+		AuthInfos: map[string]*clientcmdapi.AuthInfo{
+			"e2e-user": {
+				Token: token,
+			},
+		},
+		CurrentContext: contextName,
+	}
+
+	restCfg, err := clientcmd.NewNonInteractiveClientConfig(kubeConfig,
+		contextName, &clientcmd.ConfigOverrides{}, nil).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build rest.Config: %v", err)
+	}
+
+	nsScopedClient, err := clientset.NewForConfig(restCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create Clientset: %v", err)
+	}
+	return nsScopedClient, nil
+}
+
+// initializeClusterClientsByUserRoles takes a client generated by test framework
+// and generates and returns an admin client with administrator priviledges
+// and a client with devops user priviledges
+func initializeClusterClientsByUserRoles(client clientset.Interface) (clientset.Interface, clientset.Interface) {
+	var adminClient clientset.Interface
+	var err error
+	runningAsDevopsUser := GetBoolEnvVarOrDefault(envIsDevopsUser, false)
+	if supervisorCluster || guestCluster {
+		if runningAsDevopsUser {
+			if svAdminK8sEnv := GetAndExpectStringEnvVar(envAdminKubeconfig); svAdminK8sEnv != "" {
+				adminClient, err = createKubernetesClientFromConfig(svAdminK8sEnv)
+				gomega.Expect(err).NotTo(gomega.HaveOccurred())
+			}
+			if supervisorCluster {
+				if devopsK8sEnv := GetAndExpectStringEnvVar(envDevopsKubeconfig); devopsK8sEnv != "" {
+					client, err = createKubernetesClientFromConfig(devopsK8sEnv)
+					gomega.Expect(err).NotTo(gomega.HaveOccurred())
+				}
+			}
+		} else {
+			adminClient = client
+		}
+	} else if vanillaCluster || adminClient == nil {
+		adminClient = client
+	}
+	return adminClient, client
+}
+
+// getSvcConfigSecretData returns data obtained fom csi config secret
+// in namespace where CSI is deployed
+func getSvcConfigSecretData(client clientset.Interface, ctx context.Context,
+	csiNamespace string) (e2eTestConfig, error) {
+	var vsphereCfg e2eTestConfig
+	currentSecret, err := client.CoreV1().Secrets(csiNamespace).Get(ctx, configSecret, metav1.GetOptions{})
+	if err != nil {
+		return vsphereCfg, err
+	}
+	originalConf := string(currentSecret.Data[vsphereCloudProviderConfiguration])
+	vsphereCfg, err = readConfigFromSecretString(originalConf)
+	if err != nil {
+		return vsphereCfg, err
+	}
+
+	return vsphereCfg, nil
+}
+
+// validate Annotation on PVC
+func validateAnnotationOnPVC(pvc *v1.PersistentVolumeClaim, annotationKey string, expectedValue string) error {
+	val, exists := pvc.Annotations[annotationKey]
+	if !exists {
+		return fmt.Errorf("PVC %s does NOT have annotation %q", pvc.Name, annotationKey)
+	}
+	if val == expectedValue {
+		framework.Logf("PVC %s has annotation %q with correct value: %s", pvc.Name, annotationKey, val)
+	} else {
+		return fmt.Errorf("PVC %s has annotation %q but value is %q (expected %q)", pvc.Name,
+			annotationKey, val, expectedValue)
+	}
+	return nil
 }

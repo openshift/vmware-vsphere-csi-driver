@@ -35,7 +35,6 @@ import (
 )
 
 const (
-	maxAllowedBlockVolumesPerNode = 59
 	// vCenter 8.0 supports attaching max 255 volumes to Node
 	// Previous vSphere releases supports attaching a max of 59 volumes to Node VM.
 	// Deployment YAML file for Node DaemonSet has ENV MAX_VOLUMES_PER_NODE set to 59 for vsphere-csi-node container
@@ -52,7 +51,7 @@ func (driver *vsphereCSIDriver) NodeStageVolume(
 	*csi.NodeStageVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeStageVolume: called with args %+v", *req)
+	log.Infof("NodeStageVolume: called with args %+v", req)
 
 	volumeID := req.GetVolumeId()
 	volCap := req.GetVolumeCapability()
@@ -113,7 +112,7 @@ func (driver *vsphereCSIDriver) NodeUnstageVolume(
 	*csi.NodeUnstageVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeUnstageVolume: called with args %+v", *req)
+	log.Infof("NodeUnstageVolume: called with args %+v", req)
 
 	// Validate arguments
 	volumeID := req.GetVolumeId()
@@ -178,7 +177,7 @@ func (driver *vsphereCSIDriver) NodePublishVolume(
 	*csi.NodePublishVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodePublishVolume: called with args %+v", *req)
+	log.Infof("NodePublishVolume: called with args %+v", req)
 	var err error
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {
@@ -246,7 +245,7 @@ func (driver *vsphereCSIDriver) NodeUnpublishVolume(
 	*csi.NodeUnpublishVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeUnpublishVolume: called with args %+v", *req)
+	log.Infof("NodeUnpublishVolume: called with args %+v", req)
 
 	volID := req.GetVolumeId()
 	target := req.GetTargetPath()
@@ -276,7 +275,7 @@ func (driver *vsphereCSIDriver) NodeGetVolumeStats(
 	*csi.NodeGetVolumeStatsResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeGetVolumeStats: called with args %+v", *req)
+	log.Infof("NodeGetVolumeStats: called with args %+v", req)
 
 	var err error
 	targetPath := req.GetVolumePath()
@@ -378,7 +377,7 @@ func (driver *vsphereCSIDriver) NodeGetInfo(
 	*csi.NodeGetInfoResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeGetInfo: called with args %+v", *req)
+	log.Infof("NodeGetInfo: called with args %+v", req)
 
 	driver.osUtils.ShouldContinue(ctx)
 
@@ -410,12 +409,7 @@ func (driver *vsphereCSIDriver) NodeGetInfo(
 	}
 
 	var maxVolumesPerNode int64
-	var maxAllowedVolumesPerNode int64
-	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.MaxPVSCSITargetsPerVM) {
-		maxAllowedVolumesPerNode = maxAllowedBlockVolumesPerNodeInvSphere8
-	} else {
-		maxAllowedVolumesPerNode = maxAllowedBlockVolumesPerNode
-	}
+	var maxAllowedVolumesPerNode int64 = maxAllowedBlockVolumesPerNodeInvSphere8
 	if v := os.Getenv("MAX_VOLUMES_PER_NODE"); v != "" {
 		if value, err := strconv.ParseInt(v, 10, 64); err == nil {
 			if value < 0 {
@@ -514,7 +508,7 @@ func (driver *vsphereCSIDriver) NodeExpandVolume(
 	*csi.NodeExpandVolumeResponse, error) {
 	ctx = logger.NewContextWithLogger(ctx)
 	log := logger.GetLogger(ctx)
-	log.Infof("NodeExpandVolume: called with args %+v", *req)
+	log.Infof("NodeExpandVolume: called with args %+v", req)
 
 	volumeID := req.GetVolumeId()
 	if len(volumeID) == 0 {

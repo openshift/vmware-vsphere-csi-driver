@@ -1,18 +1,6 @@
-/*
-Copyright (c) 2024-2024 VMware, Inc. All Rights Reserved.
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
-*/
+// © Broadcom. All Rights Reserved.
+// The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
+// SPDX-License-Identifier: Apache-2.0
 
 package vmdk
 
@@ -51,12 +39,19 @@ type VirtualDiskInfo struct {
 //
 // These are the only backing types that have a UUID property for comparing the
 // provided value.
+//
+// excludeSnapshots is used to determine if the delta disks for snapshot should
+// be excluded when calculating the disk size. If true, only the file keys from
+// the last chain, which is last delta disk, will be used. If false, all the
+// file keys from all the chains will be included.
 func GetVirtualDiskInfoByUUID(
 	ctx context.Context,
 	client *vim25.Client,
 	mo mo.VirtualMachine,
 	fetchProperties bool,
-	diskUUID string) (VirtualDiskInfo, error) {
+	excludeSnapshots bool,
+	diskUUID string,
+) (VirtualDiskInfo, error) {
 
 	if diskUUID == "" {
 		return VirtualDiskInfo{}, fmt.Errorf("diskUUID is empty")
@@ -141,11 +136,21 @@ func GetVirtualDiskInfoByUUID(
 	// Build a lookup table for determining if file key belongs to this disk
 	// chain.
 	diskFileKeys := map[int32]struct{}{}
-	for i := range mo.LayoutEx.Disk {
-		if d := mo.LayoutEx.Disk[i]; d.Key == disk.Key {
-			for j := range d.Chain {
-				for k := range d.Chain[j].FileKey {
-					diskFileKeys[d.Chain[j].FileKey[k]] = struct{}{}
+	for _, d := range mo.LayoutEx.Disk {
+		if d.Key != disk.Key || len(d.Chain) == 0 {
+			continue
+		}
+
+		// Take the file keys from the child most delta disk chain.
+		for _, fileKey := range d.Chain[len(d.Chain)-1].FileKey {
+			diskFileKeys[fileKey] = struct{}{}
+		}
+		if !excludeSnapshots {
+			// Take all the file keys from previous delta disk chains.
+			// These are for the snapshots.
+			for _, chain := range d.Chain[:len(d.Chain)-1] {
+				for _, fileKey := range chain.FileKey {
+					diskFileKeys[fileKey] = struct{}{}
 				}
 			}
 		}
