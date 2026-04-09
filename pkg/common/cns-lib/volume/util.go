@@ -41,14 +41,18 @@ import (
 type BatchAttachRequest struct {
 	// The volume ID for the given PVC.
 	VolumeID string
-	// SharingMode indicates the shraring mode if the virtual disk while attaching.
+	// SharingMode indicates the sharing mode if the virtual disk while attaching.
 	SharingMode string
 	// DiskMode is the desired mode to use when attaching the volume
 	DiskMode string
 	// ControllerKey is the object key for the controller object for this device.
-	ControllerKey string
+	ControllerKey *int32
 	//  UnitNumber of this device on its controller.
-	UnitNumber string
+	UnitNumber *int32
+	// BackingType enumerates types of backing for batch attach operations.
+	BackingType string
+
+	VolumeEncrypted *bool
 }
 
 // BatchAttachResult is the result of calling batch CNS Attach for multiple volumes.

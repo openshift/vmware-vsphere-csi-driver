@@ -116,7 +116,7 @@ func GetTKGVMIP(ctx context.Context, vmOperatorClient client.Client, dc dynamic.
 		Namespace: vmNamespace,
 		Name:      vmName,
 	}
-	virtualMachineInstance, _, err := utils.GetVirtualMachineAllApiVersions(ctx,
+	virtualMachineInstance, _, err := utils.GetVirtualMachine(ctx,
 		vmKey, vmOperatorClient)
 	if err != nil {
 		log.Errorf("failed to get virtualmachine %s/%s with error: %v", vmNamespace, vmName, err)
@@ -368,8 +368,7 @@ func GetDatacenterObjectList(ctx context.Context,
 // spawned by a controller to reconciler instances of a CRD. It reads the
 // value from an environment variable identified by 'key'. If the environment
 // variable is not set or has an invalid value, it returns the 'defaultVal'.
-// The value of the environment variable should be a positive integer less
-// than or equal to 'defaultVal'.
+// The value of the environment variable should be a positive integer
 func GetMaxWorkerThreads(ctx context.Context, key string, defaultVal int) int {
 	log := logger.GetLogger(ctx).With("field", key)
 	workerThreads := defaultVal
@@ -388,7 +387,7 @@ func GetMaxWorkerThreads(ctx context.Context, key string, defaultVal int) int {
 	}
 
 	switch {
-	case val <= 0 || val > defaultVal:
+	case val <= 0:
 		log.Warnf("Value %d for environment variable is invalid. Using default value %d",
 			val, defaultVal)
 	default:

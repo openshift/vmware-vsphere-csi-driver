@@ -24,6 +24,7 @@ import (
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
 	"github.com/vmware/govmomi/vim25/types"
+	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	cnsvolume "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -47,12 +48,8 @@ type FakeK8SOrchestrator struct {
 	featureStates     map[string]string
 	// CSINodeTopology instances for topology testing
 	csiNodeTopologyInstances []interface{}
-}
-
-func (c *FakeK8SOrchestrator) HandleLateEnablementOfCapability(
-	ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, capability, gcPort, gcEndpoint string) {
-	//TODO implement me
-	panic("implement me")
+	// PVCs for testing
+	pvcs []*v1.PersistentVolumeClaim
 }
 
 // volumeMigration holds mocked migrated volume information
@@ -114,9 +111,10 @@ type MockVolumeManager struct {
 		extraParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error)
 }
 
-func (m *MockVolumeManager) UnregisterVolume(ctx context.Context, volumeID string, unregisterDisk bool) error {
+func (m *MockVolumeManager) UnregisterVolume(ctx context.Context, volumeID string,
+	unregisterDisk bool) (string, error) {
 	//TODO implement me
-	return nil
+	return "", nil
 }
 
 func (m *MockVolumeManager) CreateVolume(ctx context.Context, spec *cnstypes.CnsVolumeCreateSpec,

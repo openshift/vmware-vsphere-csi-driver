@@ -26,20 +26,16 @@ import (
 	"sync"
 	"time"
 
-	versioned "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
-	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/davecgh/go-spew/spew"
 	snapv1 "github.com/kubernetes-csi/external-snapshotter/client/v8/apis/volumesnapshot/v1"
+	versioned "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
 	"github.com/vmware/govmomi/cns"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"google.golang.org/grpc/codes"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
@@ -47,6 +43,9 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	clientset "k8s.io/client-go/kubernetes"
+	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/migration"
 	volumes "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/volume"
 	cnsvsphere "sigs.k8s.io/vsphere-csi-driver/v3/pkg/common/cns-lib/vsphere"
@@ -219,6 +218,32 @@ func CsiFullSync(ctx context.Context, metadataSyncer *metadataSyncInformer, vc s
 					log.Errorf("FullSync for VC %s: Failed to add %s annotation for PVC %s. Err: %v",
 						vc, annCSIvSphereVolumeAccessibleTopology, pvc.Name, err)
 					continue
+				}
+			}
+		}
+	}
+
+	// Iterate over all the file volume PVCs and check if file share export paths are added as annotations
+	// on it. If not added, then add file share export path annotations on such PVCs.
+	if metadataSyncer.clusterFlavor == cnstypes.CnsClusterFlavorWorkload {
+		k8sClient, err := k8sNewClient(ctx)
+		if err != nil {
+			log.Errorf("FullSync for VC %s: Failed to create kubernetes client. Err: %+v", vc, err)
+			return err
+		}
+		for _, pv := range k8sPVs {
+			if IsFileVolume(pv) {
+				if pvc, ok := pvToPVCMap[pv.Name]; ok {
+					// Check if file share export path is available as annotation on PVC
+					if pvc.ObjectMeta.Annotations[common.Nfsv3ExportPathAnnotationKey] == "" ||
+						pvc.ObjectMeta.Annotations[common.Nfsv4ExportPathAnnotationKey] == "" {
+						err = setFileShareAnnotationsOnPVC(ctx, k8sClient, metadataSyncer.volumeManager, pvc)
+						if err != nil {
+							log.Errorf("FullSync for VC %s: Failed to add file share export path annotations "+
+								"for PVC %s, Err: %v. Continuing for other PVCs.", vc, pvc.Name, err)
+							continue
+						}
+					}
 				}
 			}
 		}
@@ -627,6 +652,60 @@ func patchVolumeAccessibleTopologyToPVC(ctx context.Context, k8sClient clientset
 	}
 	log.Infof("patchVolumeAccessibleTopologyToPVC: Added annotation %q successfully to PVC %q",
 		annCSIvSphereVolumeAccessibleTopology, pvc.Name)
+	return nil
+}
+
+// setFileShareAnnotationsOnPVC sets file share export paths as annotation on file volume PVC if it
+// is not already added. In case of upgrade from old version to VC 9.1 compatible CSI driver, this
+// will add these annotations on all existing file volume PVCs.
+func setFileShareAnnotationsOnPVC(ctx context.Context, k8sClient clientset.Interface,
+	volumeManager volumes.Manager, pvc *v1.PersistentVolumeClaim) error {
+	log := logger.GetLogger(ctx)
+	log.Infof("setFileShareAnnotationsOnPVC: Setting file share annotation for PVC: %q, namespace: %q",
+		pvc.Name, pvc.Namespace)
+
+	pv, err := k8sClient.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("setFileShareAnnotationsOnPVC: failed to get PV for PVC: %q, namespace: %q",
+			pvc.Name, pvc.Namespace)
+		return err
+	}
+
+	// Make a QueryVolume call to fetch file share export paths.
+	querySelection := cnstypes.CnsQuerySelection{
+		Names: []string{
+			string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
+		},
+	}
+	volume, err := common.QueryVolumeByID(ctx, volumeManager, pv.Spec.CSI.VolumeHandle, &querySelection)
+	if err != nil {
+		log.Errorf("setFileShareAnnotationsOnPVC: Error while performing QueryVolume on volume %s, Err: %+v",
+			pv.Spec.CSI.VolumeHandle, err)
+		return err
+	}
+	vSANFileBackingDetails := volume.BackingObjectDetails.(*cnstypes.CnsVsanFileShareBackingDetails)
+	accessPoints := make(map[string]string)
+	for _, kv := range vSANFileBackingDetails.AccessPoints {
+		if kv.Key == common.Nfsv3AccessPointKey {
+			pvc.Annotations[common.Nfsv3ExportPathAnnotationKey] = kv.Value
+		} else if kv.Key == common.Nfsv4AccessPointKey {
+			pvc.Annotations[common.Nfsv4ExportPathAnnotationKey] = kv.Value
+		}
+		accessPoints[kv.Key] = kv.Value
+	}
+	log.Debugf("setFileShareAnnotationsOnPVC: Access point details for PVC: %q, namespace: %q are %+v",
+		pvc.Name, pvc.Namespace, accessPoints)
+
+	// Update PVC to add annotation on it
+	pvc, err = k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, pvc,
+		metav1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("setFileShareAnnotationsOnPVC: Error updating PVC %q in namespace %q, Err: %v",
+			pvc.Name, pvc.Namespace, err)
+		return err
+	}
+	log.Infof("setFileShareAnnotationsOnPVC: Added file share export paths annotation successfully on PVC %q, "+
+		"namespce %q", pvc.Name, pvc.Namespace)
 	return nil
 }
 
@@ -1435,6 +1514,14 @@ func getVolumesToBeDeleted(ctx context.Context, cnsVolumeList []cnstypes.CnsVolu
 				log.Debugf("FullSync for VC %s: Volume with id %s added to delete list", vc, vol.VolumeId.Id)
 				volToBeDeleted = append(volToBeDeleted, vol.VolumeId)
 			} else {
+				if nsNameStr, ok := metadataSyncer.coCommonInterface.GetPVCNamespacedNameByUID(vol.VolumeId.Id); ok {
+					log.Infof(
+						"Skipping volume %q during full sync: corresponding PVC found in cache at %s, not adding to deletion map",
+						vol.VolumeId.Id,
+						nsNameStr,
+					)
+					continue
+				}
 				// Add to cnsDeletionMap.
 				if migrationFeatureStateForFullSync {
 					// If migration is ON, verify if the volume is present in inlineVolumeMap.

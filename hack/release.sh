@@ -49,7 +49,7 @@ BUILD_RELEASE_TYPE="${BUILD_RELEASE_TYPE:-}"
 # CUSTOM_REPO_FOR_GOLANG can be used to pass custom repository for golang builder image.
 # Please ensure it ends with a '/'.
 # Example: CUSTOM_REPO_FOR_GOLANG=<docker-registry>/dockerhub-proxy-cache/library/
-GOLANG_IMAGE=${CUSTOM_REPO_FOR_GOLANG:-}golang:1.24
+GOLANG_IMAGE=${CUSTOM_REPO_FOR_GOLANG:-}golang:1.25
 
 ARCH=amd64
 OSVERSION=1809
@@ -147,9 +147,7 @@ function build_driver_images_linux() {
 
 function build_syncer_image_linux() {
   echo "building ${SYNCER_IMAGE_NAME}:${VERSION} for linux"
-  docker buildx build \
-      --platform "linux/$ARCH" \
-      --output "${LINUX_IMAGE_OUTPUT}" \
+  docker buildx build --platform "linux/$ARCH"\
       -f images/syncer/Dockerfile \
       -t "${SYNCER_IMAGE_NAME}":"${VERSION}" \
       --build-arg "VERSION=${VERSION}" \

@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc/codes"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/util/retry"
 
 	snapshotterClientSet "github.com/kubernetes-csi/external-snapshotter/client/v8/clientset/versioned"
@@ -253,6 +254,10 @@ type K8sOrchestrator struct {
 	volumeIDToNameMap    *volumeIDToNameMap    // used when ListVolume FSS is enabled
 	k8sClient            clientset.Interface
 	snapshotterClient    snapshotterClientSet.Interface
+	// pvcUIDCache maps PVC UID to its namespaced name (namespace/name).
+	// this map contains UID of PVC with status Pending.
+	// When PVC's status turn to Bound, it is deleted from the map
+	pvcUIDCache sync.Map // key: PVC UID (string), value: namespaced name (string)
 }
 
 // K8sGuestInitParams lists the set of parameters required to run the init for
@@ -395,6 +400,7 @@ func getReleasedVanillaFSS() map[string]struct{} {
 		common.CnsMgrSuspendCreateVolume:     {},
 		common.CSIInternalGeneratedClusterID: {},
 		common.TopologyAwareFileVolume:       {},
+		common.CSITransactionSupport:         {},
 	}
 }
 
@@ -948,8 +954,12 @@ func initVolumeHandleToPvcMap(ctx context.Context, controllerClusterFlavor cnsty
 			func(obj interface{}) { // Add.
 				pvcAdded(obj)
 			},
-			nil, // Update.
-			nil, // Delete.
+			func(oldObj, newObj interface{}) { // Update.
+				pvcUpdated(oldObj, newObj)
+			},
+			func(obj interface{}) { // Delete.
+				pvcDeleted(obj)
+			},
 		)
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to listen on PVCs. Error: %v", err)
@@ -958,13 +968,59 @@ func initVolumeHandleToPvcMap(ctx context.Context, controllerClusterFlavor cnsty
 	return nil
 }
 
-// Since informerManager's sharedInformerFactory is started with no resync
-// period, it never syncs the existing cluster objects to its Store when
-// it's started. pvcAdded provides no additional handling but it ensures that
-// existing PVCs in the cluster gets added to sharedInformerFactory's Store
-// before it's started. Then using informerManager's PVCLister should find
-// the existing PVCs as well.
-func pvcAdded(obj interface{}) {}
+// pvcAdded is triggered whenever a PersistentVolumeClaim is observed for the first time
+// by the PVC informer. Since the sharedInformerFactory is configured with no resync
+// period, this handler plays a dual role:
+//  1. Ensures that PVCs not in the bound phase are added to the
+//     informer's in-memory cache.
+//  2. Executes controller-specific initialization logic, such as maintaining
+//     an internal UID → pending PVC map for quick lookups.
+func pvcAdded(obj interface{}) {
+	_, log := logger.GetNewContextWithLogger()
+	pvc, ok := obj.(*v1.PersistentVolumeClaim)
+	if !ok {
+		log.Warnf("pvcAdded: unrecognized object %+v", obj)
+		return
+	}
+	if pvc.Status.Phase == v1.ClaimBound {
+		// Do not cache PVC UID in the cache for Bound PVC
+		return
+	}
+	// Store in local cache for UID-based lookups
+	k8sOrchestratorInstance.pvcUIDCache.Store(string(pvc.UID), k8stypes.NamespacedName{
+		Namespace: pvc.Namespace,
+		Name:      pvc.Name,
+	})
+}
+
+// Update cache and remove UID of the PVC whose status turn to Bound from Pending
+func pvcUpdated(oldObj, newObj interface{}) {
+	_, log := logger.GetNewContextWithLogger()
+	oldpvc, ok := oldObj.(*v1.PersistentVolumeClaim)
+	if !ok {
+		log.Warnf("pvcUpdated: unrecognized oldObj %+v", oldObj)
+		return
+	}
+	newpvc, ok := newObj.(*v1.PersistentVolumeClaim)
+	if !ok {
+		log.Warnf("pvcUpdated: unrecognized newObj %+v", newObj)
+		return
+	}
+	if oldpvc.Status.Phase == v1.ClaimPending && newpvc.Status.Phase == v1.ClaimBound {
+		k8sOrchestratorInstance.pvcUIDCache.Delete(string(newpvc.UID))
+	}
+}
+
+// Update cache and remove UID of deleted PVC
+func pvcDeleted(obj interface{}) {
+	_, log := logger.GetNewContextWithLogger()
+	pvc, ok := obj.(*v1.PersistentVolumeClaim)
+	if !ok {
+		log.Warnf("pvcAdded: unrecognized object %+v", obj)
+		return
+	}
+	k8sOrchestratorInstance.pvcUIDCache.Delete(string(pvc.UID))
+}
 
 // pvAdded adds a volume to the volumeIDToPvcMap and  pvcToVolumeIDMap if it's already in Bound phase.
 // This ensures that all existing PVs in the cluster are added to the map, even
@@ -2016,8 +2072,8 @@ func (c *K8sOrchestrator) GetPVCNameFromCSIVolumeID(volumeID string) (
 
 // GetVolumeIDFromPVCName returns volumeID the given pvcName using pvcToVolumeIDMap.
 // PVC name is its namespaced name.
-func (c *K8sOrchestrator) GetVolumeIDFromPVCName(pvcName string) (string, bool) {
-	return c.pvcToVolumeIDMap.get(pvcName)
+func (c *K8sOrchestrator) GetVolumeIDFromPVCName(namespace string, pvcName string) (string, bool) {
+	return c.pvcToVolumeIDMap.get(fmt.Sprintf("%s/%s", namespace, pvcName))
 }
 
 // IsLinkedCloneRequest checks if the pvc is a linked clone request
@@ -2190,6 +2246,21 @@ func (c *K8sOrchestrator) UpdatePersistentVolumeLabel(ctx context.Context,
 	})
 }
 
+// GetPVCNamespacedNameByUID returns the PVC's namespaced name (namespace/name) for the given UID.
+// If the PVC is not found in the cache, it returns an empty string and false.
+func (c *K8sOrchestrator) GetPVCNamespacedNameByUID(uid string) (k8stypes.NamespacedName, bool) {
+	val, ok := c.pvcUIDCache.Load(uid)
+	if !ok {
+		return k8stypes.NamespacedName{}, false
+	}
+	nsName, valid := val.(k8stypes.NamespacedName)
+	if !valid {
+		// Defensive: entry exists but type assertion failed
+		return k8stypes.NamespacedName{}, false
+	}
+	return nsName, true
+}
+
 // GetPVCDataSource Retrieves the VolumeSnapshot source when a PVC from VolumeSnapshot is being created.
 func GetPVCDataSource(ctx context.Context, claim *v1.PersistentVolumeClaim) (*v1.ObjectReference, error) {
 	var dataSource v1.ObjectReference
@@ -2216,4 +2287,20 @@ func GetPVCDataSource(ctx context.Context, claim *v1.PersistentVolumeClaim) (*v1
 		return nil, nil
 	}
 	return &dataSource, nil
+}
+
+// ListPVCs lists all the PVCs in the given namespace.
+// If the namespace is an empty string, PVCs across all the namespaces are returned.
+func (c *K8sOrchestrator) ListPVCs(ctx context.Context, namespace string) []*v1.PersistentVolumeClaim {
+	log := logger.GetLogger(ctx)
+
+	// Note: List only accepts filters on labels and nothing else.
+	// If required, selectors can be exposed as arguments of this method.
+	pvcs, err := c.informerManager.GetPVCLister().PersistentVolumeClaims(namespace).List(labels.Everything())
+	if err != nil {
+		log.With("namespace", namespace).Error("failed to list PVCs")
+		return []*v1.PersistentVolumeClaim{}
+	}
+
+	return pvcs
 }

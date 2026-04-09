@@ -19,6 +19,7 @@ package kubernetes
 import (
 	"context"
 	"embed"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net"
@@ -26,11 +27,9 @@ import (
 	"strconv"
 	"time"
 
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	vmoperatorv1alpha1 "github.com/vmware-tanzu/vm-operator/api/v1alpha1"
-	vmoperatorv1alpha2 "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
-	vmoperatorv1alpha3 "github.com/vmware-tanzu/vm-operator/api/v1alpha3"
-	vmoperatorv1alpha4 "github.com/vmware-tanzu/vm-operator/api/v1alpha4"
-	vmoperatorv1alpha5 "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
 	v1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclientset "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
@@ -40,6 +39,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
+	apitypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	utilyaml "k8s.io/apimachinery/pkg/util/yaml"
 	clientset "k8s.io/client-go/kubernetes"
@@ -51,6 +51,7 @@ import (
 	ccV1beta1 "sigs.k8s.io/cluster-api/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	apiutils "sigs.k8s.io/controller-runtime/pkg/client/apiutil"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	cr_log "sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/go-logr/zapr"
@@ -238,7 +239,7 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
 		}
-	case vmoperatorv1alpha5.GroupName:
+	case vmoperatortypes.GroupName:
 		log.Info("adding scheme for vm-operator version v1alpha1")
 		err = vmoperatorv1alpha1.AddToScheme(scheme)
 		if err != nil {
@@ -246,25 +247,7 @@ func NewClientForGroup(ctx context.Context, config *restclient.Config, groupName
 			return nil, err
 		}
 		log.Info("adding scheme for vm-operator version v1alpha2")
-		err = vmoperatorv1alpha2.AddToScheme(scheme)
-		if err != nil {
-			log.Errorf("failed to add to scheme with err: %+v", err)
-			return nil, err
-		}
-		log.Info("adding scheme for vm-operator version v1alpha3")
-		err = vmoperatorv1alpha3.AddToScheme(scheme)
-		if err != nil {
-			log.Errorf("failed to add to scheme with err: %+v", err)
-			return nil, err
-		}
-		log.Info("adding scheme for vm-operator version v1alpha4")
-		err = vmoperatorv1alpha4.AddToScheme(scheme)
-		if err != nil {
-			log.Errorf("failed to add to scheme with err: %+v", err)
-			return nil, err
-		}
-		log.Info("adding scheme for vm-operator version v1alpha5")
-		err = vmoperatorv1alpha5.AddToScheme(scheme)
+		err = vmoperatortypes.AddToScheme(scheme)
 		if err != nil {
 			log.Errorf("failed to add to scheme with err: %+v", err)
 			return nil, err
@@ -358,20 +341,8 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 	log := logger.GetLogger(ctx)
 
 	scheme := runtime.NewScheme()
-	log.Info("adding scheme for vm-operator versions v1alpha1, v1alpha2, v1alpha3, v1alpha4, v1alpha5")
-	err = vmoperatorv1alpha5.AddToScheme(scheme)
-	if err != nil {
-		log.Errorf("failed to add to scheme with err: %+v", err)
-	}
-	err = vmoperatorv1alpha4.AddToScheme(scheme)
-	if err != nil {
-		log.Errorf("failed to add to scheme with err: %+v", err)
-	}
-	err = vmoperatorv1alpha3.AddToScheme(scheme)
-	if err != nil {
-		log.Errorf("failed to add to scheme with err: %+v", err)
-	}
-	err = vmoperatorv1alpha2.AddToScheme(scheme)
+	log.Info("adding scheme for vm-operator versions v1alpha1, v1alpha2")
+	err = vmoperatortypes.AddToScheme(scheme)
 	if err != nil {
 		log.Errorf("failed to add to scheme with err: %+v", err)
 	}
@@ -381,8 +352,8 @@ func NewVirtualMachineWatcher(ctx context.Context, config *restclient.Config,
 	}
 
 	gvk := schema.GroupVersionKind{
-		Group:   vmoperatorv1alpha1.GroupVersion.Group,
-		Version: vmoperatorv1alpha1.GroupVersion.Version,
+		Group:   vmoperatortypes.GroupVersion.Group,
+		Version: vmoperatortypes.GroupVersion.Version,
 		Kind:    virtualMachineKind,
 	}
 
@@ -670,39 +641,6 @@ func getCRDFromManifest(ctx context.Context, embedFS embed.FS, fileName string) 
 	return &crd, nil
 }
 
-// GetLatestCRDVersion retrieves the latest version of a Custom Resource Definition (CRD) by its name.
-func GetLatestCRDVersion(ctx context.Context, crdName string) (string, error) {
-	log := logger.GetLogger(ctx)
-	config, err := GetKubeConfig(ctx)
-	if err != nil {
-		log.Errorf("Failed to get KubeConfig. err: %s", err)
-		return "", err
-	}
-
-	c, err := apiextensionsclientset.NewForConfig(config)
-	if err != nil {
-		log.Errorf("Failed to create API extensions client. err: %s", err)
-		return "", err
-	}
-
-	crd, err := c.ApiextensionsV1().CustomResourceDefinitions().Get(ctx, crdName, metav1.GetOptions{})
-	if err != nil {
-		log.Errorf("Failed to get CRD %s. Error: %s", crdName, err)
-		return "", err
-	}
-
-	for _, version := range crd.Spec.Versions {
-		if version.Storage {
-			// This is the storage version, which is the latest version.
-			return version.Name, nil
-		}
-	}
-
-	err = fmt.Errorf("no storage version found for CRD %s", crdName)
-	log.Error(err)
-	return "", err
-}
-
 // PatchFinalizers updates only the finalizers of the object without modifying other fields
 // or incrementing the resource version.
 func PatchFinalizers(ctx context.Context, c client.Client, obj client.Object, finalizers []string) error {
@@ -715,82 +653,63 @@ func PatchFinalizers(ctx context.Context, c client.Client, obj client.Object, fi
 // RetainPersistentVolume updates the PersistentVolume's ReclaimPolicy to Retain.
 // This is useful to preserve the PersistentVolume even if the associated PersistentVolumeClaim is deleted.
 func RetainPersistentVolume(ctx context.Context, k8sClient clientset.Interface, pvName string) error {
-	log := logger.GetLogger(ctx)
+	log := logger.GetLogger(ctx).With("name", pvName)
 
 	if pvName == "" {
-		log.Debugf("PersistentVolume name is empty. Exiting...")
-		return nil
+		return logger.LogNewError(log, "PV name is empty")
 	}
 
-	log.Debugf("Retaining PersistentVolume %q", pvName)
 	pv, err := k8sClient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Debugf("PersistentVolume %q not found. Exiting...", pvName)
-			return nil
-		}
-
-		return logger.LogNewErrorf(log, "Failed to get PersistentVolume %q. Error: %s", pvName, err.Error())
+		log.Errorf("Failed to get PV. Error: %s", err.Error())
+		return err
 	}
 
 	pv.Spec.PersistentVolumeReclaimPolicy = v1.PersistentVolumeReclaimRetain
 	_, err = k8sClient.CoreV1().PersistentVolumes().Update(ctx, pv, metav1.UpdateOptions{})
 	if err != nil {
-		return logger.LogNewErrorf(log, "Failed to update PersistentVolume %q to retain policy. Error: %s",
-			pvName, err.Error())
+		log.Errorf("Failed to set the reclaim policy to retain. Error: %s", err.Error())
+		return err
 	}
 
-	log.Debugf("Successfully retained PersistentVolume %q", pvName)
+	log.Info("Successfully retained PV")
 	return nil
 }
 
 // DeletePersistentVolumeClaim deletes the PersistentVolumeClaim with the given name and namespace.
 func DeletePersistentVolumeClaim(ctx context.Context, k8sClient clientset.Interface,
 	pvcName, pvcNamespace string) error {
-	log := logger.GetLogger(ctx)
+	log := logger.GetLogger(ctx).With("name", fmt.Sprintf("%s/%s", pvcNamespace, pvcName))
 
 	if pvcName == "" {
-		log.Debugf("PVC name is empty. Exiting...")
-		return nil
+		return logger.LogNewErrorf(log, "PVC name is empty")
 	}
 
-	log.Debugf("Deleting PersistentVolumeClaim %q in namespace %q", pvcName, pvcNamespace)
 	err := k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Delete(ctx, pvcName, metav1.DeleteOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Debugf("PersistentVolumeClaim %q in namespace %q not found. Exiting...", pvcName, pvcNamespace)
-			return nil
-		}
-
-		return logger.LogNewErrorf(log, "Failed to delete PersistentVolumeClaim %q in namespace %q. Error: %s",
-			pvcName, pvcNamespace, err.Error())
+		log.Errorf("Failed to delete PVC. Error: %s", err.Error())
+		return err
 	}
 
-	log.Debugf("Successfully deleted PersistentVolumeClaim %q in namespace %q", pvcName, pvcNamespace)
+	log.Info("Successfully deleted PVC")
 	return nil
 }
 
 // DeletePersistentVolume deletes the PersistentVolume with the given name.
 func DeletePersistentVolume(ctx context.Context, k8sClient clientset.Interface, pvName string) error {
-	log := logger.GetLogger(ctx)
+	log := logger.GetLogger(ctx).With("name", pvName)
 
 	if pvName == "" {
-		log.Debugf("PersistentVolume name is empty. Exiting...")
-		return nil
+		return logger.LogNewErrorf(log, "PV name is empty")
 	}
 
-	log.Debugf("Deleting PersistentVolume %q", pvName)
 	err := k8sClient.CoreV1().PersistentVolumes().Delete(ctx, pvName, metav1.DeleteOptions{})
 	if err != nil {
-		if apierrors.IsNotFound(err) {
-			log.Debugf("PersistentVolume %q not found. Exiting...", pvName)
-			return nil
-		}
-
-		return logger.LogNewErrorf(log, "Failed to delete PersistentVolume %q. Error: %s", pvName, err.Error())
+		log.Errorf("Failed to delete PV. Error: %s", err.Error())
+		return err
 	}
 
-	log.Debugf("Successfully deleted PersistentVolume %q", pvName)
+	log.Info("Successfully deleted PV")
 	return nil
 }
 
@@ -798,14 +717,159 @@ func DeletePersistentVolume(ctx context.Context, k8sClient clientset.Interface, 
 // If the object is a Custom Resource, make sure that the `subresources` field in the
 // CustomResourceDefinition includes `status` to enable status subresource updates.
 func UpdateStatus(ctx context.Context, c client.Client, obj client.Object) error {
-	log := logger.GetLogger(ctx)
+	log := logger.GetLogger(ctx).
+		With("kind", obj.GetObjectKind().GroupVersionKind().Kind).
+		With("name", obj.GetNamespace()+"/"+obj.GetName())
 	if err := c.Status().Update(ctx, obj); err != nil {
-		log.Errorf("Failed to update status for %s %s/%s: %v", obj.GetObjectKind().GroupVersionKind().Kind,
-			obj.GetNamespace(), obj.GetName(), err)
+		log.Errorf("Failed to update status. err: %v", err)
 		return err
 	}
 
-	log.Infof("Successfully updated status for %s %s/%s", obj.GetObjectKind().GroupVersionKind().Kind,
-		obj.GetNamespace(), obj.GetName())
+	log.Debug("Successfully updated status.")
+	return nil
+}
+
+// AddFinalizerOnPVC adds the specified finalizer to the PersistentVolumeClaim (PVC)
+// if it is not already present.
+func AddFinalizerOnPVC(ctx context.Context, k8sClient clientset.Interface, pvcName, pvcNamespace,
+	finalizer string) error {
+	log := logger.GetLogger(ctx).
+		With("name", fmt.Sprintf("%s/%s", pvcNamespace, pvcName), "finalizer", finalizer)
+
+	if pvcName == "" {
+		return logger.LogNewErrorf(log, "PVC name is empty")
+	}
+
+	pvc, err := k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("Failed to get PVC. Error: %s", err.Error())
+		return err
+	}
+
+	// If the finalizer is already present, no action is needed
+	if !controllerutil.AddFinalizer(pvc, finalizer) {
+		log.Info("Finalizer already present on PVC. No action needed.")
+		return nil
+	}
+
+	// Update the PVC with the new finalizer
+	_, err = k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Update(ctx, pvc, metav1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("Failed to add finalizer on PVC. Error: %s", err.Error())
+		return err
+	}
+
+	log.Info("Successfully added finalizer on PVC")
+	return nil
+}
+
+// RemoveFinalizerFromPVC removes the specified finalizer from the PersistentVolumeClaim (PVC)
+// if it is present.
+func RemoveFinalizerFromPVC(ctx context.Context, k8sClient clientset.Interface, pvcName, pvcNamespace,
+	finalizer string) error {
+	log := logger.GetLogger(ctx).
+		With("name", fmt.Sprintf("%s/%s", pvcNamespace, pvcName), "finalizer", finalizer)
+
+	if pvcName == "" {
+		return logger.LogNewErrorf(log, "PVC name is empty")
+	}
+
+	pvc, err := k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Get(ctx, pvcName, metav1.GetOptions{})
+	if err != nil {
+		log.Errorf("Failed to get PVC. Error: %s", err.Error())
+		return err
+	}
+
+	// If the finalizer is not present, no action is needed
+	if !controllerutil.RemoveFinalizer(pvc, finalizer) {
+		log.Info("Finalizer not present on PVC. No action needed.")
+		return nil
+	}
+
+	// Update the PVC to remove the finalizer
+	_, err = k8sClient.CoreV1().PersistentVolumeClaims(pvcNamespace).Update(ctx, pvc, metav1.UpdateOptions{})
+	if err != nil {
+		log.Errorf("Failed to remove finalizer from PVC. Error: %s", err.Error())
+		return err
+	}
+
+	log.Info("Successfully removed finalizer from PVC")
+	return nil
+}
+
+// AddFinalizer adds the specified finalizer to the given Kubernetes object if it is not already present.
+// It updates the object in the Kubernetes cluster to persist the change.
+func AddFinalizer(ctx context.Context, c client.Client, obj client.Object, finalizer string) error {
+	log := logger.GetLogger(ctx).
+		With("finalizer", finalizer).
+		With("kind", obj.GetObjectKind().GroupVersionKind().Kind).
+		With("name", obj.GetNamespace()+"/"+obj.GetName())
+
+	if !controllerutil.AddFinalizer(obj, finalizer) {
+		log.Info("Finalizer already present. No update needed.")
+		return nil
+	}
+
+	log.Info("Adding finalizer to object.")
+	return c.Update(ctx, obj)
+}
+
+// RemoveFinalizer removes the specified finalizer from the given Kubernetes object if it is present.
+// It updates the object in the Kubernetes cluster to persist the change.
+func RemoveFinalizer(ctx context.Context, c client.Client, obj client.Object, finalizer string) error {
+	log := logger.GetLogger(ctx).
+		With("finalizer", finalizer).
+		With("kind", obj.GetObjectKind().GroupVersionKind().Kind).
+		With("name", obj.GetNamespace()+"/"+obj.GetName())
+
+	if !controllerutil.RemoveFinalizer(obj, finalizer) {
+		log.Info("Finalizer not present. No update needed.")
+		return nil
+	}
+
+	log.Info("Removing finalizer from object.")
+	return c.Update(ctx, obj)
+}
+
+// PatchObject patches a Kubernetes object using strategic merge patch.
+// This function creates a patch between the original and modified objects and applies it using the client.
+// It returns an error if the patch operation fails.
+func PatchObject(ctx context.Context, k8sClient client.Client, original, modified client.Object) error {
+	log := logger.GetLogger(ctx)
+
+	// Marshal the original object
+	oldData, err := json.Marshal(original)
+	if err != nil {
+		log.Errorf("PatchObject: Failed to marshal original object %s/%s: %v",
+			original.GetNamespace(), original.GetName(), err)
+		return err
+	}
+
+	// Marshal the modified object
+	newData, err := json.Marshal(modified)
+	if err != nil {
+		log.Errorf("PatchObject: Failed to marshal modified object %s/%s: %v",
+			modified.GetNamespace(), modified.GetName(), err)
+		return err
+	}
+
+	// Create merge patch (compatible with both native K8s resources and CRDs)
+	patchBytes, err := jsonpatch.CreateMergePatch(oldData, newData)
+	if err != nil {
+		log.Errorf("PatchObject: Error creating merge patch for object %s/%s: %v",
+			original.GetNamespace(), original.GetName(), err)
+		return err
+	}
+
+	// Apply the patch
+	patch := client.RawPatch(apitypes.MergePatchType, patchBytes)
+	if err := k8sClient.Patch(ctx, original, patch); err != nil {
+		log.Errorf("PatchObject: Failed to patch object %s/%s: %v",
+			original.GetNamespace(), original.GetName(), err)
+		return err
+	}
+
+	log.Debugf("PatchObject: Successfully patched object %s/%s",
+		original.GetNamespace(), original.GetName())
 	return nil
 }

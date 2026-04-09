@@ -68,6 +68,10 @@ const (
 	// interval after which successful CnsRegisterVolumes will be cleaned up.
 	// Current default value is set to 12 hours
 	DefaultCnsRegisterVolumesCleanupIntervalInMin = 720
+	// DefaultCnsPVCProtectionCleanupIntervalInMin is the default time interval after which
+	// orphaned PVCs will be cleaned up.
+	// Current default value is set to 10 minutes
+	DefaultCnsPVCProtectionCleanupIntervalInMin = 10
 	// DefaultVolumeMigrationCRCleanupIntervalInMin is the default time interval
 	// after which stale CnsVSphereVolumeMigration CRs will be cleaned up.
 	// Current default value is set to 2 hours.
@@ -111,7 +115,7 @@ const (
 // Errors
 var (
 	// ErrUsernameMissing is returned when the provided username is empty.
-	ErrUsernameMissing = errors.New("username or session manager configuration are missing")
+	ErrUsernameMissing = errors.New("username is missing")
 
 	// ErrInvalidUsername is returned when vCenter username provided in vSphere config
 	// secret is invalid. e.g. If username is not a fully qualified domain name, then
@@ -119,7 +123,7 @@ var (
 	ErrInvalidUsername = errors.New("username is invalid, make sure it is a fully qualified domain username")
 
 	// ErrPasswordMissing is returned when the provided password is empty.
-	ErrPasswordMissing = errors.New("password or session manager configuration are missing")
+	ErrPasswordMissing = errors.New("password is missing")
 
 	// ErrInvalidVCenterIP is returned when the provided vCenter IP address is
 	// missing from the provided configuration.
@@ -382,15 +386,15 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 
 		if vcConfig.User == "" {
 			vcConfig.User = cfg.Global.User
-			if vcConfig.User == "" && vcConfig.VCSessionManagerURL == "" {
-				log.Errorf("vcConfig.User or vcConfig.VCSessionManagerURL should be configured for vc %s!", vcServer)
+			if vcConfig.User == "" {
+				log.Errorf("vcConfig.User is empty for vc %s!", vcServer)
 				return ErrUsernameMissing
 			}
 		}
 
 		// vCenter server username provided in vSphere config secret should contain domain name,
 		// CSI driver will crash if username doesn't contain domain name.
-		if !isValidvCenterUsernameWithDomain(vcConfig.User) && vcConfig.VCSessionManagerURL == "" {
+		if !isValidvCenterUsernameWithDomain(vcConfig.User) {
 			log.Errorf("username %v specified in vSphere config secret is invalid, "+
 				"make sure that username is a fully qualified domain name.", vcConfig.User)
 			return ErrInvalidUsername
@@ -398,8 +402,8 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 
 		if vcConfig.Password == "" {
 			vcConfig.Password = cfg.Global.Password
-			if vcConfig.Password == "" && vcConfig.VCSessionManagerURL == "" {
-				log.Errorf("vcConfig.Password or vcConfig.VCSessionManagerURL should be configured for vc %s!", vcServer)
+			if vcConfig.Password == "" {
+				log.Errorf("vcConfig.Password is empty for vc %s!", vcServer)
 				return ErrPasswordMissing
 			}
 		}
@@ -450,6 +454,9 @@ func validateConfig(ctx context.Context, cfg *Config) error {
 
 	if cfg.Global.CnsRegisterVolumesCleanupIntervalInMin == 0 {
 		cfg.Global.CnsRegisterVolumesCleanupIntervalInMin = DefaultCnsRegisterVolumesCleanupIntervalInMin
+	}
+	if cfg.Global.CnsPVCProtectionCleanupIntervalInMin == 0 {
+		cfg.Global.CnsPVCProtectionCleanupIntervalInMin = DefaultCnsPVCProtectionCleanupIntervalInMin
 	}
 	if cfg.Global.VolumeMigrationCRCleanupIntervalInMin == 0 {
 		cfg.Global.VolumeMigrationCRCleanupIntervalInMin = DefaultVolumeMigrationCRCleanupIntervalInMin

@@ -21,71 +21,116 @@ import (
 )
 
 // DiskMode describes the desired mode to use when attaching the volume.
+// +kubebuilder:validation:Enum=independent_persistent;persistent;independent_nonpersistent;nonpersistent
 type DiskMode string
 
 const (
-	// By setting DiskMode to independent_persistent, a virtual machine's disk is not captured in snapshots and
+	// IndependentPersistent is the diskMode in which a virtual machine's disk is not captured in snapshots and
 	// changes are permanently written to the disk, regardless of snapshot operations.
 	IndependentPersistent DiskMode = "independent_persistent"
-	// Changes are immediately and permanently written to the virtual disk.
+	// Persistent diskMode changes are immediately and permanently written to the virtual disk.
 	Persistent DiskMode = "persistent"
-	// Changes to virtual disk are made to a redo log and discarded at power off.
+	// IndependentNonPersistent is the diskMode in which changes to virtual disk are made to a redo log
+	// and discarded at power off.
 	// It is not affected by snapshots.
 	IndependentNonPersistent = "independent_nonpersistent"
+	// Changes to virtual disk are made to a redo log and discarded at power off.
+	NonPersistent = "nonpersistent"
+
+	// This section defines the different conditions that CnsNodeVMBatchAttachment CR can take.
+	// ConditionReady reflects the overall status of the CR.
+	ConditionReady = "Ready"
+	// ConditionAttached reflects whether the given volume was attached successfully.
+	ConditionAttached = "VolumeAttached"
+	// ConditionDetached reflects whether the given volume was detached successfully.
+	ConditionDetached = "VolumeDetached"
+
+	// This section defines the different reasons for different conditions in the CnsNodeVMBatchAttachment CR.
+	// ReasonAttachFailed reflects that the volume failed to get attached.
+	// In case of successful attachment, reason is set to True.
+	ReasonAttachFailed = "AttachFailed"
+	// ReasonDetachFailed reflects that the volume failed to get detached.
+	// In case of successful detach, the volume's entry is removed from the CR.
+	ReasonDetachFailed = "DetachFailed"
+	// ReasonFailed reflects that the CR instance is not yet ready.
+	ReasonFailed = "Failed"
 )
 
-// The sharing mode of the virtual disk.
+// SharingMode is the sharing mode of the virtual disk.
+// +kubebuilder:validation:Enum=sharingMultiWriter;sharingNone
 type SharingMode string
 
 const (
-	// The virtual disk is shared between multiple virtual machines.
+	// SharingMultiWriter: The virtual disk is shared between multiple virtual machines.
 	SharingMultiWriter SharingMode = "sharingMultiWriter"
-	// The virtual disk is not shared.
+	// SharingNone: The virtual disk is not shared.
 	SharingNone SharingMode = "sharingNone"
 )
 
-// CnsNodeVmBatchAttachmentSpec defines the desired state of CnsNodeVmBatchAttachment
+// CnsNodeVMBatchAttachmentSpec defines the desired state of CnsNodeVMBatchAttachment
 // +k8s:openapi-gen=true
-type CnsNodeVmBatchAttachmentSpec struct {
-	// NodeUUID indicates the UUID of the node where the volume needs to be attached to.
-	// Here NodeUUID is the instance UUID of the node.
-	NodeUUID string `json:"nodeuuid"`
+type CnsNodeVMBatchAttachmentSpec struct {
+	// +required
+
+	// InstanceUUID indicates the instance UUID of the node where the volume needs to be attached to.
+	InstanceUUID string `json:"instanceUUID"`
 
 	// +listType=map
 	// +listMapKey=name
 	// VolumeSpec reflects the desired state for each volume.
-	Volumes []VolumeSpec `json:"volumes"`
+	Volumes []VolumeSpec `json:"volumes,omitempty"`
 }
 
 type VolumeSpec struct {
+	// +required
+
 	// Name of the volume as given by the user.
 	Name string `json:"name"`
+	// +required
+
 	// PersistentVolumeClaim contains details about the volume's desired state.
 	PersistentVolumeClaim PersistentVolumeClaimSpec `json:"persistentVolumeClaim"`
 }
 
 type PersistentVolumeClaimSpec struct {
+	// +required
+
 	// ClaimName is the PVC name.
 	ClaimName string `json:"claimName"`
+	// +required
+
 	// DiskMode is the desired mode to use when attaching the volume
-	DiskMode DiskMode `json:"diskMode,omitempty"`
-	// SharingMode indicates the shraring mode if the virtual disk while attaching.
-	SharingMode SharingMode `json:"sharingMode,omitempty"`
+	DiskMode DiskMode `json:"diskMode"`
+	// +required
+
+	// SharingMode indicates the sharing mode if the virtual disk while attaching.
+	SharingMode SharingMode `json:"sharingMode"`
+	// +required
+
 	// ControllerKey is the object key for the controller object for this device.
-	ControllerKey string `json:"controllerKey,omitempty"`
+	ControllerKey *int32 `json:"controllerKey"`
+	// +required
+
 	// UnitNumber of this device on its controller.
-	UnitNumber string `json:"unitNumber,omitempty"`
+	UnitNumber *int32 `json:"unitNumber"`
 }
 
-// CnsNodeVmBatchAttachmentStatus defines the observed state of CnsNodeVmBatchAttachment
+// CnsNodeVMBatchAttachmentStatus defines the observed state of CnsNodeVMBatchAttachment
 // +k8s:openapi-gen=true
-type CnsNodeVmBatchAttachmentStatus struct {
-	// Error is the overall error status for the instance.
-	Error string `json:"error,omitempty"`
+type CnsNodeVMBatchAttachmentStatus struct {
+	// +optional
 	// +listType=map
 	// +listMapKey=name
 	// VolumeStatus reflects the status for each volume.
 	VolumeStatus []VolumeStatus `json:"volumes,omitempty"`
+	// +optional
+
+	// Conditions describes any conditions associated with this CnsNodeVMBatchAttachment instance.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// TODO: remove this field once VM op changes are ready.
+	// Error is the overall error status for the instance.
+	Error string `json:"error,omitempty"`
 }
 
 type VolumeStatus struct {
@@ -98,16 +143,29 @@ type VolumeStatus struct {
 type PersistentVolumeClaimStatus struct {
 	// ClaimName is the PVC name.
 	ClaimName string `json:"claimName"`
+	// +optional
+
+	// CnsVolumeID is the volume ID for the PVC.
+	CnsVolumeID string `json:"cnsVolumeId,omitempty"`
+	// +optional
+
+	// DiskUUID is the ID obtained when volume is attached to a VM.
+	DiskUUID string `json:"diskUUID,omitempty"`
+	// +optional
+
+	// Conditions describes any conditions associated with this volume.
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// TODO: remove this field once VM op changes are ready.
+	// Error indicates the error which may have occurred during attach/detach.
+	Error string `json:"error,omitempty"`
+
+	// TODO: remove this field once VM op changes are ready.
+	// Attached indicates the attach status of a PVC.
 	// If volume is not attached, Attached will be set to false.
 	// If volume is attached, Attached will be set to true.
 	// If volume is detached successfully, its entry will be removed from VolumeStatus.
 	Attached bool `json:"attached"`
-	// Error indicates the error which may have occurred during attach/detach.
-	Error string `json:"error,omitempty"`
-	// CnsVolumeID is the volume ID for the PVC.
-	CnsVolumeID string `json:"cnsVolumeId,omitempty"`
-	// Diskuuid is the ID obtained when volume is attached to a VM.
-	Diskuuid string `json:"diskuuid,omitempty"`
 }
 
 // +genclient
@@ -115,21 +173,40 @@ type PersistentVolumeClaimStatus struct {
 
 // +k8s:openapi-gen=true
 // +kubebuilder:subresource:status
+// +kubebuilder:object:root=true
+// +kubebuilder:resource:shortName=batchattach
+// +kubebuilder:printcolumn:name="InstanceUUID",type="string",JSONPath=".spec.instanceUUID"
 
-// CnsNodeVmBatchAttachment is the Schema for the cnsnodevmbatchattachments API
-type CnsNodeVmBatchAttachment struct {
+// CnsNodeVMBatchAttachment is the Schema for the cnsnodevmbatchattachments API
+type CnsNodeVMBatchAttachment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   CnsNodeVmBatchAttachmentSpec   `json:"spec,omitempty"`
-	Status CnsNodeVmBatchAttachmentStatus `json:"status,omitempty"`
+	Spec   CnsNodeVMBatchAttachmentSpec   `json:"spec,omitempty"`
+	Status CnsNodeVMBatchAttachmentStatus `json:"status,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 
-// CnsNodeVmBatchAttachmentList contains a list of CnsNodeVmBatchAttachment
-type CnsNodeVmBatchAttachmentList struct {
+// CnsNodeVMBatchAttachmentList contains a list of CnsNodeVMBatchAttachment
+type CnsNodeVMBatchAttachmentList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
-	Items           []CnsNodeVmBatchAttachment `json:"items"`
+	Items           []CnsNodeVMBatchAttachment `json:"items"`
+}
+
+func (in *CnsNodeVMBatchAttachment) GetConditions() []metav1.Condition {
+	return in.Status.Conditions
+}
+
+func (in *CnsNodeVMBatchAttachment) SetConditions(conditions []metav1.Condition) {
+	in.Status.Conditions = conditions
+}
+
+func (p *PersistentVolumeClaimStatus) GetConditions() []metav1.Condition {
+	return p.Conditions
+}
+
+func (p *PersistentVolumeClaimStatus) SetConditions(conditions []metav1.Condition) {
+	p.Conditions = conditions
 }

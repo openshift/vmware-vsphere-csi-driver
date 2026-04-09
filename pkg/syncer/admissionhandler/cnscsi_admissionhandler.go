@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
 	"sigs.k8s.io/vsphere-csi-driver/v3/pkg/csi/service/common/commonco/k8sorchestrator"
 
 	admissionv1 "k8s.io/api/admission/v1"
@@ -43,6 +43,7 @@ const (
 	MutationWebhookPath              = "/mutate"
 	DefaultWebhookPort               = 9883
 	DefaultWebhookMetricsBindAddress = "0"
+	DefaultWebhookCertDir            = "/etc/vmware/wcp/webhook-certs"
 	devopsUserLabelKey               = "cns.vmware.com/user-created"
 	vmUIDLabelKey                    = "cns.vmware.com/vm-uid"
 	pvcUIDLabelKey                   = "cns.vmware.com/pvc-uid"
@@ -113,6 +114,7 @@ func startCNSCSIWebhookManager(ctx context.Context, enableWebhookClientCertVerif
 		},
 		WebhookServer: webhook.NewServer(webhook.Options{
 			Port:         webhookPort,
+			CertDir:      DefaultWebhookCertDir,
 			TLSOpts:      tlsConfigOpts,
 			ClientCAName: clientCAName,
 		})}
@@ -287,7 +289,7 @@ func getVirtualMachine(ctx context.Context, vmOperatorClient client.Client,
 		Namespace: namespace,
 		Name:      vmName,
 	}
-	virtualMachine, apiVersion, err := utils.GetVirtualMachineAllApiVersions(ctx,
+	virtualMachine, apiVersion, err := utils.GetVirtualMachine(ctx,
 		vmKey, vmOperatorClient)
 	if err != nil {
 		log.Error("failed to get virtualmachine instance for the VM with name: %q. Error: %+v", vmName, err)

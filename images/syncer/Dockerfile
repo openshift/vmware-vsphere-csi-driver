@@ -14,7 +14,7 @@
 ##                               BUILD ARGS                                   ##
 ################################################################################
 # This build arg allows the specification of a custom Golang image.
-ARG GOLANG_IMAGE=golang:1.24
+ARG GOLANG_IMAGE=golang:1.25
 
 # This build arg allows the specification of a custom base image.
 ARG BASE_IMAGE=photon:5.0
@@ -22,7 +22,7 @@ ARG BASE_IMAGE=photon:5.0
 ################################################################################
 ##                              BUILD STAGE                                   ##
 ################################################################################
-FROM ${GOLANG_IMAGE} as builder
+FROM ${GOLANG_IMAGE} AS builder
 
 # This build arg is the version to embed in the CSI binary
 ARG VERSION=unknown
@@ -39,7 +39,7 @@ COPY cmd/    cmd/
 
 ENV CGO_ENABLED=0
 
-ENV GOPROXY ${GOPROXY:-https://proxy.golang.org}
+ENV GOPROXY=${GOPROXY:-https://proxy.golang.org}
 
 ENV GOFIPS=1
 

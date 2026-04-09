@@ -258,7 +258,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 
-			time.Sleep(5 * time.Minute)
+			time.Sleep(8 * time.Minute)
 			// Check if csi pods are running fine after site failure
 			ginkgo.By("Check if csi pods are running fine after site failure")
 			err = fpod.WaitForPodsRunningReady(ctx, client, csiNs, len(csipods.Items),
@@ -306,7 +306,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 		11.Bring secondary site up and wait for testbed to be back to normal.
 		12.Delete all objects created in this test.
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService - secondary site down",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService - secondary site down",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -397,7 +397,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			}
 
-			time.Sleep(5 * time.Minute)
+			time.Sleep(10 * time.Minute)
 			// Check if csi pods are running fine after site failure
 			ginkgo.By("Check if csi pods are running fine after site failure")
 			err = fpod.WaitForPodsRunningReady(ctx, client, csiNs, len(csipods.Items),
@@ -443,7 +443,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 		7. Bring primary site up and wait for testbed to be back to normal.
 		8. Delete all objects created in the test.
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService VM creation while primary site goes down",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService VM creation while primary site goes down",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -589,7 +589,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 		10.Bring secondary site up and wait for testbed to be back to normal.
 		11.Delete all objects created in this test.
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService VM deletion while secondary site goes down",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService VM deletion while secondary site goes down",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -735,7 +735,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 	   10.Wait for psod timeout to be over and wait for testbed to be back to normal.
 	   11.Delete all objects created in this test.
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService - psod hosts on secondary site",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService - psod hosts on secondary site",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -862,7 +862,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 		6.	Bring primary site up and wait for testbed to be back to normal
 		7.	Delete all objects created in step 2 and 5
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService - witness failure",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService - witness failure",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -995,7 +995,7 @@ var _ bool = ginkgo.Describe("[vsan-stretch-vmsvc] vm service with csi vol tests
 		11. Re-establish primary site network and wait for testbed to be back to normal
 		12. Delete all objects created in this test.
 	*/
-	ginkgo.It("[pq-vmsvc-vsanstretch] VMService - Primary site network isolation",
+	ginkgo.It("[pq-f-vmsvc-vsanstretch] VMService - Primary site network isolation",
 		ginkgo.Label(p0, vmsvc, vsanStretch, block, wcp), func() {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

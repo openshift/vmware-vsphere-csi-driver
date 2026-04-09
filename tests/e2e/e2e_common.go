@@ -41,6 +41,7 @@ const (
 	contollerClusterKubeConfig                 = "CONTROLLER_CLUSTER_KUBECONFIG"
 	controlPlaneLabel                          = "node-role.kubernetes.io/control-plane"
 	crdCNSNodeVMAttachment                     = "cnsnodevmattachments"
+	crdCNSNodeVMBatchAttachment                = "cnsnodevmbatchattachments"
 	crdCNSVolumeMetadatas                      = "cnsvolumemetadatas"
 	crdCNSFileAccessConfig                     = "cnsfileaccessconfigs"
 	crdtriggercsifullsyncsName                 = "csifullsync"
@@ -281,6 +282,7 @@ const (
 	selectedNodeIsZone                       = "cns.vmware.com/selected-node-is-zone"
 	selectedNodeAnnotationOnPVC              = "volume.kubernetes.io/selected-node"
 	vmZoneLabel                              = "topology.kubernetes.io/zone"
+	batchAttachSupportedVCVersion            = "9.1.0"
 )
 
 /*
@@ -491,14 +493,12 @@ var (
 // For management workload domain isolation
 var (
 	envZonal2StoragePolicyName                     = "ZONAL2_STORAGE_POLICY_IMM"
-	envZonal2StoragePolicyNameLateBidning          = "ZONAL2_STORAGE_POLICY_WFFC"
 	envZonal1StoragePolicyName                     = "ZONAL1_STORAGE_POLICY_IMM"
 	envZonal3StoragePolicyName                     = "ZONAL3_STORAGE_POLICY_IMM"
 	topologyDomainIsolation                        = "Workload_Management_Isolation"
 	envIsolationSharedStoragePolicyName            = "WORKLOAD_ISOLATION_SHARED_STORAGE_POLICY"
 	envSharedZone2Zone4StoragePolicyName           = "SHARED_ZONE2_ZONE4_STORAGE_POLICY_IMM"
 	envSharedZone2Zone4DatastoreUrl                = "SHARED_ZONE2_ZONE4_DATASTORE_URL"
-	envZonal2DatastoreUrl                          = "ZONAL2_DATASTORE_URL"
 	envZone3DatastoreName                          = "ZONE3_DATASTORE_NAME"
 	envZone2DatastoreName                          = "ZONE2_DATASTORE_NAME"
 	vmMigrationUserName                            = "VM_MIGRATION_USER_NAME"
@@ -508,6 +508,7 @@ var (
 	envSharedZone1Zone2Zone3StoragePolicyName      = "SHARED_ZONE1_ZONE2_ZONE3_STORAGE_POLICY_IMM"
 	nimbusWorkerIp                                 = "NIMBUS_WORKER_IP"
 	vsanMaxFaultDomainName                         = "VSAN_MAX_FD_NAME"
+	envZonal1And2PolicyName                        = "ZONAL_ZONE1_ZONE2_POLICY"
 )
 
 // for devops persona testing

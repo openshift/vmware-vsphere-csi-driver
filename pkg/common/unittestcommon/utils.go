@@ -26,8 +26,10 @@ import (
 	"strings"
 	"sync"
 
+	cnstypes "github.com/vmware/govmomi/cns/types"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	"github.com/vmware/govmomi/simulator"
 	"github.com/vmware/govmomi/simulator/vpx"
@@ -140,7 +142,6 @@ func (c *FakeK8SOrchestrator) IsFakeAttachAllowed(
 func (c *FakeK8SOrchestrator) GetPvcObjectByName(ctx context.Context,
 	pvcName string, namespace string) (*v1.PersistentVolumeClaim, error) {
 	if pvcName == "pvc-rwx" {
-
 		pvc := &v1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      pvcName,   // Name of the PVC
@@ -155,6 +156,58 @@ func (c *FakeK8SOrchestrator) GetPvcObjectByName(ctx context.Context,
 						v1.ResourceStorage: *resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5Gi of storage
 					},
 				},
+			},
+		}
+		return pvc, nil
+	}
+
+	if pvcName == "not-found-error" {
+		return nil, apierrors.NewNotFound(v1.Resource("persistentvolumeclaim"), pvcName)
+	}
+
+	if pvcName == "with-used-by-annotation" {
+		mode := v1.PersistentVolumeBlock
+
+		pvc := &v1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        pvcName,   // Name of the PVC
+				Namespace:   namespace, // Namespace to create the PVC in
+				Annotations: map[string]string{"cns.vmware.com/usedby-vm-123456": ""},
+			},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{
+					v1.ReadWriteOnce, // Set the access mode to RWO (ReadWriteOnce)
+				},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{
+						v1.ResourceStorage: *resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5Gi of storage
+					},
+				},
+				VolumeMode: &mode,
+			},
+		}
+		return pvc, nil
+	}
+
+	if pvcName == "with-sparse-backing-type" {
+		mode := v1.PersistentVolumeBlock
+
+		pvc := &v1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        pvcName,   // Name of the PVC
+				Namespace:   namespace, // Namespace to create the PVC in
+				Annotations: map[string]string{common.AnnKeyBackingDiskType: "Sparse"},
+			},
+			Spec: v1.PersistentVolumeClaimSpec{
+				AccessModes: []v1.PersistentVolumeAccessMode{
+					v1.ReadWriteOnce, // Set the access mode to RWO (ReadWriteOnce)
+				},
+				Resources: v1.VolumeResourceRequirements{
+					Requests: v1.ResourceList{
+						v1.ResourceStorage: *resource.NewQuantity(5*1024*1024*1024, resource.BinarySI), // 5Gi of storage
+					},
+				},
+				VolumeMode: &mode,
 			},
 		}
 		return pvc, nil
@@ -193,6 +246,16 @@ func (c *FakeK8SOrchestrator) ClearFakeAttached(ctx context.Context, volumeID st
 	log := logger.GetLogger(ctx)
 	return logger.LogNewErrorCode(log, codes.Unimplemented,
 		"ClearFakeAttached for FakeK8SOrchestrator is not yet implemented.")
+}
+
+func (c *FakeK8SOrchestrator) GetPVCNamespacedNameByUID(uid string) (k8stypes.NamespacedName, bool) {
+	return k8stypes.NamespacedName{}, false
+}
+
+func (c *FakeK8SOrchestrator) HandleLateEnablementOfCapability(
+	ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, capability, gcPort, gcEndpoint string) {
+	//TODO implement me
+	panic("implement me")
 }
 
 // GetNodeTopologyLabels fetches the topology information of a node from the CSINodeTopology CR.
@@ -426,12 +489,20 @@ func (c *FakeK8SOrchestrator) GetPVCNameFromCSIVolumeID(volumeID string) (string
 		return "", "", false
 	}
 
+	if strings.Contains(volumeID, "with-used-by-annotation") {
+		return "with-used-by-annotation", "test-ns", true
+	}
+
+	if strings.Contains(volumeID, "vol-1") {
+		return "mock-pvc-1", "mock-namespace", true
+	}
+
 	// Simulate a case where the volumeID corresponds to a PVC.
 	return "mock-pvc", "mock-namespace", true
 }
 
 // GetVolumeIDFromPVCName simlates an invalid case when pvcName contains "invalid".
-func (c *FakeK8SOrchestrator) GetVolumeIDFromPVCName(pvcName string) (string, bool) {
+func (c *FakeK8SOrchestrator) GetVolumeIDFromPVCName(namespace string, pvcName string) (string, bool) {
 	if strings.Contains(pvcName, "invalid") {
 		// Simulate a case where the volumeID is invalid and does not correspond to any PVC.
 		return "", false
@@ -500,6 +571,27 @@ func (c *FakeK8SOrchestrator) SetCSINodeTopologyInstances(instances []interface{
 	c.csiNodeTopologyInstances = instances
 }
 
+func (c *FakeK8SOrchestrator) ListPVCs(ctx context.Context, namespace string) []*v1.PersistentVolumeClaim {
+	if namespace == "" {
+		// Return all PVCs
+		return c.pvcs
+	}
+
+	// Filter by namespace
+	var filteredPVCs []*v1.PersistentVolumeClaim
+	for _, pvc := range c.pvcs {
+		if pvc.Namespace == namespace {
+			filteredPVCs = append(filteredPVCs, pvc)
+		}
+	}
+	return filteredPVCs
+}
+
+// SetPVCs sets the PVCs for testing
+func (c *FakeK8SOrchestrator) SetPVCs(pvcs []*v1.PersistentVolumeClaim) {
+	c.pvcs = pvcs
+}
+
 // configFromVCSim starts a vcsim instance and returns config for use against the
 // vcsim instance. The vcsim instance is configured with an empty tls.Config.
 func configFromVCSim(vcsimParams VcsimParams, isTopologyEnv bool) (*config.Config, func()) {
@@ -545,7 +637,6 @@ func configFromVCSimWithTLS(tlsConfig *tls.Config, vcsimParams VcsimParams, inse
 	if err != nil {
 		log.Fatal(err)
 	}
-	model.Service.RegisterEndpoints = true
 
 	model.Service.RegisterEndpoints = true
 	model.Service.TLS = tlsConfig

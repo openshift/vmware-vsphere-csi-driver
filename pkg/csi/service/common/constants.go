@@ -144,8 +144,17 @@ const (
 	// UnknownVolumeType is assigned to CNS volumes whose type couldn't be determined.
 	UnknownVolumeType = "UNKNOWN"
 
+	// Nfsv3AccessPointKey is the key for NFSv3 access point.
+	Nfsv3AccessPointKey = "NFSv3"
+
 	// Nfsv4AccessPointKey is the key for NFSv4 access point.
 	Nfsv4AccessPointKey = "NFSv4.1"
+
+	// Nfsv3ExportPathAnnotationKey specifies the NFSv3 export path annotation key on PVC
+	Nfsv3ExportPathAnnotationKey = "csi.vsphere.exportpath.nfs3"
+
+	// Nfsv4ExportPathAnnotationKey specifies the NFSv4.1 export path annotation key on PVC
+	Nfsv4ExportPathAnnotationKey = "csi.vsphere.exportpath.nfs41"
 
 	// Nfsv4AccessPoint is the access point of file volume.
 	Nfsv4AccessPoint = "Nfsv4AccessPoint"
@@ -344,6 +353,18 @@ const (
 	// Guest cluster.
 	SupervisorVolumeSnapshotAnnotationKey = "csi.vsphere.guest-initiated-csi-snapshot"
 
+	// ConfigMapCSILimits is the ConfigMap name for CSI limits configuration
+	ConfigMapCSILimits = "cns-csi-limits"
+
+	// ConfigMapKeyMaxSnapshotsPerVolume is the ConfigMap key for snapshot limit per volume
+	ConfigMapKeyMaxSnapshotsPerVolume = "max-snapshots-per-volume"
+
+	// DefaultMaxSnapshotsPerVolume is the default maximum number of snapshots per block volume in WCP
+	DefaultMaxSnapshotsPerVolume = 4
+
+	// AbsoluteMaxSnapshotsPerVolume is the hard cap for maximum snapshots per block volume
+	AbsoluteMaxSnapshotsPerVolume = 32
+
 	// AttributeSupervisorVolumeSnapshotClass represents name of VolumeSnapshotClass
 	AttributeSupervisorVolumeSnapshotClass = "svvolumesnapshotclass"
 
@@ -365,6 +386,15 @@ const (
 
 	// AnnKeyLinkedClone is the linked clone annotation on the PVC
 	AnnKeyLinkedClone = "csi.vsphere.volume/fast-provisioning"
+
+	// AnnKeyBackingDiskType is the type of the backing disk.
+	// It is added on the PVC during static volume provisioning
+	// and is used to specify the `CnsBackingType` during volume attachment.
+	AnnKeyBackingDiskType = "cns.vmware.com.protected/disk-backing"
+
+	// PvcUIDLabelKey is a label which gets added to CnsNodeVMAttachment instances
+	// to indicate the PVC that it has attached.
+	PvcUIDLabelKey = "cns.vmware.com/pvc-uid"
 )
 
 // Supported container orchestrators.
@@ -420,8 +450,6 @@ const (
 	StorageQuotaM2 = "storage-quota-m2"
 	// CSIDetachOnSupervisor enables CSI to detach the disk from the podvm in a supervisor environment
 	CSIDetachOnSupervisor = "CSI_Detach_Supported"
-	// CnsUnregisterVolume enables the creation of CRD and controller for CnsUnregisterVolume API.
-	CnsUnregisterVolume = "cns-unregister-volume"
 	// WorkloadDomainIsolation is the name of the WCP capability which determines if
 	// workload domain isolation feature is available on a supervisor cluster.
 	WorkloadDomainIsolation = "Workload_Domain_Isolation_Supported"
@@ -449,9 +477,10 @@ const (
 	// VolFromSnapshotOnTargetDs is a FSS that tells whether creation of volumes from
 	// snapshots on different datastores feature is supported in CSI.
 	VolFromSnapshotOnTargetDs = "supports_vol_from_snapshot_on_target_ds"
-	// StoragePolicyReservation feature is assumed to be enabled in CSI when
+	// WCPMobilityNonDisruptiveImport feature is assumed to be enabled in CSI when
 	// "supports_mobility_non_disruptive_import" capability is enabled in supervisor.
-	StoragePolicyReservationSupport = "supports_mobility_non_disruptive_import"
+	// This capability guards CNSUnregisterVolume and StoragePolicyReservation.
+	WCPMobilityNonDisruptiveImport = "supports_mobility_non_disruptive_import"
 	// LinkedCloneSupport is an FSS that tells whether LinkedClone feature is supported in CSI.
 	LinkedCloneSupport = "supports_FCD_linked_clone"
 	// LinkedCloneSupportFSS is an FSS for LinkedClone support in pvcsi
@@ -462,19 +491,19 @@ const (
 )
 
 var WCPFeatureStates = map[string]struct{}{
-	PodVMOnStretchedSupervisor:      {},
-	CSIDetachOnSupervisor:           {},
-	WorkloadDomainIsolation:         {},
-	VPCCapabilitySupervisor:         {},
-	VolFromSnapshotOnTargetDs:       {},
-	SharedDiskFss:                   {},
-	LinkedCloneSupport:              {},
-	StoragePolicyReservationSupport: {},
-	WCPVMServiceVMSnapshots:         {},
-	BYOKEncryption:                  {},
-	FCDTransactionSupport:           {},
-	MultipleClustersPerVsphereZone:  {},
-	FileVolumesWithVmService:        {},
+	PodVMOnStretchedSupervisor:     {},
+	CSIDetachOnSupervisor:          {},
+	WorkloadDomainIsolation:        {},
+	VPCCapabilitySupervisor:        {},
+	VolFromSnapshotOnTargetDs:      {},
+	SharedDiskFss:                  {},
+	LinkedCloneSupport:             {},
+	WCPMobilityNonDisruptiveImport: {},
+	WCPVMServiceVMSnapshots:        {},
+	BYOKEncryption:                 {},
+	FCDTransactionSupport:          {},
+	MultipleClustersPerVsphereZone: {},
+	FileVolumesWithVmService:       {},
 }
 
 // WCPFeatureStatesSupportsLateEnablement contains capabilities that can be enabled later

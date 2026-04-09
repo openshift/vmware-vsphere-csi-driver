@@ -51,6 +51,9 @@ type Config struct {
 		// CnsRegisterVolumesCleanupIntervalInMin specifies the interval after which
 		// successful CnsRegisterVolumes will be cleaned up.
 		CnsRegisterVolumesCleanupIntervalInMin int `gcfg:"cnsregistervolumes-cleanup-intervalinmin"`
+		// CnsPVCProtectionCleanupIntervalInMin specifies the interval after which
+		// orphaned PVCs will be cleaned up.
+		CnsPVCProtectionCleanupIntervalInMin int `gcfg:"cnspvcprotection-cleanup-intervalinmin"`
 		// VolumeMigrationCRCleanupIntervalInMin specifies the interval after which
 		// stale CnsVSphereVolumeMigration CRs will be cleaned up.
 		VolumeMigrationCRCleanupIntervalInMin int `gcfg:"volumemigration-cr-cleanup-intervalinmin"`
@@ -157,12 +160,6 @@ type VirtualCenterConfig struct {
 	MigrationDataStoreURL string `gcfg:"migration-datastore-url"`
 	// FileVolumeActivated indicates whether file service has been enabled on any vSAN cluster or not
 	FileVolumeActivated bool
-	// VCSessionManagerURL is the path of a rest api capable of generating vCenter Cloned tokens
-	// to be reused by clients. When this is used, Username and Password configuration are ignored
-	VCSessionManagerURL string `gcfg:"vc-session-manager-url"`
-	// VCSessionManagerToken is the token that should be passed to authenticate against the session manager
-	// If empty, the Pod service account will be used
-	VCSessionManagerToken string `gcfg:"vc-session-manager-token"`
 }
 
 // GCConfig contains information used by guest cluster to access a supervisor

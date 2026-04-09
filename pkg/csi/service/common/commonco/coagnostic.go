@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	storagev1 "k8s.io/api/storage/v1"
@@ -98,9 +99,8 @@ type COCommonInterface interface {
 	GetPVNameFromCSIVolumeID(volumeID string) (string, bool)
 	// GetPVCNameFromCSIVolumeID returns `pvc name` and `pvc namespace` for the given volumeID using volumeIDToPvcMap.
 	GetPVCNameFromCSIVolumeID(volumeID string) (string, string, bool)
-	// GetVolumeIDFromPVCName returns volumeID the given pvcName using pvcToVolumeIDMap.
-	// PVC name is its namespaced name.
-	GetVolumeIDFromPVCName(pvcName string) (string, bool)
+	// GetVolumeIDFromPVCName returns volumeID for the given pvc name and namespace.
+	GetVolumeIDFromPVCName(namespace string, pvcName string) (string, bool)
 	// InitializeCSINodes creates CSINode instances for each K8s node with the appropriate topology keys.
 	InitializeCSINodes(ctx context.Context) error
 	// StartZonesInformer starts a dynamic informer which listens on Zones CR in
@@ -125,6 +125,10 @@ type COCommonInterface interface {
 	GetPvcObjectByName(ctx context.Context, pvcName string, namespace string) (*v1.PersistentVolumeClaim, error)
 	HandleLateEnablementOfCapability(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavor, capability,
 		gcPort, gcEndpoint string)
+	// GetPVCNamespacedNameByUID returns the PVC's namespaced name (namespace/name) for the given UID.
+	// If the PVC is not found in the cache, it returns an empty string and false.
+	GetPVCNamespacedNameByUID(uid string) (k8stypes.NamespacedName, bool)
+	ListPVCs(ctx context.Context, namespace string) []*v1.PersistentVolumeClaim
 }
 
 // GetContainerOrchestratorInterface returns orchestrator object for a given
