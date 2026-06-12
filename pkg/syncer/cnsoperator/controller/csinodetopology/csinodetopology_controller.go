@@ -24,7 +24,7 @@ import (
 	"sync"
 	"time"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -427,7 +427,7 @@ func getNodeTopologyInfoForGuest(ctx context.Context, instance *csinodetopologyv
 		Name:      instance.Name, // use the nodeName as the VM key
 	}
 	log.Info("fetching virtual machines with all versions")
-	virtualMachine, _, err := utils.GetVirtualMachineAllApiVersions(
+	virtualMachine, _, err := utils.GetVirtualMachine(
 		ctx, vmKey, vmOperatorClient)
 	if err != nil {
 		return nil, logger.LogNewErrorf(log,
@@ -499,11 +499,17 @@ func getNodeTopologyInfo(ctx context.Context, nodeVM *cnsvsphere.VirtualMachine,
 			nodeVM.VirtualCenterHost, err)
 	}
 	// Get tag manager instance.
-	tagManager, err := vcenter.GetTagManager(ctx)
+	tagManager, err := cnsvsphere.GetTagManager(ctx, vcenter)
 	if err != nil {
 		log.Errorf("failed to create tagManager. Error: %v", err)
 		return nil, err
 	}
+	defer func() {
+		err := tagManager.Logout(ctx)
+		if err != nil {
+			log.Errorf("failed to logout tagManager. Error: %v", err)
+		}
+	}()
 
 	// Create a map of TopologyCategories with category as key and value as empty string.
 	var isZoneRegion bool

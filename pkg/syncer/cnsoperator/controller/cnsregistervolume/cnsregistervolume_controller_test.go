@@ -18,6 +18,7 @@ package cnsregistervolume
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -26,11 +27,13 @@ import (
 	"github.com/agiledragon/gomonkey/v2"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
 	cnstypes "github.com/vmware/govmomi/cns/types"
 	"github.com/vmware/govmomi/object"
 	vim25types "github.com/vmware/govmomi/vim25/types"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -38,6 +41,8 @@ import (
 	k8sfake "k8s.io/client-go/kubernetes/fake"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	restclient "k8s.io/client-go/rest"
+	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
@@ -57,9 +62,10 @@ type mockVolumeManager struct {
 		ctxParams interface{}) (*cnsvolume.CnsVolumeInfo, string, error)
 }
 
-func (m *mockVolumeManager) UnregisterVolume(ctx context.Context, volumeID string, unregisterDisk bool) error {
+func (m *mockVolumeManager) UnregisterVolume(ctx context.Context, volumeID string,
+	unregisterDisk bool) (string, error) {
 	//TODO implement me
-	return nil
+	return "", nil
 }
 
 func (m *mockVolumeManager) AttachVolume(ctx context.Context, vm *cnsvsphere.VirtualMachine,
@@ -219,6 +225,16 @@ func (m *mockVolumeManager) SyncVolume(ctx context.Context,
 }
 
 type mockCOCommon struct{}
+
+func (m *mockCOCommon) ListPVCs(ctx context.Context, namespace string) []*corev1.PersistentVolumeClaim {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (m *mockCOCommon) GetPVCNamespacedNameByUID(uid string) (types.NamespacedName, bool) {
+	//TODO implement me
+	panic("implement me")
+}
 
 func (m *mockCOCommon) EnableFSS(ctx context.Context, featureName string) error {
 	//TODO implement me
@@ -397,7 +413,7 @@ func (m *mockCOCommon) GetPvcObjectByName(ctx context.Context, pvcName string,
 	return nil, nil
 }
 
-func (m *mockCOCommon) GetVolumeIDFromPVCName(pvcName string) (string, bool) {
+func (m *mockCOCommon) GetVolumeIDFromPVCName(namespace string, pvcName string) (string, bool) {
 	return "vol-1", true
 }
 
@@ -517,6 +533,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 		})
 
 		patches.ApplyFunc(constructCreateSpecForInstance, func(
+			ctx context.Context,
 			r *ReconcileCnsRegisterVolume,
 			instance *cnsregistervolumev1alpha1.CnsRegisterVolume,
 			host string,
@@ -568,7 +585,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 
 		// Test getPersistentVolumeClaimSpec function directly
 		pvcSpec, err := getPersistentVolumeClaimSpec(ctx, "test-pvc", "test-ns", 1024,
-			"test-storage-class", corev1.ReadWriteOnce, "test-pv", nil, instance)
+			"test-storage-class", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem, "test-pv", nil, instance)
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pvcSpec).NotTo(BeNil())
@@ -594,7 +611,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 
 		// Test getPersistentVolumeClaimSpec function directly
 		pvcSpec, err := getPersistentVolumeClaimSpec(ctx, "test-pvc", "test-ns", 1024,
-			"test-storage-class", corev1.ReadWriteOnce, "test-pv", nil, instance)
+			"test-storage-class", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem, "test-pv", nil, instance)
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pvcSpec).NotTo(BeNil())
@@ -622,7 +639,7 @@ var _ = Describe("Reconcile Accessibility Logic", func() {
 
 		// Test getPersistentVolumeClaimSpec function directly
 		pvcSpec, err := getPersistentVolumeClaimSpec(ctx, "test-pvc", "test-ns", 1024,
-			"test-storage-class", corev1.ReadWriteOnce, "test-pv", nil, instance)
+			"test-storage-class", corev1.ReadWriteOnce, corev1.PersistentVolumeFilesystem, "test-pv", nil, instance)
 
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pvcSpec).NotTo(BeNil())
@@ -641,7 +658,7 @@ var _ = Describe("checkExistingPVCDataSourceRef", func() {
 
 	BeforeEach(func() {
 		ctx = context.Background()
-		k8sclient = k8sfake.NewSimpleClientset()
+		k8sclient = k8sfake.NewClientset()
 		namespace = "test-namespace"
 		pvcName = "test-pvc"
 	})
@@ -787,15 +804,50 @@ var _ = Describe("checkExistingPVCDataSourceRef", func() {
 			Expect(pvc).To(BeNil())
 		})
 	})
+
+	Context("when PVC exists with DataSourceRef and volumeMode set", func() {
+		BeforeEach(func() {
+			apiGroup := "vmoperator.vmware.com"
+			volumeMode := corev1.PersistentVolumeBlock
+			pvc := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      pvcName,
+					Namespace: namespace,
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					DataSourceRef: &corev1.TypedObjectReference{
+						APIGroup: &apiGroup,
+						Kind:     "VirtualMachine",
+						Name:     "test-vm",
+					},
+					VolumeMode: &volumeMode,
+				},
+			}
+			_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+		})
+
+		It("should return the PVC with volumeMode set", func() {
+			pvc, err := checkExistingPVCDataSourceRef(ctx, k8sclient, pvcName, namespace)
+			Expect(err).To(BeNil())
+			Expect(pvc).ToNot(BeNil())
+			Expect(pvc.Name).To(Equal(pvcName))
+			Expect(pvc.Spec.DataSourceRef).ToNot(BeNil())
+			Expect(pvc.Spec.VolumeMode).ToNot(BeNil())
+			Expect(*pvc.Spec.VolumeMode).To(Equal(corev1.PersistentVolumeBlock))
+		})
+	})
 })
 
 var _ = Describe("validatePVCTopologyCompatibility", func() {
 	var (
-		ctx                context.Context
-		pvc                *corev1.PersistentVolumeClaim
-		volumeDatastoreURL string
-		mockTopologyMgr    *mockTopologyService
-		mockVC             *cnsvsphere.VirtualCenter
+		ctx                         context.Context
+		pvc                         *corev1.PersistentVolumeClaim
+		volumeDatastoreURL          string
+		mockTopologyMgr             *mockTopologyService
+		mockVC                      *cnsvsphere.VirtualCenter
+		datastoreAccessibleTopology []map[string]string
+		mockK8sClient               *k8sfake.Clientset
 	)
 
 	BeforeEach(func() {
@@ -803,6 +855,9 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		volumeDatastoreURL = "dummy-datastore-url"
 		mockTopologyMgr = &mockTopologyService{}
 		mockVC = &cnsvsphere.VirtualCenter{}
+		datastoreAccessibleTopology = []map[string]string{
+			{"topology.kubernetes.io/zone": "zone-1"},
+		}
 
 		pvc = &corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
@@ -810,11 +865,19 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 				Namespace: "test-namespace",
 			},
 		}
+
+		// Create a fake Kubernetes client
+		mockK8sClient = k8sfake.NewClientset()
 	})
 
 	Context("when PVC has no topology annotation", func() {
 		It("should return nil without error", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			// Add the PVC to the fake client so it can be updated
+			_, err := mockK8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+
+			err = validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).To(BeNil())
 		})
 	})
@@ -827,7 +890,12 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		})
 
 		It("should return nil without error", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			// Add the PVC to the fake client so it can be updated
+			_, err := mockK8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+
+			err = validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).To(BeNil())
 		})
 	})
@@ -840,7 +908,8 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		})
 
 		It("should return error for invalid JSON", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			err := validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).ToNot(BeNil())
 			Expect(err.Error()).To(ContainSubstring("failed to parse topology annotation"))
 		})
@@ -855,7 +924,8 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		})
 
 		It("should return error from topology manager", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			err := validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).ToNot(BeNil())
 			Expect(err.Error()).To(ContainSubstring("failed to get topology for volume datastore"))
 		})
@@ -872,7 +942,8 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		})
 
 		It("should return nil without error", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			err := validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).To(BeNil())
 		})
 	})
@@ -888,10 +959,123 @@ var _ = Describe("validatePVCTopologyCompatibility", func() {
 		})
 
 		It("should return error for incompatible zones", func() {
-			err := validatePVCTopologyCompatibility(ctx, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC)
+			err := validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
 			Expect(err).ToNot(BeNil())
 			Expect(err.Error()).To(ContainSubstring("is not compatible with volume placement"))
 		})
+	})
+
+	Context("when PVC exists without topology annotation and annotation needs to be added", func() {
+		var originalPVC *corev1.PersistentVolumeClaim
+
+		BeforeEach(func() {
+			// Create a PVC with some existing annotations but no topology annotation
+			originalPVC = &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "existing-pvc",
+					Namespace: "test-namespace",
+					Annotations: map[string]string{
+						"some.other/annotation": "existing-value",
+						"another/annotation":    "another-value",
+					},
+				},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				},
+			}
+			pvc = originalPVC
+		})
+
+		It("should add topology annotation to existing PVC and return nil", func() {
+			// Verify PVC initially has no topology annotation
+			_, exists := pvc.Annotations["csi.vsphere.volume-accessible-topology"]
+			Expect(exists).To(BeFalse())
+
+			// Add the PVC to the fake client so it can be updated
+			_, err := mockK8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+
+			// Call the function
+			err = validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				datastoreAccessibleTopology)
+			Expect(err).To(BeNil())
+
+			// Verify topology annotation was added
+			topologyAnnotation, exists := pvc.Annotations["csi.vsphere.volume-accessible-topology"]
+			Expect(exists).To(BeTrue())
+			Expect(topologyAnnotation).ToNot(BeEmpty())
+
+			// Verify the annotation contains the expected topology data
+			expectedAnnotation := `[{"topology.kubernetes.io/zone":"zone-1"}]`
+			Expect(topologyAnnotation).To(Equal(expectedAnnotation))
+
+			// Verify existing annotations are preserved
+			Expect(pvc.Annotations["some.other/annotation"]).To(Equal("existing-value"))
+			Expect(pvc.Annotations["another/annotation"]).To(Equal("another-value"))
+		})
+
+		It("should handle PVC with nil annotations map", func() {
+			// Create PVC with nil annotations
+			pvcWithNilAnnotations := &corev1.PersistentVolumeClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "pvc-nil-annotations",
+					Namespace:   "test-namespace",
+					Annotations: nil,
+				},
+			}
+
+			// Add the PVC to the fake client so it can be updated
+			_, err := mockK8sClient.CoreV1().PersistentVolumeClaims(pvcWithNilAnnotations.Namespace).Create(ctx,
+				pvcWithNilAnnotations, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+
+			// Call the function
+			err = validatePVCTopologyCompatibility(ctx, mockK8sClient, pvcWithNilAnnotations, volumeDatastoreURL,
+				mockTopologyMgr, mockVC, datastoreAccessibleTopology)
+			Expect(err).To(BeNil())
+
+			// Verify annotations map was created and topology annotation was added
+			Expect(pvcWithNilAnnotations.Annotations).ToNot(BeNil())
+			topologyAnnotation, exists := pvcWithNilAnnotations.Annotations["csi.vsphere.volume-accessible-topology"]
+			Expect(exists).To(BeTrue())
+			Expect(topologyAnnotation).To(Equal(`[{"topology.kubernetes.io/zone":"zone-1"}]`))
+		})
+
+		It("should handle complex topology data with multiple zones", func() {
+			// Use more complex topology data
+			complexTopology := []map[string]string{
+				{"topology.kubernetes.io/zone": "zone-a", "topology.kubernetes.io/region": "us-west"},
+				{"topology.kubernetes.io/zone": "zone-b", "topology.kubernetes.io/region": "us-west"},
+			}
+
+			// Add the PVC to the fake client so it can be updated
+			_, err := mockK8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Create(ctx, pvc, metav1.CreateOptions{})
+			Expect(err).To(BeNil())
+
+			err = validatePVCTopologyCompatibility(ctx, mockK8sClient, pvc, volumeDatastoreURL, mockTopologyMgr, mockVC,
+				complexTopology)
+			Expect(err).To(BeNil())
+
+			// Verify the complex topology was properly serialized
+			topologyAnnotation := pvc.Annotations["csi.vsphere.volume-accessible-topology"]
+			Expect(topologyAnnotation).ToNot(BeEmpty())
+
+			// Parse the annotation to verify it contains both topology segments
+			var parsedTopology []map[string]string
+			err = json.Unmarshal([]byte(topologyAnnotation), &parsedTopology)
+			Expect(err).To(BeNil())
+			Expect(len(parsedTopology)).To(Equal(2))
+			Expect(parsedTopology[0]).To(Equal(map[string]string{
+				"topology.kubernetes.io/zone":   "zone-a",
+				"topology.kubernetes.io/region": "us-west",
+			}))
+			Expect(parsedTopology[1]).To(Equal(map[string]string{
+				"topology.kubernetes.io/zone":   "zone-b",
+				"topology.kubernetes.io/region": "us-west",
+			}))
+		})
+
 	})
 })
 
@@ -1088,4 +1272,1108 @@ func TestCnsRegisterVolumeController(t *testing.T) {
 
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "CnsRegisterVolumeController Suite")
+}
+
+func TestValidateCnsRegisterVolumeSpecWithDiskUrlPath(t *testing.T) {
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: "test-ns",
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:     "pvc-1",
+			DiskURLPath: "som-url",
+			AccessMode:  corev1.ReadWriteMany,
+			VolumeMode:  corev1.PersistentVolumeFilesystem,
+		},
+	}
+
+	isSharedDiskEnabled = true
+	err := validateCnsRegisterVolumeSpec(context.TODO(), instance)
+	assert.Error(t, err)
+	assert.Equal(t, "DiskURLPath cannot be used with accessMode: ReadWriteMany and volumeMode: Filesystem", err.Error())
+}
+
+func TestValidateCnsRegisterVolumeSpecWithVolumeIdAndNoAccessMode(t *testing.T) {
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: "test-ns",
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    "pvc-1",
+			VolumeID:   "123456",
+			VolumeMode: corev1.PersistentVolumeFilesystem,
+		},
+	}
+
+	isSharedDiskEnabled = true
+	err := validateCnsRegisterVolumeSpec(context.TODO(), instance)
+	assert.Error(t, err)
+	assert.Equal(t, "AccessMode cannot be empty when volumeID is specified", err.Error())
+}
+
+func TestValidateCnsRegisterVolumeSpecWithVolumeIdAndAccessMode(t *testing.T) {
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: "test-ns",
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    "pvc-1",
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteMany,
+			VolumeMode: corev1.PersistentVolumeFilesystem,
+		},
+	}
+
+	isSharedDiskEnabled = true
+	commonco.ContainerOrchestratorUtility = &mockCOCommon{}
+	err := validateCnsRegisterVolumeSpec(context.TODO(), instance)
+	assert.NoError(t, err)
+}
+
+func TestIsBlockVolumeRegisterRequestWithSharedBlockVolume(t *testing.T) {
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: "test-ns",
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    "pvc-1",
+			VolumeID:   "123456",
+			VolumeMode: corev1.PersistentVolumeBlock,
+			AccessMode: corev1.ReadWriteMany,
+		},
+	}
+
+	isSharedDiskEnabled = true
+	isBlockVolume := isBlockVolumeRegisterRequest(t.Context(), instance)
+	assert.Equal(t, true, isBlockVolume)
+}
+
+func TestIsBlockVolumeRegisterRequestWithFileVolume(t *testing.T) {
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: "test-ns",
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    "pvc-1",
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteMany,
+			VolumeMode: corev1.PersistentVolumeFilesystem,
+		},
+	}
+
+	isSharedDiskEnabled = true
+	isBlockVolume := isBlockVolumeRegisterRequest(t.Context(), instance)
+	assert.Equal(t, false, isBlockVolume)
+}
+
+func TestGetPersistentVolumeSpecWhenVolumeModeIsEmpty(t *testing.T) {
+	var (
+		volumeName = "vol-1"
+		volumeID   = "123456"
+		capacity   = 256
+		accessMode = corev1.ReadWriteMany
+		scName     = "testsc"
+	)
+
+	isSharedDiskEnabled = true
+	commonco.ContainerOrchestratorUtility = &mockCOCommon{}
+	pv := getPersistentVolumeSpec(volumeName, volumeID, int64(capacity), accessMode, "", scName, nil)
+	assert.Equal(t, corev1.PersistentVolumeFilesystem, *pv.Spec.VolumeMode)
+}
+
+func TestGetPersistentVolumeSpecWithVolumeMode(t *testing.T) {
+	var (
+		volumeName = "vol-1"
+		volumeID   = "123456"
+		capacity   = 256
+		accessMode = corev1.ReadWriteMany
+		scName     = "testsc"
+		volumeMode = corev1.PersistentVolumeBlock
+	)
+
+	isSharedDiskEnabled = true
+	pv := getPersistentVolumeSpec(volumeName, volumeID,
+		int64(capacity), accessMode, volumeMode, scName, nil)
+	assert.Equal(t, volumeMode, *pv.Spec.VolumeMode)
+}
+
+func TestGetPersistentVolumeSpecWhenVolumeModeIsEmptyWithoutSharedDisk(t *testing.T) {
+	var (
+		volumeName = "vol-1"
+		volumeID   = "123456"
+		capacity   = 256
+		accessMode = corev1.ReadWriteOnce
+		scName     = "testsc"
+	)
+
+	isSharedDiskEnabled = false
+	pv := getPersistentVolumeSpec(volumeName, volumeID, int64(capacity), accessMode, "", scName, nil)
+	// volumeMode should be set to Filesystem even when isSharedDiskEnabled is false
+	assert.NotNil(t, pv.Spec.VolumeMode, "VolumeMode should be set even when isSharedDiskEnabled is false")
+	assert.Equal(t, corev1.PersistentVolumeFilesystem, *pv.Spec.VolumeMode)
+}
+
+func TestGetPersistentVolumeSpecWithVolumeModeWithoutSharedDisk(t *testing.T) {
+	var (
+		volumeName = "vol-1"
+		volumeID   = "123456"
+		capacity   = 256
+		accessMode = corev1.ReadWriteOnce
+		scName     = "testsc"
+		volumeMode = corev1.PersistentVolumeBlock
+	)
+
+	isSharedDiskEnabled = false
+	pv := getPersistentVolumeSpec(volumeName, volumeID,
+		int64(capacity), accessMode, volumeMode, scName, nil)
+	// volumeMode should be set to Block even when isSharedDiskEnabled is false
+	assert.NotNil(t, pv.Spec.VolumeMode, "VolumeMode should be set even when isSharedDiskEnabled is false")
+	assert.Equal(t, volumeMode, *pv.Spec.VolumeMode)
+}
+
+func TestVolumeModeInheritanceFromExistingPVCWithDataSourceRef(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+
+	// Create a PVC with DataSourceRef and volumeMode set to Block
+	apiGroup := "vmoperator.vmware.com"
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode: &volumeMode,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Test case 1: CnsRegisterVolume without volumeMode should inherit from PVC
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteOnce,
+			// VolumeMode is not set
+		},
+	}
+
+	// Simulate the logic from the Reconcile function
+	existingPVC, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	assert.NoError(t, err)
+	assert.NotNil(t, existingPVC)
+
+	// Apply the volumeMode validation and inheritance logic
+	mismatchDetected := false
+	if existingPVC != nil && existingPVC.Spec.DataSourceRef != nil && existingPVC.Spec.VolumeMode != nil {
+		if instance.Spec.VolumeMode == "" {
+			instance.Spec.VolumeMode = *existingPVC.Spec.VolumeMode
+		} else if instance.Spec.VolumeMode != *existingPVC.Spec.VolumeMode {
+			mismatchDetected = true
+		}
+	}
+
+	// Verify that volumeMode was inherited and no mismatch detected
+	assert.False(t, mismatchDetected)
+	assert.Equal(t, corev1.PersistentVolumeBlock, instance.Spec.VolumeMode)
+}
+
+func TestVolumeModeNotInheritedWhenAlreadySet(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+
+	// Create a PVC with DataSourceRef and volumeMode set to Block
+	apiGroup := "vmoperator.vmware.com"
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode: &volumeMode,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Test case 2: CnsRegisterVolume with volumeMode already set should NOT be overridden
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteOnce,
+			VolumeMode: corev1.PersistentVolumeFilesystem, // Already set to Filesystem
+		},
+	}
+
+	originalVolumeMode := instance.Spec.VolumeMode
+
+	// Simulate the logic from the Reconcile function
+	existingPVC, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	assert.NoError(t, err)
+	assert.NotNil(t, existingPVC)
+
+	// Apply the volumeMode validation and inheritance logic
+	mismatchDetected := false
+	if existingPVC != nil && existingPVC.Spec.DataSourceRef != nil && existingPVC.Spec.VolumeMode != nil {
+		if instance.Spec.VolumeMode == "" {
+			instance.Spec.VolumeMode = *existingPVC.Spec.VolumeMode
+		} else if instance.Spec.VolumeMode != *existingPVC.Spec.VolumeMode {
+			mismatchDetected = true
+		}
+	}
+
+	// Verify that mismatch was detected since PVC has Block but instance has Filesystem
+	assert.True(t, mismatchDetected)
+	// Verify that volumeMode was NOT changed (still has original Filesystem)
+	assert.Equal(t, originalVolumeMode, instance.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeFilesystem, instance.Spec.VolumeMode)
+}
+
+func TestVolumeModeNotInheritedWhenNoDataSourceRef(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+
+	// Create a PVC without DataSourceRef but with volumeMode set
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: nil, // No DataSourceRef
+			VolumeMode:    &volumeMode,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Test case 3: CnsRegisterVolume should NOT inherit volumeMode when PVC has no DataSourceRef
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteOnce,
+			// VolumeMode is not set
+		},
+	}
+
+	// Simulate the logic from the Reconcile function
+	existingPVC, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	assert.NoError(t, err)
+	assert.NotNil(t, existingPVC)
+
+	// Apply the volumeMode validation and inheritance logic
+	mismatchDetected := false
+	if existingPVC != nil && existingPVC.Spec.DataSourceRef != nil && existingPVC.Spec.VolumeMode != nil {
+		if instance.Spec.VolumeMode == "" {
+			instance.Spec.VolumeMode = *existingPVC.Spec.VolumeMode
+		} else if instance.Spec.VolumeMode != *existingPVC.Spec.VolumeMode {
+			mismatchDetected = true
+		}
+	}
+
+	// Verify that no mismatch detected and volumeMode was NOT inherited (should remain empty)
+	// because PVC has no DataSourceRef
+	assert.False(t, mismatchDetected)
+	assert.Equal(t, corev1.PersistentVolumeMode(""), instance.Spec.VolumeMode)
+}
+
+func TestVolumeModeNotInheritedWhenPVCVolumeModeIsNil(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+
+	// Create a PVC with DataSourceRef but VolumeMode is nil (not set)
+	apiGroup := "vmoperator.vmware.com"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode: nil, // VolumeMode is nil
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Test case: CnsRegisterVolume should NOT inherit when PVC's volumeMode is nil
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteOnce,
+			// VolumeMode is not set
+		},
+	}
+
+	// Simulate the logic from the Reconcile function
+	existingPVC, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	assert.NoError(t, err)
+	assert.NotNil(t, existingPVC)
+
+	// Apply the volumeMode validation and inheritance logic
+	mismatchDetected := false
+	if existingPVC != nil && existingPVC.Spec.DataSourceRef != nil && existingPVC.Spec.VolumeMode != nil {
+		if instance.Spec.VolumeMode == "" {
+			instance.Spec.VolumeMode = *existingPVC.Spec.VolumeMode
+		} else if instance.Spec.VolumeMode != *existingPVC.Spec.VolumeMode {
+			mismatchDetected = true
+		}
+	}
+
+	// Verify that no mismatch detected and volumeMode was NOT inherited (should remain empty)
+	// because PVC's volumeMode is nil
+	assert.False(t, mismatchDetected)
+	assert.Equal(t, corev1.PersistentVolumeMode(""), instance.Spec.VolumeMode)
+}
+
+func TestVolumeModeMatchesExistingPVC(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+
+	// Create a PVC with DataSourceRef and volumeMode set to Block
+	apiGroup := "vmoperator.vmware.com"
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode: &volumeMode,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Test case: Both have volumeMode set to Block - should succeed
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   "123456",
+			AccessMode: corev1.ReadWriteOnce,
+			VolumeMode: corev1.PersistentVolumeBlock, // Matches PVC
+		},
+	}
+
+	// Simulate the logic from the Reconcile function
+	existingPVC, err := checkExistingPVCDataSourceRef(ctx, k8sclient, instance.Spec.PvcName, instance.Namespace)
+	assert.NoError(t, err)
+	assert.NotNil(t, existingPVC)
+
+	// Apply the volumeMode validation logic
+	mismatchDetected := false
+	if existingPVC != nil && existingPVC.Spec.DataSourceRef != nil && existingPVC.Spec.VolumeMode != nil {
+		if instance.Spec.VolumeMode == "" {
+			instance.Spec.VolumeMode = *existingPVC.Spec.VolumeMode
+		} else if instance.Spec.VolumeMode != *existingPVC.Spec.VolumeMode {
+			mismatchDetected = true
+		}
+	}
+
+	// Verify that no mismatch was detected
+	assert.False(t, mismatchDetected)
+	assert.Equal(t, corev1.PersistentVolumeBlock, instance.Spec.VolumeMode)
+}
+
+func TestPVRecreationWhenVolumeModeIncorrect(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+	pvName := "pvc-12345678-1234-1234-1234-123456789012"
+	volumeID := "test-volume-id"
+	storageClassName := "test-sc"
+
+	// Enable shared disk feature to ensure volumeMode is set in PV spec
+	isSharedDiskEnabled = true
+	defer func() {
+		isSharedDiskEnabled = false
+	}()
+
+	// Create a PVC with DataSourceRef and volumeMode set to Block
+	apiGroup := "vmoperator.vmware.com"
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			UID:       "12345678-1234-1234-1234-123456789012",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode:       &volumeMode,
+			StorageClassName: &storageClassName,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create CnsRegisterVolume with volumeMode set to Block (inherited or explicitly set)
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   volumeID,
+			AccessMode: corev1.ReadWriteOnce,
+			VolumeMode: corev1.PersistentVolumeBlock, // Expect Block
+		},
+	}
+
+	// Create an existing PV with INCORRECT volumeMode (Filesystem instead of Block)
+	incorrectVolumeMode := corev1.PersistentVolumeFilesystem
+	existingPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvName,
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "csi.vsphere.vmware.com",
+					VolumeHandle: volumeID,
+				},
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			VolumeMode:       &incorrectVolumeMode, // Wrong: Filesystem instead of Block
+			StorageClassName: storageClassName,
+			ClaimRef: &corev1.ObjectReference{
+				Kind:       "PersistentVolumeClaim",
+				APIVersion: "v1",
+				Namespace:  namespace,
+				Name:       pvcName,
+			},
+		},
+	}
+	_, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, existingPV, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Verify PV exists with incorrect volumeMode
+	pvBefore, err := k8sclient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.NotNil(t, pvBefore.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeFilesystem, *pvBefore.Spec.VolumeMode)
+
+	// Mock volumeManager for CNS untag operation
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	// Mock DeleteVolumeUtil to simulate CNS untag (deleteDisk=false)
+	patches.ApplyFunc(common.DeleteVolumeUtil,
+		func(ctx context.Context, volumeManager cnsvolume.Manager, volumeID string, deleteDisk bool) (string, error) {
+			// Verify deleteDisk is false (to preserve underlying disk)
+			assert.False(t, deleteDisk, "deleteDisk should be false to preserve underlying volume")
+			return "", nil
+		})
+
+	// Create a minimal reconciler with mocked volumeManager
+	reconciler := &ReconcileCnsRegisterVolume{
+		volumeManager: nil, // Will be mocked
+	}
+
+	// Call validateAndFixPVVolumeMode
+	capacityInMb := int64(1024)
+	accessMode := corev1.ReadWriteOnce
+	timeout := time.Second * 10
+
+	pvAfter, err := validateAndFixPVVolumeMode(ctx, k8sclient, reconciler, instance,
+		pvBefore, pvName, volumeID, capacityInMb, accessMode, storageClassName, nil, timeout)
+
+	// Verify the function succeeded
+	assert.NoError(t, err)
+	assert.NotNil(t, pvAfter)
+
+	// Verify the PV was recreated with correct volumeMode
+	assert.NotNil(t, pvAfter.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeBlock, *pvAfter.Spec.VolumeMode,
+		"PV should have been recreated with Block volumeMode")
+
+	// Verify the old PV with incorrect volumeMode no longer exists in the cluster
+	// (by checking that the new PV returned has the correct volumeMode)
+	pvFinal, err := k8sclient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.NotNil(t, pvFinal.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeBlock, *pvFinal.Spec.VolumeMode)
+
+	// Verify other PV properties are preserved
+	assert.Equal(t, volumeID, pvFinal.Spec.CSI.VolumeHandle)
+	assert.Equal(t, storageClassName, pvFinal.Spec.StorageClassName)
+	assert.Equal(t, corev1.ReadWriteOnce, pvFinal.Spec.AccessModes[0])
+}
+
+func TestPVRecreationWithoutSharedDiskEnabled(t *testing.T) {
+	ctx := context.Background()
+	k8sclient := k8sfake.NewClientset()
+	namespace := "test-namespace"
+	pvcName := "test-pvc"
+	pvName := "pvc-12345678-1234-1234-1234-123456789012"
+	volumeID := "test-volume-id"
+	storageClassName := "test-sc"
+
+	// Explicitly disable shared disk feature to test that volumeMode still works
+	isSharedDiskEnabled = false
+
+	// Create a PVC with DataSourceRef and volumeMode set to Block
+	apiGroup := "vmoperator.vmware.com"
+	volumeMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      pvcName,
+			Namespace: namespace,
+			UID:       "12345678-1234-1234-1234-123456789012",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			DataSourceRef: &corev1.TypedObjectReference{
+				APIGroup: &apiGroup,
+				Kind:     "VirtualMachine",
+				Name:     "test-vm",
+			},
+			VolumeMode:       &volumeMode,
+			StorageClassName: &storageClassName,
+		},
+	}
+	_, err := k8sclient.CoreV1().PersistentVolumeClaims(namespace).Create(ctx, pvc, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Create CnsRegisterVolume with volumeMode set to Block
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "register-vol",
+			Namespace: namespace,
+		},
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			PvcName:    pvcName,
+			VolumeID:   volumeID,
+			AccessMode: corev1.ReadWriteOnce,
+			VolumeMode: corev1.PersistentVolumeBlock, // Expect Block
+		},
+	}
+
+	// Create an existing PV with INCORRECT volumeMode (Filesystem instead of Block)
+	incorrectVolumeMode := corev1.PersistentVolumeFilesystem
+	existingPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pvName,
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			Capacity: corev1.ResourceList{
+				corev1.ResourceStorage: resource.MustParse("1Gi"),
+			},
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver:       "csi.vsphere.vmware.com",
+					VolumeHandle: volumeID,
+				},
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{
+				corev1.ReadWriteOnce,
+			},
+			VolumeMode:       &incorrectVolumeMode, // Wrong: Filesystem instead of Block
+			StorageClassName: storageClassName,
+			ClaimRef: &corev1.ObjectReference{
+				Kind:       "PersistentVolumeClaim",
+				APIVersion: "v1",
+				Namespace:  namespace,
+				Name:       pvcName,
+			},
+		},
+	}
+	_, err = k8sclient.CoreV1().PersistentVolumes().Create(ctx, existingPV, metav1.CreateOptions{})
+	assert.NoError(t, err)
+
+	// Mock volumeManager for CNS untag operation
+	patches := gomonkey.NewPatches()
+	defer patches.Reset()
+
+	// Mock DeleteVolumeUtil to simulate CNS untag (deleteDisk=false)
+	patches.ApplyFunc(common.DeleteVolumeUtil,
+		func(ctx context.Context, volumeManager cnsvolume.Manager, volumeID string, deleteDisk bool) (string, error) {
+			assert.False(t, deleteDisk, "deleteDisk should be false to preserve underlying volume")
+			return "", nil
+		})
+
+	// Create a minimal reconciler with mocked volumeManager
+	reconciler := &ReconcileCnsRegisterVolume{
+		volumeManager: nil, // Will be mocked
+	}
+
+	// Call validateAndFixPVVolumeMode
+	capacityInMb := int64(1024)
+	accessMode := corev1.ReadWriteOnce
+	timeout := time.Second * 10
+
+	pvAfter, err := validateAndFixPVVolumeMode(ctx, k8sclient, reconciler, instance,
+		existingPV, pvName, volumeID, capacityInMb, accessMode, storageClassName, nil, timeout)
+
+	// Verify the function succeeded
+	assert.NoError(t, err)
+	assert.NotNil(t, pvAfter)
+
+	// Verify the PV was recreated with correct volumeMode even without shared disk enabled
+	assert.NotNil(t, pvAfter.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeBlock, *pvAfter.Spec.VolumeMode,
+		"PV should have been recreated with Block volumeMode even when shared disk is disabled")
+
+	// Verify the PV in cluster has correct volumeMode
+	pvFinal, err := k8sclient.CoreV1().PersistentVolumes().Get(ctx, pvName, metav1.GetOptions{})
+	assert.NoError(t, err)
+	assert.NotNil(t, pvFinal.Spec.VolumeMode)
+	assert.Equal(t, corev1.PersistentVolumeBlock, *pvFinal.Spec.VolumeMode)
+}
+
+var _ = Describe("patchCnsRegisterVolumeStatus Tests", func() {
+	var (
+		ctx               context.Context
+		cnsOperatorClient *fake.ClientBuilder
+		oldInstance       *cnsregistervolumev1alpha1.CnsRegisterVolume
+		newInstance       *cnsregistervolumev1alpha1.CnsRegisterVolume
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+
+		// Create base instance
+		oldInstance = &cnsregistervolumev1alpha1.CnsRegisterVolume{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-volume",
+				Namespace: "test-ns",
+				UID:       "test-uid-123",
+			},
+			Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+				VolumeID: "test-volume-id",
+			},
+			Status: cnsregistervolumev1alpha1.CnsRegisterVolumeStatus{
+				Registered: false,
+				Error:      "",
+			},
+		}
+
+		// Setup fake client
+		scheme := runtime.NewScheme()
+		_ = clientgoscheme.AddToScheme(scheme)
+		scheme.AddKnownTypes(schema.GroupVersion{
+			Group:   "cnsoperator.vmware.com",
+			Version: "v1alpha1",
+		}, &cnsregistervolumev1alpha1.CnsRegisterVolume{}, &cnsregistervolumev1alpha1.CnsRegisterVolumeList{})
+
+		cnsOperatorClient = fake.NewClientBuilder().
+			WithScheme(scheme).
+			WithObjects(oldInstance).
+			WithStatusSubresource(oldInstance)
+	})
+
+	Context("patchCnsRegisterVolumeStatus function", func() {
+		It("should successfully patch status when registered changes", func() {
+			client := cnsOperatorClient.Build()
+
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Registered = true
+
+			err := patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Verify the status was updated
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Registered).To(BeTrue())
+		})
+
+		It("should successfully patch status when error message changes", func() {
+			client := cnsOperatorClient.Build()
+
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Error = "test error message"
+
+			err := patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Verify the error was updated
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Error).To(Equal("test error message"))
+		})
+
+		It("should successfully patch when both registered and error change", func() {
+			client := cnsOperatorClient.Build()
+
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Registered = true
+			newInstance.Status.Error = "partial success"
+
+			err := patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Verify both fields were updated
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Registered).To(BeTrue())
+			Expect(updated.Status.Error).To(Equal("partial success"))
+		})
+
+		It("should handle empty patch gracefully", func() {
+			client := cnsOperatorClient.Build()
+
+			// Both objects are identical
+			newInstance = oldInstance.DeepCopy()
+
+			err := patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+		})
+
+		It("should handle multiple sequential patches", func() {
+			client := cnsOperatorClient.Build()
+
+			// First patch
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Error = "first error"
+			err := patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Get updated instance
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+
+			// Second patch
+			newInstance2 := updated.DeepCopy()
+			newInstance2.Status.Error = "second error"
+			newInstance2.Status.Registered = true
+			err = patchCnsRegisterVolumeStatus(ctx, client, updated, newInstance2)
+			Expect(err).To(BeNil())
+
+			// Verify final state
+			final := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, final)
+			Expect(err).To(BeNil())
+			Expect(final.Status.Error).To(Equal("second error"))
+			Expect(final.Status.Registered).To(BeTrue())
+		})
+
+		It("should not modify metadata when patching status", func() {
+			client := cnsOperatorClient.Build()
+
+			// Add some labels to the original
+			oldInstance.Labels = map[string]string{"original": "label"}
+			err := client.Update(ctx, oldInstance)
+			Expect(err).To(BeNil())
+
+			// Patch only status
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Registered = true
+			// Try to change labels in newInstance (should not affect actual object)
+			newInstance.Labels = map[string]string{"modified": "label"}
+
+			err = patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Verify status changed but labels remain original
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Registered).To(BeTrue())
+			// Labels should remain as original since we're patching status only
+			Expect(updated.Labels).To(HaveKey("original"))
+		})
+
+		It("should handle clearing error message", func() {
+			client := cnsOperatorClient.Build()
+
+			// Set initial error
+			oldInstance.Status.Error = "initial error"
+			err := client.Status().Update(ctx, oldInstance)
+			Expect(err).To(BeNil())
+
+			// Clear the error
+			newInstance = oldInstance.DeepCopy()
+			newInstance.Status.Error = ""
+			newInstance.Status.Registered = true
+
+			err = patchCnsRegisterVolumeStatus(ctx, client, oldInstance, newInstance)
+			Expect(err).To(BeNil())
+
+			// Verify error was cleared
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Error).To(Equal(""))
+			Expect(updated.Status.Registered).To(BeTrue())
+		})
+	})
+
+	Context("setInstanceError integration", func() {
+		var (
+			reconciler  *ReconcileCnsRegisterVolume
+			broadcaster record.EventBroadcaster
+		)
+
+		BeforeEach(func() {
+			client := cnsOperatorClient.Build()
+			broadcaster = record.NewBroadcaster()
+			recorder := broadcaster.NewRecorder(clientgoscheme.Scheme, corev1.EventSource{Component: "test"})
+
+			reconciler = &ReconcileCnsRegisterVolume{
+				client:   client,
+				recorder: recorder,
+			}
+		})
+
+		It("should update instance error using patchCnsRegisterVolumeStatus", func() {
+			errorMsg := "test error from setInstanceError"
+
+			// Call setInstanceError
+			setInstanceError(ctx, reconciler, oldInstance, errorMsg)
+
+			// Verify the error was set
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err := reconciler.client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Error).To(Equal(errorMsg))
+			Expect(updated.Status.Registered).To(BeFalse())
+		})
+	})
+
+	Context("setInstanceSuccess integration", func() {
+		var (
+			reconciler  *ReconcileCnsRegisterVolume
+			broadcaster record.EventBroadcaster
+		)
+
+		BeforeEach(func() {
+			client := cnsOperatorClient.Build()
+			broadcaster = record.NewBroadcaster()
+			recorder := broadcaster.NewRecorder(clientgoscheme.Scheme, corev1.EventSource{Component: "test"})
+
+			reconciler = &ReconcileCnsRegisterVolume{
+				client:   client,
+				recorder: recorder,
+			}
+		})
+
+		It("should update instance to success using patchCnsRegisterVolumeStatus", func() {
+			pvcName := "test-pvc"
+			pvcUID := types.UID("test-pvc-uid")
+			successMsg := "Volume registered successfully"
+
+			// Call setInstanceSuccess
+			err := setInstanceSuccess(ctx, reconciler, oldInstance, pvcName, pvcUID, successMsg)
+			Expect(err).To(BeNil())
+
+			// Verify the status was updated
+			updated := &cnsregistervolumev1alpha1.CnsRegisterVolume{}
+			err = reconciler.client.Get(ctx, types.NamespacedName{
+				Name:      oldInstance.Name,
+				Namespace: oldInstance.Namespace,
+			}, updated)
+			Expect(err).To(BeNil())
+			Expect(updated.Status.Registered).To(BeTrue())
+			Expect(updated.Status.Error).To(Equal(""))
+			// Verify owner reference was set
+			Expect(updated.OwnerReferences).To(HaveLen(1))
+			Expect(updated.OwnerReferences[0].Name).To(Equal(pvcName))
+			Expect(updated.OwnerReferences[0].UID).To(Equal(pvcUID))
+		})
+	})
+})
+
+func TestSetBackingDiskAnnotationNoChangeNeeded(t *testing.T) {
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pvc",
+			Namespace: "default",
+			Annotations: map[string]string{
+				common.AnnKeyBackingDiskType: "backing-disk-type-1",
+			},
+		},
+	}
+
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			BackingType: "backing-disk-type-1",
+		},
+	}
+
+	client := k8sfake.NewClientset(pvc)
+
+	out, err := setBackingDiskAnnotation(ctx, client, instance, pvc)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "backing-disk-type-1", out.Annotations[common.AnnKeyBackingDiskType])
+
+	// No patch should happen
+	actions := client.Actions()
+	assert.Len(t, actions, 0)
+}
+
+func TestSetBackingDiskAnnotationUpdateRequired(t *testing.T) {
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "test-pvc",
+			Namespace:   "default",
+			Annotations: map[string]string{common.AnnKeyBackingDiskType: "backing-disk-type-1"},
+		},
+	}
+
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			BackingType: "backing-disk-type-2",
+		},
+	}
+
+	client := k8sfake.NewClientset(pvc)
+
+	out, err := setBackingDiskAnnotation(ctx, client, instance, pvc)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+
+	actions := client.Actions()
+	assert.Len(t, actions, 1)
+
+	patchAction, ok := actions[0].(k8stesting.PatchAction)
+	assert.True(t, ok, "expected PatchAction")
+
+	assert.Equal(t, "persistentvolumeclaims", patchAction.GetResource().Resource)
+	assert.Equal(t, "test-pvc", patchAction.GetName())
+
+	var patch map[string]map[string]map[string]string
+	err = json.Unmarshal(patchAction.GetPatch(), &patch)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "backing-disk-type-2", patch["metadata"]["annotations"][common.AnnKeyBackingDiskType])
+}
+
+func TestSetBackingDiskAnnotationNoAnnotationsInitially(t *testing.T) {
+	ctx := context.Background()
+
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pvc",
+			Namespace: "default",
+		},
+	}
+
+	instance := &cnsregistervolumev1alpha1.CnsRegisterVolume{
+		Spec: cnsregistervolumev1alpha1.CnsRegisterVolumeSpec{
+			BackingType: "backing-disk-type-1",
+		},
+	}
+
+	client := k8sfake.NewClientset(pvc)
+
+	out, err := setBackingDiskAnnotation(ctx, client, instance, pvc)
+	assert.NoError(t, err)
+	assert.NotNil(t, out)
+
+	actions := client.Actions()
+	assert.Len(t, actions, 1)
+
+	patchAction, ok := actions[0].(k8stesting.PatchAction)
+	assert.True(t, ok)
+
+	var patch map[string]map[string]map[string]string
+	err = json.Unmarshal(patchAction.GetPatch(), &patch)
+	assert.NoError(t, err)
+
+	assert.Equal(t, "backing-disk-type-1", patch["metadata"]["annotations"][common.AnnKeyBackingDiskType])
 }
