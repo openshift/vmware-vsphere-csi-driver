@@ -89,7 +89,8 @@ var _ = ginkgo.Describe("Storage Policy Based Volume Provisioning", func() {
 		}
 	})
 
-	ginkgo.It("[ef-vanilla-block][ef-wcp][cf-vks][csi-block-vanilla] [csi-block-vanilla-parallelized] [csi-supervisor]"+
+	ginkgo.It("[ef-vanilla-block][pq-n1-vanilla-block][pq-n2-vanilla-block] "+
+		"[ef-wcp][cf-vks][csi-block-vanilla] [csi-block-vanilla-parallelized] [csi-supervisor]"+
 		"[csi-guest] Verify dynamic volume provisioning works when storage policy specified "+
 		"in the storageclass is compliant for shared datastores", func() {
 		storagePolicyNameForSharedDatastores := GetAndExpectStringEnvVar(envStoragePolicyNameForSharedDatastores)
@@ -114,9 +115,9 @@ var _ = ginkgo.Describe("Storage Policy Based Volume Provisioning", func() {
 			namespace, scParameters, storagePolicyNameForSharedDatastores)
 	})
 
-	ginkgo.It("[ef-vanilla-block][ef-wcp][csi-block-vanilla][csi-block-vanilla-parallelized][csi-supervisor][csi-guest]"+
-		"[ef-vks][ef-vks-n1][ef-vks-n2] Verify dynamic volume provisioning fails when storage policy specified "+
-		"in the storageclass is compliant for non-shared datastores", func() {
+	ginkgo.It("[ef-f-vanilla-block][ef-wcp][csi-block-vanilla][csi-block-vanilla-parallelized][csi-supervisor]"+
+		"[csi-guest][ef-vks][ef-vks-n1][ef-vks-n2] Verify dynamic volume provisioning fails when storage policy "+
+		"specified in the storageclass is compliant for non-shared datastores", func() {
 		storagePolicyNameForNonSharedDatastores := GetAndExpectStringEnvVar(envStoragePolicyNameForNonSharedDatastores)
 		ginkgo.By(fmt.Sprintf("Invoking test for storage policy: %s", storagePolicyNameForNonSharedDatastores))
 		scParameters := make(map[string]string)
@@ -163,7 +164,8 @@ var _ = ginkgo.Describe("Storage Policy Based Volume Provisioning", func() {
 
 	})
 
-	ginkgo.It("[ef-vanilla-block][csi-block-vanilla][csi-block-vanilla-parallelized] Verify non-existing SPBM policy "+
+	ginkgo.It("[ef-vanilla-block][pq-n1-vanilla-block][pq-n2-vanilla-block][csi-block-vanilla]"+
+		"[csi-block-vanilla-parallelized] Verify non-existing SPBM policy "+
 		"is not honored for dynamic volume provisioning using storageclass", func() {
 		ginkgo.By(fmt.Sprintf("Invoking test for SPBM policy: %s", f.Namespace.Name))
 		scParameters := make(map[string]string)
@@ -181,7 +183,7 @@ var _ = ginkgo.Describe("Storage Policy Based Volume Provisioning", func() {
 		gomega.Expect(isFailureFound).To(gomega.BeTrue(), expectedErrorMsg)
 	})
 
-	ginkgo.It("[ef-stretched-svc][stretched-svc] Provisioning-volume-exceeding-quota", func() {
+	ginkgo.It("[ef-f-stretched-svc][stretched-svc] Provisioning-volume-exceeding-quota", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

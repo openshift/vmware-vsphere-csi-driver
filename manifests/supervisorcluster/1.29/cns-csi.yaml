@@ -46,8 +46,8 @@ rules:
     resources: ["volumeattachments/status"]
     verbs: ["patch"]
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsvolumemetadatas", "cnsfileaccessconfigs"]
-    verbs: ["get", "list", "watch", "update"]
+    resources: ["cnsvolumemetadatas", "cnsfileaccessconfigs", "cnsfileaccessconfigs/status"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["cnsnodevmattachments", "cnsnodevmbatchattachments", "cnsnodevmbatchattachments/status", "cnsnodevmattachments/status"]
     verbs: ["get", "list", "watch", "update", "patch"]
@@ -58,8 +58,8 @@ rules:
     resources: ["cnsfilevolumeclients"]
     verbs: ["get", "list", "update", "create", "delete"]
   - apiGroups: ["cns.vmware.com"]
-    resources: ["cnsregistervolumes", "cnsunregistervolumes", "cnsunregistervolumes/status"]
-    verbs: ["get", "list", "watch", "update", "delete"]
+    resources: ["cnsregistervolumes", "cnsregistervolumes/status", "cnsunregistervolumes", "cnsunregistervolumes/status"]
+    verbs: ["get", "list", "watch", "update", "delete", "patch"]
   - apiGroups: ["cns.vmware.com"]
     resources: ["triggercsifullsyncs"]
     verbs: ["create", "get", "update", "watch", "list"]
@@ -445,6 +445,11 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65533
+          resources:
+            requests:
+              memory: 100Mi
+            limits:
+              memory: 5Gi
           volumeMounts:
             - mountPath: /etc/vmware/wcp
               name: vsphere-config-volume
@@ -485,6 +490,10 @@ spec:
               value: "30"
             - name: VOLUME_HEALTH_INTERVAL_MINUTES
               value: "5"
+            - name: WORKER_THREADS_NODEVM_ATTACH
+              value: "20"
+            - name: WORKER_THREADS_NODEVM_BATCH_ATTACH
+              value: "20"
             - name: POD_POLL_INTERVAL_SECONDS
               value: "2"
             - name: POD_LISTENER_SERVICE_PORT
@@ -506,6 +515,11 @@ spec:
             runAsNonRoot: true
             runAsUser: 65534
             runAsGroup: 65533
+          resources:
+            requests:
+              memory: 100Mi
+            limits:
+              memory: 5Gi
           volumeMounts:
             - mountPath: /etc/vmware/wcp
               name: vsphere-config-volume
@@ -578,7 +592,6 @@ data:
   "cnsmgr-suspend-create-volume": "true"
   "storage-quota-m2": "true"
   "vdpp-on-stretched-supervisor": "true"
-  "cns-unregister-volume": "false"
   "workload-domain-isolation": "false"
   "sv-pvc-snapshot-protection-finalizer": "true"
 kind: ConfigMap
@@ -605,7 +618,7 @@ spec:
       protocol: TCP
   selector:
     app: vsphere-csi-controller
-  type: ClusterIP
+  type: LoadBalancer
 ---
 apiVersion: v1
 kind: Service

@@ -203,7 +203,8 @@ var _ bool = ginkgo.Describe("[domain-isolation-disruptive] Management-Workload-
 	   29. Perform cleanup: delete pods, snapshots, volumes and namespace
 	*/
 
-	ginkgo.It("Workload creation when zone2 host is put in maintenance mode and is marked for removal", func() {
+	ginkgo.It("[pq-wcp-wldi] Workload creation when zone2 host is put in maintenance mode and is marked "+
+		"for removal", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -398,7 +399,7 @@ var _ bool = ginkgo.Describe("[domain-isolation-disruptive] Management-Workload-
 	   30. Perform cleanup: delete pods, snapshots, volumes and namespace
 	*/
 
-	ginkgo.It("Perform psod on Az3 cluster with zones additon and removal", func() {
+	ginkgo.It("[pq-wcp-wldi] Perform psod on Az3 cluster with zones additon and removal", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
@@ -576,7 +577,7 @@ var _ bool = ginkgo.Describe("[domain-isolation-disruptive] Management-Workload-
 	   30. Perform cleanup: delete pods, snapshots, volumes and namespace
 	*/
 
-	ginkgo.It("VC reboot with multiple concurrent operations", func() {
+	ginkgo.It("[pq-wcp-wldi] VC reboot with multiple concurrent operations", func() {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 

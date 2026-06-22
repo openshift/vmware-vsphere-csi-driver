@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -57,6 +58,7 @@ import (
 	ctlrclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	cnsnodevmattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmattachment/v1alpha1"
+	cnsnodevmbatchattachmentv1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsnodevmbatchattachment/v1alpha1"
 )
 
 type subscribedContentLibBasic struct {
@@ -373,9 +375,15 @@ func waitNGetVmiForImageName(ctx context.Context, c ctlrclient.Client, imageName
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			for _, instance := range vmImagesList.Items {
 				if instance.Status.ImageName == imageName {
-					framework.Logf("Found vmi %v for image name %v", instance.Name, imageName)
 					vmi = instance.Name
-					return true, nil
+					if instance.Status.ContentVersion == "" {
+						framework.Logf("Found vmi %v, but waiting for ContentVersion %v", instance.Name,
+							instance.Status.ContentVersion)
+					} else {
+						framework.Logf("Found vmi %v for image name %v", instance.Name, imageName)
+						return true, nil
+					}
+
 				}
 			}
 			return false, nil
@@ -641,6 +649,7 @@ func verifyPvcsAreAttachedToVmsvcVm(ctx context.Context, cnsc ctlrclient.Client,
 
 	attachmentmap := map[string]int{}
 	pvcmap := map[string]int{}
+	var err error
 	if len(vm.Status.Volumes) != len(pvcs) {
 		framework.Logf("Found %d volumes in VM status vs %d pvcs sent to check for attachment",
 			len(vm.Status.Volumes), len(pvcs))
@@ -659,7 +668,13 @@ func verifyPvcsAreAttachedToVmsvcVm(ctx context.Context, cnsc ctlrclient.Client,
 		} else {
 			pvcmap[pvc.Name] = 1
 		}
-		_, err := getCnsNodeVmAttachmentCR(ctx, cnsc, pvc.Namespace, vm.Name, pvc.Name)
+		vcVersion = getVCversion(ctx, vcAddress)
+		isBatchAttachSupported := isVersionGreaterOrEqual(vcVersion, batchAttachSupportedVCVersion)
+		if isBatchAttachSupported {
+			_, err = getCnsNodeVmBatchAttachmentCR(ctx, cnsc, pvc.Namespace, vm.Name, pvc.Name)
+		} else {
+			_, err = getCnsNodeVmAttachmentCR(ctx, cnsc, pvc.Namespace, vm.Name, pvc.Name)
+		}
 		if err != nil {
 			if !apierrors.IsNotFound(err) { // we will return false in attachmentmap check below for this case
 				gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -696,6 +711,17 @@ func getCnsNodeVmAttachmentCR(
 
 	instanceKey := ctlrclient.ObjectKey{Name: vmName + "-" + pvcName, Namespace: namespace}
 	cr := &cnsnodevmattachmentv1alpha1.CnsNodeVmAttachment{}
+	err := cnsc.Get(ctx, instanceKey, cr)
+	return cr, err
+}
+
+// getCnsNodeVmBatchAttachmentCR fetches the requested cnsnodevmattachment CRs
+func getCnsNodeVmBatchAttachmentCR(
+	ctx context.Context, cnsc ctlrclient.Client, namespace string, vmName string, pvcName string) (
+	*cnsnodevmbatchattachmentv1alpha1.CnsNodeVMBatchAttachment, error) {
+
+	instanceKey := ctlrclient.ObjectKey{Name: vmName, Namespace: namespace}
+	cr := &cnsnodevmbatchattachmentv1alpha1.CnsNodeVMBatchAttachment{}
 	err := cnsc.Get(ctx, instanceKey, cr)
 	return cr, err
 }
@@ -925,9 +951,26 @@ func getSshClientForVmThroughGatewayVm(vmIp string) (*ssh.Client, *ssh.Client) {
 	gatewayClient, err := ssh.Dial("tcp", GetAndExpectStringEnvVar(envGatewayVmIp)+":22", gatewayConfig)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
 
-	framework.Logf("VM IP: %s", vmIp)
-	conn, err := gatewayClient.Dial("tcp", vmIp+":22")
-	gomega.Expect(err).NotTo(gomega.HaveOccurred())
+	// Try connecting to the target VM via the gateway up to 3 times
+	var conn net.Conn
+	var maxRetries = 3
+	var retryInterval = 30 * time.Second
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		framework.Logf("Attempt %d: Connecting to VM IP: %s", attempt, vmIp)
+		conn, err = gatewayClient.Dial("tcp", vmIp+":22")
+		if err == nil {
+			framework.Logf("Successfully connected to VM %s on attempt %d", vmIp, attempt)
+			break
+		}
+
+		framework.Logf("Failed to connect to VM %s on attempt %d: %v", vmIp, attempt, err)
+		if attempt < maxRetries {
+			framework.Logf("Retrying in %v...", retryInterval)
+			time.Sleep(retryInterval)
+		}
+	}
+	gomega.Expect(err).NotTo(gomega.HaveOccurred(), "Failed to connect to VM after retries")
 
 	ncc, chans, reqs, err := ssh.NewClientConn(conn, vmIp, vmConfig)
 	gomega.Expect(err).NotTo(gomega.HaveOccurred())
@@ -1298,8 +1341,10 @@ func createVMServiceandWaitForVMtoGetIP(ctx context.Context, vmopC ctlrclient.Cl
 			vm, err = getVmsvcVM(ctx, vmopC, vm.Namespace, vm.Name) // refresh vm info
 			gomega.Expect(err).NotTo(gomega.HaveOccurred())
 			for i, vol := range vm.Status.Volumes {
-				volFolder := formatNVerifyPvcIsAccessible(vol.DiskUuid, i+1, vmIp)
-				verifyDataIntegrityOnVmDisk(vmIp, volFolder)
+				if vol.Name == pvclaimsList[j].Name {
+					volFolder := formatNVerifyPvcIsAccessible(vol.DiskUuid, i+1, vmIp)
+					verifyDataIntegrityOnVmDisk(vmIp, volFolder)
+				}
 			}
 		}
 	}

@@ -24,7 +24,7 @@ import (
 	"testing"
 	"time"
 
-	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha5"
+	vmoperatortypes "github.com/vmware-tanzu/vm-operator/api/v1alpha2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -65,7 +65,7 @@ type controllerTest struct {
 
 func configFromSim() (clientset.Interface, error) {
 	isUnitTest = true
-	supervisorClient := testclient.NewSimpleClientset()
+	supervisorClient := testclient.NewClientset()
 	supervisorNamespace = testNamespace
 	return supervisorClient, nil
 }

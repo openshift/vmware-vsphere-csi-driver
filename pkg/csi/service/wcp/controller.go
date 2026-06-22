@@ -98,10 +98,23 @@ var (
 	vmMoidToHostMoid, volumeIDToVMMap map[string]string
 )
 
+// volumeLock represents a lock for a specific volume with reference counting
+type volumeLock struct {
+	mutex    sync.Mutex
+	refCount int
+}
+
+// snapshotLockManager manages per-volume locks for snapshot operations
+type snapshotLockManager struct {
+	locks    map[string]*volumeLock
+	mapMutex sync.RWMutex
+}
+
 type controller struct {
-	manager     *common.Manager
-	authMgr     common.AuthorizationService
-	topologyMgr commoncotypes.ControllerTopologyService
+	manager         *common.Manager
+	authMgr         common.AuthorizationService
+	topologyMgr     commoncotypes.ControllerTopologyService
+	snapshotLockMgr *snapshotLockManager
 	csi.UnimplementedControllerServer
 }
 
@@ -152,9 +165,9 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		return err
 	}
 
-	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.StoragePolicyReservationSupport) {
+	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WCPMobilityNonDisruptiveImport) {
 		go commonco.ContainerOrchestratorUtility.HandleLateEnablementOfCapability(ctx,
-			cnstypes.CnsClusterFlavorWorkload, common.StoragePolicyReservationSupport, "", "")
+			cnstypes.CnsClusterFlavorWorkload, common.WCPMobilityNonDisruptiveImport, "", "")
 	}
 	isPodVMOnStretchSupervisorFSSEnabled = commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
 		common.PodVMOnStretchedSupervisor)
@@ -172,6 +185,11 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		if err != nil {
 			return logger.LogNewErrorf(log, "failed to start zone informer. Error: %v", err)
 		}
+	}
+	if !commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx,
+		common.SharedDiskFss) {
+		go commonco.ContainerOrchestratorUtility.HandleLateEnablementOfCapability(ctx, cnstypes.CnsClusterFlavorWorkload,
+			common.SharedDiskFss, "", "")
 	}
 	if idempotencyHandlingEnabled {
 		log.Info("CSI Volume manager idempotency handling feature flag is enabled.")
@@ -210,6 +228,12 @@ func (c *controller) Init(config *cnsconfig.Config, version string) error {
 		VcenterManager: cnsvsphere.GetVirtualCenterManager(ctx),
 		CryptoClient:   cryptoClient,
 	}
+
+	// Initialize snapshot lock manager
+	c.snapshotLockMgr = &snapshotLockManager{
+		locks: make(map[string]*volumeLock),
+	}
+	log.Info("Initialized snapshot lock manager for per-volume serialization")
 
 	vc, err := common.GetVCenter(ctx, c.manager)
 	if err != nil {
@@ -445,6 +469,53 @@ func (c *controller) ReloadConfiguration(reconnectToVCFromNewConfig bool) error 
 	}
 	log.Info("Successfully reloaded configuration")
 	return nil
+}
+
+// acquireSnapshotLock acquires a lock for the given volume ID.
+// It creates a new lock if one doesn't exist and increments the reference count.
+// The caller must call releaseSnapshotLock when done.
+func (c *controller) acquireSnapshotLock(ctx context.Context, volumeID string) {
+	log := logger.GetLogger(ctx)
+	c.snapshotLockMgr.mapMutex.Lock()
+	defer c.snapshotLockMgr.mapMutex.Unlock()
+
+	vLock, exists := c.snapshotLockMgr.locks[volumeID]
+	if !exists {
+		vLock = &volumeLock{}
+		c.snapshotLockMgr.locks[volumeID] = vLock
+		log.Debugf("Created new lock for volume %q", volumeID)
+	}
+	vLock.refCount++
+	log.Debugf("Acquired lock for volume %q, refCount: %d", volumeID, vLock.refCount)
+
+	// Unlock the map before acquiring the volume lock to avoid deadlock
+	c.snapshotLockMgr.mapMutex.Unlock()
+	vLock.mutex.Lock()
+	c.snapshotLockMgr.mapMutex.Lock()
+}
+
+// releaseSnapshotLock releases the lock for the given volume ID.
+// It decrements the reference count and removes the lock if count reaches zero.
+func (c *controller) releaseSnapshotLock(ctx context.Context, volumeID string) {
+	log := logger.GetLogger(ctx)
+	c.snapshotLockMgr.mapMutex.Lock()
+	defer c.snapshotLockMgr.mapMutex.Unlock()
+
+	vLock, exists := c.snapshotLockMgr.locks[volumeID]
+	if !exists {
+		log.Warnf("Attempted to release non-existent lock for volume %q", volumeID)
+		return
+	}
+
+	vLock.mutex.Unlock()
+	vLock.refCount--
+	log.Debugf("Released lock for volume %q, refCount: %d", volumeID, vLock.refCount)
+
+	// Clean up the lock if reference count reaches zero
+	if vLock.refCount == 0 {
+		delete(c.snapshotLockMgr.locks, volumeID)
+		log.Debugf("Cleaned up lock for volume %q", volumeID)
+	}
 }
 
 // createBlockVolume creates a block volume based on the CreateVolumeRequest.
@@ -1503,6 +1574,31 @@ func (c *controller) createFileVolume(ctx context.Context, req *csi.CreateVolume
 	attributes := make(map[string]string)
 	attributes[common.AttributeDiskType] = common.DiskTypeFileVolume
 
+	// Return NFSv3 and NFSv4.1 export paths in volume context attributes.
+	// CSI provisioner will add these export paths as PVC annotations.
+	// Make a QueryVolume call to fetch file share export paths.
+	querySelection := cnstypes.CnsQuerySelection{
+		Names: []string{
+			string(cnstypes.QuerySelectionNameTypeBackingObjectDetails),
+		},
+	}
+	volume, err := common.QueryVolumeByID(ctx, c.manager.VolumeManager,
+		volumeInfo.VolumeID.Id, &querySelection)
+	if err != nil {
+		log.Errorf("error while performing QueryVolume on volume %s, error: %+v",
+			volumeInfo.VolumeID.Id, err)
+	}
+	vSANFileBackingDetails := volume.BackingObjectDetails.(*cnstypes.CnsVsanFileShareBackingDetails)
+	for _, kv := range vSANFileBackingDetails.AccessPoints {
+		if kv.Key == common.Nfsv3AccessPointKey {
+			attributes[common.Nfsv3ExportPathAnnotationKey] = kv.Value
+		} else if kv.Key == common.Nfsv4AccessPointKey {
+			attributes[common.Nfsv4ExportPathAnnotationKey] = kv.Value
+		}
+	}
+	log.Debugf("Access point details for volume: %s, namespace: %s are %+v", req.Name,
+		req.Parameters[common.AttributePvcNamespace], attributes)
+
 	resp := &csi.CreateVolumeResponse{
 		Volume: &csi.Volume{
 			VolumeId:      volumeInfo.VolumeID.Id,
@@ -2421,8 +2517,43 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 					"Queried VolumeType: %v", volumeType, cnsVolumeDetailsMap[volumeID].VolumeType)
 		}
 
-		// TODO: We may need to add logic to check the limit of max number of snapshots by using
-		// GlobalMaxSnapshotsPerBlockVolume etc. variables in the future.
+		// Extract namespace from request parameters
+		volumeSnapshotNamespace := req.Parameters[common.VolumeSnapshotNamespaceKey]
+		if volumeSnapshotNamespace == "" {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"volumesnapshot namespace is not set in the request parameters")
+		}
+
+		// Get snapshot limit from namespace ConfigMap
+		snapshotLimit, err := getSnapshotLimitForNamespace(ctx, volumeSnapshotNamespace)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to get snapshot limit for namespace %q: %v", volumeSnapshotNamespace, err)
+		}
+		log.Infof("Snapshot limit for namespace %q is set to %d", volumeSnapshotNamespace, snapshotLimit)
+
+		// Acquire lock for this volume to serialize snapshot operations
+		c.acquireSnapshotLock(ctx, volumeID)
+		defer c.releaseSnapshotLock(ctx, volumeID)
+
+		// Query existing snapshots for this volume
+		snapshotList, _, err := common.QueryVolumeSnapshotsByVolumeID(ctx, c.manager.VolumeManager, volumeID,
+			common.QuerySnapshotLimit)
+		if err != nil {
+			return nil, logger.LogNewErrorCodef(log, codes.Internal,
+				"failed to query snapshots for volume %q: %v", volumeID, err)
+		}
+
+		// Check if the limit is exceeded
+		currentSnapshotCount := len(snapshotList)
+		if currentSnapshotCount >= snapshotLimit {
+			return nil, logger.LogNewErrorCodef(log, codes.FailedPrecondition,
+				"the number of snapshots (%d) on the source volume %s has reached or exceeded "+
+					"the configured maximum (%d) for namespace %s",
+				currentSnapshotCount, volumeID, snapshotLimit, volumeSnapshotNamespace)
+		}
+		log.Infof("Current snapshot count for volume %q is %d, within limit of %d",
+			volumeID, currentSnapshotCount, snapshotLimit)
 
 		// the returned snapshotID below is a combination of CNS VolumeID and CNS SnapshotID concatenated by the "+"
 		// sign. That is, a string of "<UUID>+<UUID>". Because, all other CNS snapshot APIs still require both
@@ -2500,7 +2631,6 @@ func (c *controller) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshot
 			cnsSnapshotInfo.SnapshotLatestOperationCompleteTime, createSnapshotResponse)
 
 		volumeSnapshotName := req.Parameters[common.VolumeSnapshotNameKey]
-		volumeSnapshotNamespace := req.Parameters[common.VolumeSnapshotNamespaceKey]
 		log.Infof("Attempting to annotate volumesnapshot %s/%s with annotation %s:%s",
 			volumeSnapshotNamespace, volumeSnapshotName, common.VolumeSnapshotInfoKey, snapshotID)
 		annotated, err := commonco.ContainerOrchestratorUtility.AnnotateVolumeSnapshot(ctx, volumeSnapshotName,

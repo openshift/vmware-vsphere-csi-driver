@@ -127,16 +127,39 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 
 		if cnsOperator.coCommonInterface.IsFSSEnabled(ctx,
 			common.SharedDiskFss) {
-			// Create CnsNodeVmBatchAttachment CRD
+			// Create CnsNodeVMBatchAttachment CRD
 			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx,
-				cnsoperatorconfig.EmbedCnsNodeVmBatchAttachmentCRFile,
+				cnsoperatorconfig.EmbedCnsNodeVMBatchAttachmentCRFile,
 				cnsoperatorconfig.EmbedCnsNodeVmABatchttachmentCRFileName)
 			if err != nil {
-				crdNameNodeVmBatchAttachment := cnsoperatorv1alpha1.CnsNodeVmBatchAttachmentPlural +
+				crdNameNodeVmBatchAttachment := cnsoperatorv1alpha1.CnsNodeVMBatchAttachmentPlural +
 					"." + cnsoperatorv1alpha1.SchemeGroupVersion.Group
 				log.Errorf("failed to create %q CRD. Err: %+v", crdNameNodeVmBatchAttachment, err)
 				return err
 			}
+
+			err = watcher(ctx, cnsOperator)
+			if err != nil {
+				log.Error("Failed to watch on config file for changes to "+
+					"CnsPVCProtectionCleanupIntervalInMin. Error: %+v", err)
+				return err
+			}
+
+			// Start cleanup routine to remove orphaned PVC finalizers.
+			// This handles cases where CnsNodeVMBatchAttachment CRs are deleted before
+			// removing finalizers from their associated PVCs.
+			log.Info("Starting go routine to cleanup orphaned PVC finalizers from batch attach.")
+			go func() {
+				for {
+					ctx, log = logger.GetNewContextWithLogger()
+					log.Info("Triggering PVC finalizer cleanup routine")
+					cleanupOrphanedBatchAttachPVCs(ctx, *restConfig)
+					log.Info("Completed PVC finalizer cleanup")
+					for i := 1; i <= cnsOperator.configInfo.Cfg.Global.CnsPVCProtectionCleanupIntervalInMin; i++ {
+						time.Sleep(1 * time.Minute)
+					}
+				}
+			}()
 		}
 
 		// Create CnsVolumeMetadata CRD
@@ -162,7 +185,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 		if stretchedSupervisor {
 			log.Info("Observed stretchedSupervisor setup")
 		}
-		if !stretchedSupervisor || (stretchedSupervisor && syncer.IsPodVMOnStretchSupervisorFSSEnabled) {
+		if !stretchedSupervisor || syncer.IsPodVMOnStretchSupervisorFSSEnabled {
 			// Create CnsRegisterVolume CRD from manifest.
 			log.Infof("Creating %q CRD", cnsoperatorv1alpha1.CnsRegisterVolumePlural)
 			err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, cnsoperatorconfig.EmbedCnsRegisterVolumeCRFile,
@@ -194,7 +217,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 				}
 			}()
 
-			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.CnsUnregisterVolume) {
+			if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WCPMobilityNonDisruptiveImport) {
 				// Create CnsUnregisterVolume CRD from manifest.
 				log.Infof("Creating %q CRD", cnsoperatorv1alpha1.CnsUnregisterVolumePlural)
 				err = k8s.CreateCustomResourceDefinitionFromManifest(ctx, cnsoperatorconfig.EmbedCnsUnregisterVolumeCRFile,
@@ -228,7 +251,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 			}
 		}
 
-		if !stretchedSupervisor || (stretchedSupervisor && syncer.IsWorkloadDomainIsolationSupported) {
+		if !stretchedSupervisor || syncer.IsWorkloadDomainIsolationSupported {
 			if cnsOperator.coCommonInterface.IsFSSEnabled(ctx, common.FileVolume) {
 				// Create CnsFileAccessConfig CRD from manifest if file volume feature
 				// is enabled.
@@ -301,7 +324,7 @@ func InitCnsOperator(ctx context.Context, clusterFlavor cnstypes.CnsClusterFlavo
 		return err
 	}
 	if err := vmoperatortypes.AddToScheme(mgr.GetScheme()); err != nil {
-		log.Errorf("failed to set the scheme for vm operator. Err: %+v", err)
+		log.Errorf("failed to set the scheme for vm operator v1alpha5. Err: %+v", err)
 		return err
 	}
 

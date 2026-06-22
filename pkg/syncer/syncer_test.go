@@ -168,7 +168,7 @@ func TestSyncerWorkflows(t *testing.T) {
 	// Create the kubernetes client from config or env.
 	// Here we should use a faked client to avoid test inteference with running
 	// metadata syncer pod in real Kubernetes cluster.
-	k8sclient = testclient.NewSimpleClientset()
+	k8sclient = testclient.NewClientset()
 	metadataSyncer.k8sInformerManager = k8s.NewInformer(ctx, k8sclient, true)
 	metadataSyncer.k8sInformerManager.GetPodLister()
 	metadataSyncer.pvLister = metadataSyncer.k8sInformerManager.GetPVLister()
@@ -1012,6 +1012,15 @@ func runTestCsiFullSync_WorkloadCluster(t *testing.T) {
 	defer func() {
 		commonco.ContainerOrchestratorUtility = originalCO
 	}()
+
+	// Store the original K8sNewclient to restore later
+	origK8sClient := k8sNewClient
+	defer func() {
+		k8sNewClient = origK8sClient
+	}()
+	k8sNewClient = func(ctx context.Context) (clientset.Interface, error) {
+		return k8sclient, nil
+	}
 
 	// Create a WORKLOAD cluster metadataSyncer (note: volumeManagers map is NOT populated)
 	// This simulates the real WORKLOAD cluster setup where only volumeManager is set

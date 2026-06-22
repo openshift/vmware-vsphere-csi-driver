@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/types"
 	clientset "k8s.io/client-go/kubernetes"
 	ctrlruntimeclient "sigs.k8s.io/controller-runtime/pkg/client"
 	cnsregistervolumev1alpha1 "sigs.k8s.io/vsphere-csi-driver/v3/pkg/apis/cnsoperator/cnsregistervolume/v1alpha1"
@@ -83,37 +84,25 @@ func isDatastoreAccessibleToAZClusters(ctx context.Context, vc *vsphere.VirtualC
 	azClustersMap map[string][]string, datastoreURL string) bool {
 	log := logger.GetLogger(ctx)
 	for _, clusterIDs := range azClustersMap {
-		var found bool
 		for _, clusterID := range clusterIDs {
 			sharedDatastores, _, err := vsphere.GetCandidateDatastoresInCluster(ctx, vc, clusterID, false)
 			if err != nil {
 				log.Warnf("Failed to get candidate datastores for cluster: %s with err: %+v", clusterID, err)
 				continue
 			}
-			found = false
 			for _, ds := range sharedDatastores {
 				if ds.Info.Url == datastoreURL {
 					log.Infof("Found datastoreUrl: %s is accessible to cluster: %s", datastoreURL, clusterID)
-					found = true
+					return true
 				}
 			}
-			// If datastoreURL was found in the list of datastores accessible to the
-			// cluster with clusterID, continue checking for the rest of the clusters
-			// in AZ. Otherwise, break and check the next AZ in azClustersMap.
-			if !found {
-				break
-			}
-		}
-		// datastoreURL was found in all the clusters with clusterIDs.
-		if found {
-			return true
 		}
 	}
 	return false
 }
 
 // constructCreateSpecForInstance creates CNS CreateVolume spec.
-func constructCreateSpecForInstance(r *ReconcileCnsRegisterVolume,
+func constructCreateSpecForInstance(ctx context.Context, r *ReconcileCnsRegisterVolume,
 	instance *cnsregistervolumev1alpha1.CnsRegisterVolume,
 	host string, useSupervisorId bool) *cnstypes.CnsVolumeCreateSpec {
 	var volumeName string
@@ -148,11 +137,9 @@ func constructCreateSpecForInstance(r *ReconcileCnsRegisterVolume,
 			BackingDiskUrlPath: instance.Spec.DiskURLPath,
 		}
 	}
-	if instance.Spec.AccessMode == v1.ReadWriteOnce || instance.Spec.AccessMode == "" {
-		createSpec.VolumeType = common.BlockVolumeType
-	} else {
-		createSpec.VolumeType = common.FileVolumeType
-	}
+
+	createSpec.VolumeType = common.BlockVolumeType
+
 	return createSpec
 }
 
@@ -251,7 +238,8 @@ func getK8sStorageClassNameWithImmediateBindingModeForPolicy(ctx context.Context
 
 // getPersistentVolumeSpec to create PV volume spec for the given input params.
 func getPersistentVolumeSpec(volumeName string, volumeID string, capacity int64,
-	accessMode v1.PersistentVolumeAccessMode, scName string, claimRef *v1.ObjectReference) *v1.PersistentVolume {
+	accessMode v1.PersistentVolumeAccessMode, volumeMode v1.PersistentVolumeMode, scName string,
+	claimRef *v1.ObjectReference) *v1.PersistentVolume {
 	capacityInMb := strconv.FormatInt(capacity, 10) + "Mi"
 	pv := &v1.PersistentVolume{
 		TypeMeta: metav1.TypeMeta{},
@@ -279,6 +267,14 @@ func getPersistentVolumeSpec(volumeName string, volumeID string, capacity int64,
 		},
 		Status: v1.PersistentVolumeStatus{},
 	}
+
+	// Set volumeMode if specified or default to Filesystem
+	if volumeMode == "" {
+		// For both RWO and RWX volumes, default volumeMode is Filesystem.
+		volumeMode = v1.PersistentVolumeFilesystem
+	}
+	pv.Spec.VolumeMode = &volumeMode
+
 	annotations := make(map[string]string)
 	annotations["pv.kubernetes.io/provisioned-by"] = cnsoperatortypes.VSphereCSIDriverName
 	pv.Annotations = annotations
@@ -288,7 +284,8 @@ func getPersistentVolumeSpec(volumeName string, volumeID string, capacity int64,
 // getPersistentVolumeClaimSpec return the PersistentVolumeClaim spec with
 // specified storage class.
 func getPersistentVolumeClaimSpec(ctx context.Context, name string, namespace string, capacity int64,
-	storageClassName string, accessMode v1.PersistentVolumeAccessMode, pvName string,
+	storageClassName string, accessMode v1.PersistentVolumeAccessMode, volumeMode v1.PersistentVolumeMode,
+	pvName string,
 	datastoreAccessibleTopology []map[string]string,
 	instance *cnsregistervolumev1alpha1.CnsRegisterVolume) (*v1.PersistentVolumeClaim, error) {
 
@@ -296,9 +293,9 @@ func getPersistentVolumeClaimSpec(ctx context.Context, name string, namespace st
 	capacityInMb := strconv.FormatInt(capacity, 10) + "Mi"
 
 	var (
-		segmentsArray  []string
-		pvcLabels      = make(map[string]string)
-		topoAnnotation = make(map[string]string)
+		segmentsArray []string
+		pvcLabels     = make(map[string]string)
+		annotations   = make(map[string]string)
 	)
 	if datastoreAccessibleTopology != nil {
 		for _, topologyTerm := range datastoreAccessibleTopology {
@@ -309,11 +306,11 @@ func getPersistentVolumeClaimSpec(ctx context.Context, name string, namespace st
 			}
 			segmentsArray = append(segmentsArray, string(jsonSegment))
 		}
-		topoAnnotation[common.AnnVolumeAccessibleTopology] = "[" + strings.Join(segmentsArray, ",") + "]"
+		annotations[common.AnnVolumeAccessibleTopology] = "[" + strings.Join(segmentsArray, ",") + "]"
 	}
 
 	// Check if storage policy reservation related FSS is enabled
-	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.StoragePolicyReservationSupport) {
+	if commonco.ContainerOrchestratorUtility.IsFSSEnabled(ctx, common.WCPMobilityNonDisruptiveImport) {
 		// Check if both labelVirtualMachineName and labelStoragePolicyReservationName are on CnsRegisterVolume CR.
 		// If both are present, add both to PVC
 		if vmName, vmOk := instance.Labels[cnsoperatortypes.LabelVirtualMachineName]; vmOk && vmName != "" {
@@ -329,7 +326,7 @@ func getPersistentVolumeClaimSpec(ctx context.Context, name string, namespace st
 			Name:        name,
 			Namespace:   namespace,
 			Labels:      pvcLabels,
-			Annotations: topoAnnotation,
+			Annotations: annotations,
 		},
 		Spec: v1.PersistentVolumeClaimSpec{
 			AccessModes: []v1.PersistentVolumeAccessMode{
@@ -343,6 +340,14 @@ func getPersistentVolumeClaimSpec(ctx context.Context, name string, namespace st
 			StorageClassName: &storageClassName,
 			VolumeName:       pvName,
 		},
+	}
+
+	if isSharedDiskEnabled {
+		claim.Spec.VolumeMode = &volumeMode
+	}
+
+	if instance.Spec.BackingType != "" {
+		annotations[common.AnnKeyBackingDiskType] = instance.Spec.BackingType
 	}
 	return claim, nil
 }
@@ -386,4 +391,72 @@ func isPVCBound(ctx context.Context, client clientset.Interface, claim *v1.Persi
 	}
 	return false, fmt.Errorf("persistentVolumeClaim %s in namespace %s not in phase %s within %d seconds",
 		pvcName, ns, v1.ClaimBound, timeoutSeconds)
+}
+
+// setBackingDiskAnnotation checks if the backing disk annotation on the PVC matches
+// the backing disk type mentioned on CnsRegisterVolume instance.
+func setBackingDiskAnnotation(ctx context.Context, k8sClient clientset.Interface,
+	instance *cnsregistervolumev1alpha1.CnsRegisterVolume,
+	pvc *v1.PersistentVolumeClaim) (*v1.PersistentVolumeClaim, error) {
+	log := logger.GetLogger(ctx)
+	log.Infof("Checking BackingType for PVC %s.", pvc.Name)
+
+	if instance.Spec.BackingType == "" {
+		log.Infof("BackingType on instance %s is empty.", instance.Name)
+		return pvc, nil
+	}
+
+	if pvc.Annotations == nil {
+		pvc.Annotations = make(map[string]string)
+	}
+
+	backingDiskType, backingDiskAnnExists := pvc.Annotations[common.AnnKeyBackingDiskType]
+	if backingDiskAnnExists {
+		if backingDiskType == instance.Spec.BackingType {
+			log.Infof("BackingType for PVC %s is up to date. Skip updating.", pvc.Name)
+			return pvc, nil
+		}
+	}
+
+	log.Infof("Updating BackingType for PVC %s to %s",
+		pvc.Name, instance.Spec.BackingType)
+
+	currentPvcAnnotations := pvc.Annotations
+
+	patchAnnotations := make(map[string]interface{})
+	for k, v := range currentPvcAnnotations {
+		patchAnnotations[k] = v
+	}
+
+	backingDiskTypeOnSpec := instance.Spec.BackingType
+	patchAnnotations[common.AnnKeyBackingDiskType] = backingDiskTypeOnSpec
+
+	// Build patch structure
+	patch := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": patchAnnotations,
+		},
+	}
+	patchBytes, err := json.Marshal(patch)
+	if err != nil {
+		log.Errorf("failed to marshal with annotations for PVC %s. Err: %s", pvc.Name, err)
+		return pvc, fmt.Errorf("failed to marshal patch: %v", err)
+	}
+
+	log.Infof("Patching PVC %s with updated annotation", pvc.Name)
+
+	// Apply the patch
+	updatedpvc, err := k8sClient.CoreV1().PersistentVolumeClaims(pvc.Namespace).Patch(
+		ctx,
+		pvc.Name,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{},
+	)
+	if err != nil {
+		log.Errorf("failed to patch PVC %s with annotations. Err: %s", pvc.Name, err)
+		return pvc, fmt.Errorf("failed to patch PVC %s: %v", pvc.Name, err)
+	}
+
+	return updatedpvc, nil
 }
