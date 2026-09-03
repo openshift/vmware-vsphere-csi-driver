@@ -27,7 +27,7 @@ require (
 	github.com/vmware-tanzu/vm-operator/external/byok v0.0.0-20250509154507-b93e51fc90fa
 	github.com/vmware/govmomi v0.48.0
 	go.uber.org/zap v1.27.0
-	golang.org/x/crypto v0.47.0
+	golang.org/x/crypto v0.48.0
 	golang.org/x/sync v0.19.0
 	golang.org/x/sys v0.41.0
 	google.golang.org/grpc v1.79.3
@@ -242,3 +242,5 @@ replace (
 )
 
 replace golang.org/x/crypto => github.com/openshift-sustaining/crypto v0.48.0-sec.1
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.50.0-sec.4
