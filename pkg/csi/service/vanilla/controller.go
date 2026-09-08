@@ -876,8 +876,9 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 						IsCSITransactionSupportEnabled: isCSITransactionSupportEnabled,
 					})
 				if err != nil {
-					if cnsvolume.IsNotSupportedFaultType(ctx, faultType) {
-						log.Warnf("NotSupported fault is detected: retrying CreateVolume without VolumeID in spec.")
+					if cnsvolume.IsNotSupportedFaultType(ctx, faultType) ||
+						cnsvolume.IsInvalidArgumentVolumeIdFault(ctx, faultType, err) {
+						log.Warnf("Transaction not supported on host: retrying CreateVolume without VolumeID in spec.")
 						volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
 							common.VanillaCreateBlockVolParamsForMultiVC{
 								Vcenter:              vcenter,
@@ -961,8 +962,9 @@ func (c *controller) createBlockVolumeWithPlacementEngineForMultiVC(ctx context.
 					IsCSITransactionSupportEnabled: isCSITransactionSupportEnabled,
 				})
 			if err != nil {
-				if cnsvolume.IsNotSupportedFaultType(ctx, faultType) {
-					log.Warnf("NotSupported fault is detected: retrying CreateVolume without VolumeID in spec.")
+				if cnsvolume.IsNotSupportedFaultType(ctx, faultType) ||
+					cnsvolume.IsInvalidArgumentVolumeIdFault(ctx, faultType, err) {
+					log.Warnf("Transaction not supported on host: retrying CreateVolume without VolumeID in spec.")
 					volumeInfo, faultType, err = common.CreateBlockVolumeUtilForMultiVC(ctx,
 						common.VanillaCreateBlockVolParamsForMultiVC{
 							Vcenter:              vcenter,
