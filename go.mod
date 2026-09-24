@@ -24,7 +24,7 @@ require (
 	github.com/vmware-tanzu/vm-operator/api v1.8.2
 	github.com/vmware/govmomi v0.36.1
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.32.0
+	golang.org/x/crypto v0.33.0
 	golang.org/x/sync v0.11.0
 	google.golang.org/grpc v1.71.3-sec.1
 	google.golang.org/protobuf v1.36.4
@@ -235,3 +235,5 @@ replace (
 replace google.golang.org/grpc => github.com/openshift-sustaining/grpc-go v1.71.3-sec.1
 
 replace golang.org/x/crypto => github.com/openshift-sustaining/crypto v0.33.0-sec.3
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.35.0-sec.4
