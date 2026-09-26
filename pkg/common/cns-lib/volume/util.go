@@ -626,6 +626,28 @@ func IsNotSupportedFaultType(ctx context.Context, faultType string) bool {
 	return faultType == "vim25:NotSupported"
 }
 
+// IsInvalidArgumentVolumeIdFault returns true if the fault is vim.fault.InvalidArgument
+// on the volumeId parameter. This occurs when vCenter is 9.1+ (enabling CNS transaction
+// support) but ESXi hosts are on 9.0 and don't support the volumeId spec field.
+// See: https://github.com/kubernetes-sigs/vsphere-csi-driver/issues/4236
+func IsInvalidArgumentVolumeIdFault(ctx context.Context, faultType string, err error) bool {
+	log := logger.GetLogger(ctx)
+	if faultType != "vim.fault.InvalidArgument" {
+		return false
+	}
+	if soap.IsSoapFault(err) {
+		soapFault := soap.ToSoapFault(err)
+		if ia, ok := soapFault.VimFault().(types.InvalidArgument); ok {
+			if ia.InvalidProperty == "volumeId" {
+				log.Infof("Detected InvalidArgument fault on volumeId parameter - " +
+					"ESXi host does not support CNS transaction API")
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // IsCnsVolumeAlreadyExistsFault returns true if a given faultType value is vim.fault.CnsVolumeAlreadyExistsFault
 func IsCnsVolumeAlreadyExistsFault(ctx context.Context, faultType string) bool {
 	log := logger.GetLogger(ctx)
