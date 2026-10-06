@@ -1,0 +1,14 @@
+# inherit OpenShift global settings https://github.com/openshift/coderabbit/blob/main/.coderabbit.yaml
+inheritance: true
+
+reviews:
+  collapse_walkthrough: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  suggested_labels: false
+  custom_instructions: |
+    For PRs where the title contains "rebase": only review changes where the diff hunk or commit message contains "UPSTREAM: <carry>:". Skip all other changes without comment.
+knowledge_base:
+  learnings:
+    scope: local
