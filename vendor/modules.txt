@@ -730,7 +730,7 @@ go.uber.org/zap/internal/pool
 go.uber.org/zap/internal/stacktrace
 go.uber.org/zap/zapcore
 go.uber.org/zap/zapgrpc
-# golang.org/x/crypto v0.32.0 => github.com/openshift-sustaining/crypto v0.33.0-sec.3
+# golang.org/x/crypto v0.33.0 => github.com/openshift-sustaining/crypto v0.33.0-sec.3
 ## explicit; go 1.20
 golang.org/x/crypto/blowfish
 golang.org/x/crypto/chacha20
@@ -743,7 +743,7 @@ golang.org/x/crypto/nacl/secretbox
 golang.org/x/crypto/salsa20/salsa
 golang.org/x/crypto/ssh
 golang.org/x/crypto/ssh/internal/bcrypt_pbkdf
-# golang.org/x/net v0.34.0
+# golang.org/x/net v0.34.0 => github.com/openshift-sustaining/net v0.35.0-sec.4
 ## explicit; go 1.18
 golang.org/x/net/bpf
 golang.org/x/net/context
@@ -754,6 +754,7 @@ golang.org/x/net/http/httpguts
 golang.org/x/net/http2
 golang.org/x/net/http2/hpack
 golang.org/x/net/idna
+golang.org/x/net/internal/httpcommon
 golang.org/x/net/internal/socks
 golang.org/x/net/internal/timeseries
 golang.org/x/net/proxy
@@ -2190,3 +2191,4 @@ sigs.k8s.io/yaml
 # sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.15.3
 # google.golang.org/grpc => github.com/openshift-sustaining/grpc-go v1.71.3-sec.1
 # golang.org/x/crypto => github.com/openshift-sustaining/crypto v0.33.0-sec.3
+# golang.org/x/net => github.com/openshift-sustaining/net v0.35.0-sec.4
