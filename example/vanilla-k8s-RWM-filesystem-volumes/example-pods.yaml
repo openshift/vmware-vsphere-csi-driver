@@ -1,0 +1,58 @@
+# Example read-write pod
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-vanilla-file-pod1
+spec:
+  containers:
+    - name: test-container
+      image: gcr.io/google_containers/busybox:1.24
+      command: ["/bin/sh", "-c", "echo 'Hello! This is Pod1' >> /mnt/volume1/index.html && while true ; do sleep 2 ; done"]
+      volumeMounts:
+        - name: test-volume
+          mountPath: /mnt/volume1
+  restartPolicy: Never
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: example-vanilla-file-pvc
+---
+# Example read-write pod using the same PVC as above.
+# example-vanilla-file-pod1 and example-vanilla-file-pod2 share RW privileges to the underlying file share.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-vanilla-file-pod2
+spec:
+  containers:
+    - name: test-container
+      image: gcr.io/google_containers/busybox:1.24
+      command: ["/bin/sh", "-c", "echo 'Hello! This is Pod2' >> /mnt/volume1/index.html && while true ; do sleep 2 ; done"]
+      volumeMounts:
+        - name: test-volume
+          mountPath: /mnt/volume1
+  restartPolicy: Never
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: example-vanilla-file-pvc
+---
+# Example read-only pod using the same PVC as above.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example-vanilla-file-pod3
+spec:
+  containers:
+    - name: test-container
+      image: gcr.io/google_containers/busybox:1.24
+      command: ["/bin/sh", "-c", "while true ; do sleep 2 ; done"]
+      volumeMounts:
+        - name: test-volume
+          mountPath: /mnt/volume1
+  restartPolicy: Never
+  volumes:
+    - name: test-volume
+      persistentVolumeClaim:
+        claimName: example-vanilla-file-pvc
+        readOnly: true # This will make the volume read-only

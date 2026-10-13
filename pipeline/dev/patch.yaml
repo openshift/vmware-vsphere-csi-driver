@@ -1,0 +1,35 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vsphere-csi-controller
+  namespace: vmware-system-csi
+spec:
+  template:
+    spec:
+      containers:
+      - name: vsphere-csi-controller
+        image: ${VSPHERE_CSI_CONTROLLER_IMAGE}
+      - name: vsphere-syncer
+        image: ${VSPHERE_SYNCER_IMAGE}
+---
+
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: vsphere-csi-webhook
+  namespace: vmware-system-csi
+spec:
+  template:
+    spec:
+      containers:
+      - name: vsphere-webhook
+        image: ${VSPHERE_SYNCER_IMAGE}
+---
+apiVersion: v1
+data:
+# Set tkgs-ha to false, else csi-controller and csi-syncer containers do not start.
+  "tkgs-ha": "false"
+kind: ConfigMap
+metadata:
+  name: csi-feature-states
+  namespace: vmware-system-csi

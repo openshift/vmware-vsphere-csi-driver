@@ -1,0 +1,30 @@
+apiVersion: run.tanzu.vmware.com/v1alpha3
+kind: TanzuKubernetesCluster
+metadata:
+  name: test-cluster-e2e-script
+  namespace: test-gc-e2e-demo-ns
+spec:
+  topology:
+    controlPlane:
+      tkr:
+        reference:
+          name: replaceImage # this will be replaced with the actual image name by pipeline
+      replicas: 3
+      vmClass: best-effort-xsmall # vmclass to be used for master(s)
+      storageClass: gc-storage-profile
+    nodePools:
+    - replicas: 2
+      name: np-2
+      vmClass: best-effort-xsmall # vmclass to be used for workers(s)
+      storageClass: gc-storage-profile
+  settings:
+    network:
+      cni:
+        name: antrea
+      services:
+        cidrBlocks:
+        - 198.51.100.0/12
+      pods:
+        cidrBlocks:
+        - 192.0.2.0/16
+      serviceDomain: cluster.local
