@@ -24,7 +24,7 @@ require (
 	github.com/vmware-tanzu/vm-operator/api v1.8.2
 	github.com/vmware/govmomi v0.36.1
 	go.uber.org/zap v1.26.0
-	golang.org/x/crypto v0.40.0
+	golang.org/x/crypto v0.52.0
 	golang.org/x/sync v0.16.0
 	google.golang.org/grpc v1.75.1-sec.1
 	google.golang.org/protobuf v1.36.6
